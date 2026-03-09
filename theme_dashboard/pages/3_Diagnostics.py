@@ -4,13 +4,16 @@ import streamlit as st
 
 from src.config import (
     DEFAULT_PROVIDER,
-    FINNHUB_API_KEY_ENV,
+    MASSIVE_API_KEY_ENV,
+    LIVE_HISTORICAL_SOURCE,
+    LIVE_QUOTE_PROFILE_SOURCE,
     REFRESH_STALE_TIMEOUT_MINUTES,
     STALE_DATA_HOURS,
-    finnhub_api_key,
+    massive_api_key,
 )
 from src.database import get_conn, init_db
 from src.fetch_data import mark_stale_running_runs
+from src.provider_live import LiveProvider
 from src.queries import last_refresh_run, refresh_history, row_counts, snapshot_counts
 from src.theme_service import seed_if_needed
 
@@ -27,8 +30,12 @@ with get_conn() as conn:
     snaps = snapshot_counts(conn)
 
 st.write(f"Default provider setting: `{DEFAULT_PROVIDER}`")
-key_present = bool(finnhub_api_key())
-st.write(f"Finnhub live configured: `{key_present}` (env: `{FINNHUB_API_KEY_ENV}`)")
+key_present = bool(massive_api_key())
+st.write(f"Massive live configured: `{key_present}` (env: `{MASSIVE_API_KEY_ENV}`)")
+live_provider = LiveProvider()
+st.write(f"Live quote/profile source: `{LIVE_QUOTE_PROFILE_SOURCE}`")
+st.write(f"Live historical price source: `{LIVE_HISTORICAL_SOURCE}`")
+st.write(f"Historical source available: `{live_provider.historical_source_available}`")
 st.write(f"Stale running timeout: `{REFRESH_STALE_TIMEOUT_MINUTES}` minutes")
 if stale_marked:
     st.warning(f"Marked {stale_marked} stale running run(s) as failed during this page load.")

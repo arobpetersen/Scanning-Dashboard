@@ -192,7 +192,7 @@ def run_refresh(
 
             if provider.name == "live" and consecutive_rate_limit_failures >= LIVE_RATE_LIMIT_STOP_THRESHOLD:
                 early_stop_reason = (
-                    f"Stopped early due to repeated Finnhub rate-limit failures ({LIVE_RATE_LIMIT_STOP_THRESHOLD} consecutive tickers). "
+                    f"Stopped early due to repeated Massive rate-limit failures ({LIVE_RATE_LIMIT_STOP_THRESHOLD} consecutive tickers). "
                     "Use a smaller live scope and retry later."
                 )
                 break

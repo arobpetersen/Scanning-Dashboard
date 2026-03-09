@@ -9,7 +9,9 @@ DEFAULT_PROVIDER = "mock"
 STALE_DATA_HOURS = 24
 REFRESH_STALE_TIMEOUT_MINUTES = 30
 LIVE_RATE_LIMIT_STOP_THRESHOLD = 5
-FINNHUB_API_KEY_ENV = "FINNHUB_API_KEY"
+MASSIVE_API_KEY_ENV = "MASSIVE_API_KEY"
+LIVE_QUOTE_PROFILE_SOURCE = "massive"
+LIVE_HISTORICAL_SOURCE = "massive"
 
 COMPOSITE_WEIGHTS = {
     "perf_1w": 0.25,
@@ -18,6 +20,6 @@ COMPOSITE_WEIGHTS = {
 }
 
 
-def finnhub_api_key() -> str | None:
-    value = os.getenv(FINNHUB_API_KEY_ENV, "").strip()
+def massive_api_key() -> str | None:
+    value = os.getenv(MASSIVE_API_KEY_ENV, "").strip()
     return value or None

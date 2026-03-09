@@ -1,40 +1,57 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 
 import pandas as pd
 import requests
 
-from .config import finnhub_api_key
+from .config import LIVE_HISTORICAL_SOURCE, LIVE_QUOTE_PROFILE_SOURCE, massive_api_key
 from .provider_base import ProviderBase
 
 
 class LiveProvider(ProviderBase):
+    """Massive (Polygon) proof-of-concept live provider.
+
+    In this version both historical prices and reference/profile are sourced from Massive.
+    """
+
     name = "live"
-    base_url = "https://finnhub.io/api/v1"
+    base_url = "https://api.polygon.io"
 
     def __init__(self, api_key: str | None = None, timeout_s: int = 20):
-        self.api_key = api_key or finnhub_api_key()
+        self.api_key = api_key or massive_api_key()
         self.timeout_s = timeout_s
         self.session = requests.Session()
-        self._profile_cache: dict[str, dict] = {}
+        self._ref_cache: dict[str, dict] = {}
 
     @property
     def is_configured(self) -> bool:
         return bool(self.api_key)
 
+    @property
+    def quote_profile_source(self) -> str:
+        return LIVE_QUOTE_PROFILE_SOURCE
+
+    @property
+    def historical_source(self) -> str:
+        return LIVE_HISTORICAL_SOURCE
+
+    @property
+    def historical_source_available(self) -> bool:
+        return True
+
     def _get(self, path: str, **params) -> dict:
         if not self.api_key:
-            raise RuntimeError("Finnhub API key not configured")
+            raise RuntimeError("CONFIG: Massive API key not configured")
 
-        if "from_" in params:
-            params["from"] = params.pop("from_")
-        params["token"] = self.api_key
-
+        params["apiKey"] = self.api_key
         response = self.session.get(f"{self.base_url}{path}", params=params, timeout=self.timeout_s)
+
         if response.status_code == 429:
-            raise RuntimeError("RATE_LIMIT: Finnhub returned HTTP 429")
+            raise RuntimeError("RATE_LIMIT: Massive returned HTTP 429")
+        if response.status_code == 403:
+            raise RuntimeError("AUTH: Massive returned HTTP 403 (check plan/permissions or API key)")
         response.raise_for_status()
 
         payload = response.json()
@@ -64,6 +81,42 @@ class LiveProvider(ProviderBase):
             return None
         return float(sum(sample) / len(sample))
 
+    def _fetch_history(self, ticker: str) -> tuple[list[float], list[float], datetime]:
+        end_date = date.today()
+        start_date = end_date - timedelta(days=365)
+        payload = self._get(
+            f"/v2/aggs/ticker/{ticker}/range/1/day/{start_date.isoformat()}/{end_date.isoformat()}",
+            adjusted="true",
+            sort="asc",
+            limit=5000,
+        )
+
+        results = payload.get("results") or []
+        if not results:
+            raise RuntimeError("NO_CANDLES: Massive returned no daily aggregates")
+
+        closes = [float(r["c"]) for r in results if r.get("c") is not None]
+        volumes = [float(r["v"]) for r in results if r.get("v") is not None]
+        if not closes:
+            raise RuntimeError("NO_CANDLES: Massive aggregate closes missing")
+
+        ts_ms = results[-1].get("t")
+        if ts_ms is None:
+            last_updated = datetime.now(timezone.utc)
+        else:
+            last_updated = datetime.fromtimestamp(float(ts_ms) / 1000.0, tz=timezone.utc)
+
+        return closes, volumes, last_updated
+
+    def _fetch_reference(self, ticker: str) -> dict:
+        cached = self._ref_cache.get(ticker)
+        if cached is not None:
+            return cached
+        payload = self._get(f"/v3/reference/tickers/{ticker}")
+        result = payload.get("results") or {}
+        self._ref_cache[ticker] = result
+        return result
+
     def fetch_ticker_data(self, tickers: Iterable[str]) -> tuple[pd.DataFrame, list[dict]]:
         rows: list[dict] = []
         failures: list[dict] = []
@@ -76,47 +129,31 @@ class LiveProvider(ProviderBase):
             return pd.DataFrame(), [
                 {
                     "ticker": t,
-                    "error_message": "CONFIG: Finnhub API key missing. Set FINNHUB_API_KEY environment variable.",
+                    "error_message": "CONFIG: Massive API key missing. Set MASSIVE_API_KEY environment variable.",
                 }
                 for t in normalized
             ]
 
-        now = datetime.now(timezone.utc)
-        to_ts = int(now.timestamp())
-        from_ts = to_ts - 240 * 24 * 60 * 60
-
         for ticker in normalized:
             try:
-                quote = self._get("/quote", symbol=ticker)
-                candles = self._get("/stock/candle", symbol=ticker, resolution="D", from_=from_ts, to=to_ts)
-                profile = self._profile_cache.get(ticker)
-                if profile is None:
-                    profile = self._get("/stock/profile2", symbol=ticker)
-                    self._profile_cache[ticker] = profile
-
-                if candles.get("s") != "ok":
-                    raise RuntimeError(f"NO_CANDLES: Finnhub candle status={candles.get('s')}")
-
-                closes = candles.get("c", []) or []
-                volumes = candles.get("v", []) or []
-                if not closes:
-                    raise RuntimeError("NO_CANDLES: No historical close data returned by Finnhub")
-
+                closes, volumes, last_updated = self._fetch_history(ticker)
                 perf_1w = self._calc_return(closes, 5)
                 perf_1m = self._calc_return(closes, 21)
                 perf_3m = self._calc_return(closes, 63)
+                price = closes[-1]
 
-                price = quote.get("c")
-                if price in (None, 0):
-                    price = closes[-1]
-
-                market_cap_m = profile.get("marketCapitalization")
-                market_cap = float(market_cap_m) * 1_000_000 if market_cap_m is not None else None
+                market_cap = None
+                try:
+                    ref = self._fetch_reference(ticker)
+                    market_cap_value = ref.get("market_cap")
+                    market_cap = float(market_cap_value) if market_cap_value is not None else None
+                except Exception:
+                    market_cap = None
 
                 rows.append(
                     {
                         "ticker": ticker,
-                        "price": float(price) if price is not None else None,
+                        "price": float(price),
                         "perf_1w": perf_1w,
                         "perf_1m": perf_1m,
                         "perf_3m": perf_3m,
@@ -125,17 +162,19 @@ class LiveProvider(ProviderBase):
                         "short_interest_pct": None,
                         "float_shares": None,
                         "adr_pct": None,
-                        "last_updated": now,
+                        "last_updated": last_updated,
                     }
                 )
             except Exception as exc:
                 msg = str(exc)
                 if "RATE_LIMIT" in msg or "429" in msg:
                     msg = f"RATE_LIMIT: {msg}"
+                elif "AUTH:" in msg or "403" in msg:
+                    msg = f"AUTH: {msg}"
                 elif "NO_CANDLES" in msg:
                     msg = f"NO_CANDLES: {msg}"
                 else:
                     msg = f"REQUEST_ERROR: {msg}"
-                failures.append({"ticker": ticker, "error_message": f"Finnhub fetch failed: {msg}"})
+                failures.append({"ticker": ticker, "error_message": f"Massive fetch failed: {msg}"})
 
         return pd.DataFrame(rows), failures

@@ -1,6 +1,6 @@
 import streamlit as st
 
-from src.config import DEFAULT_PROVIDER, FINNHUB_API_KEY_ENV, finnhub_api_key
+from src.config import DEFAULT_PROVIDER, MASSIVE_API_KEY_ENV, massive_api_key
 from src.database import get_conn, init_db
 from src.fetch_data import RefreshBlockedError, run_refresh
 from src.queries import last_refresh_run
@@ -48,10 +48,10 @@ with get_conn() as conn:
     else:
         resolved_tickers = sorted(set(selected_tickers or []))
 
-live_key_present = bool(finnhub_api_key())
+live_key_present = bool(massive_api_key())
 if provider_name == "live" and not live_key_present:
     st.warning(
-        f"Live provider selected but {FINNHUB_API_KEY_ENV} is not set. Refresh will gracefully fall back to mock data."
+        f"Live provider selected but {MASSIVE_API_KEY_ENV} is not set. Refresh will gracefully fall back to mock data."
     )
 
 scope_type = {

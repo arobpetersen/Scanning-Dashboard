@@ -5,7 +5,7 @@ A local-first Streamlit app for **objective, formula-based theme ranking** and t
 ## What this app does
 - Imports themes from `themes_seed_structured.json` on first run only.
 - Stores and manages themes in local DuckDB afterward (DuckDB is source of truth).
-- Refreshes ticker snapshots from a provider (`mock` and `live` via Finnhub).
+- Refreshes ticker snapshots from a provider (`mock` and `live` via Massive).
 - Calculates deterministic rankings from numeric ticker metrics only.
 - Stores historical ticker snapshots and historical theme snapshots on every successful/partial refresh.
 - Shows trend deltas between latest and prior theme snapshots.
@@ -51,18 +51,18 @@ streamlit run app.py
 
 Open the URL Streamlit prints (normally `http://localhost:8501`).
 
-## Finnhub live provider setup
+## Massive live provider setup
 
-1. Create a Finnhub API key at https://finnhub.io/.
+1. Create a Massive API key at https://massive.com/ (Polygon API).
 2. Export it in your shell before launching Streamlit:
 
 ```bash
-export FINNHUB_API_KEY="your_api_key_here"
+export MASSIVE_API_KEY="your_api_key_here"
 ```
 
 3. In app sidebar, choose `live` provider.
 
-If `FINNHUB_API_KEY` is not set and you choose `live`, the app shows a warning and gracefully falls back to `mock` for refresh so the app remains usable.
+If `MASSIVE_API_KEY` is not set and you choose `live`, the app shows a warning and gracefully falls back to `mock` for refresh so the app remains usable.
 
 > Keep secrets local: do **not** hardcode API keys in source files and do **not** commit `.env` or shell files containing secrets.
 
@@ -92,13 +92,11 @@ If `FINNHUB_API_KEY` is not set and you choose `live`, the app shows a warning a
   - `delta_positive_1m_breadth_pct`
   - `delta_composite_score`
 
-## Live field mapping (Finnhub)
-- Direct from Finnhub (when available):
-  - `ticker`
-  - `price` (quote endpoint)
-  - `market_cap` (profile endpoint, converted from millions to raw value)
-  - `last_updated` (refresh timestamp)
-- Calculated deterministically from Finnhub daily candle closes:
+## Live data architecture
+- Live mode now uses **Massive (Polygon)** as the historical price source for return calculations and proof-of-concept quote/reference fields.
+- Why this change: Finnhub `/stock/candle` returned `403 Forbidden` in this setup, so return calculations were refactored to use Massive daily aggregates.
+- Massive setup is optimized for **small scoped refreshes** (selected theme or short custom ticker list), especially for free-tier testing.
+- Deterministic return formulas remain unchanged and are computed from daily closes:
   - `perf_1w = ((close_latest - close_5_trading_days_ago) / close_5_trading_days_ago) * 100`
   - `perf_1m = ((close_latest - close_21_trading_days_ago) / close_21_trading_days_ago) * 100`
   - `perf_3m = ((close_latest - close_63_trading_days_ago) / close_63_trading_days_ago) * 100`
@@ -106,11 +104,12 @@ If `FINNHUB_API_KEY` is not set and you choose `live`, the app shows a warning a
   - `short_interest_pct`
   - `float_shares`
   - `adr_pct`
-- `avg_volume` is computed as simple mean of recent daily volumes (last 21 daily bars) from Finnhub candles.
+  - `market_cap` (if Massive reference data is unavailable for a ticker)
+- `avg_volume` is computed as simple mean of recent daily volumes (last 21 daily bars) from Massive aggregates.
 
 ## Providers
 - `mock`: deterministic sample data for all tickers so the app is usable immediately.
-- `live`: Finnhub-backed provider in `src/provider_live.py`.
+- `live`: Massive-backed provider in `src/provider_live.py`.
 
 ## Ranking formulas (auditable)
 - `avg_1w = mean(perf_1w)`
