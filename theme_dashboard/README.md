@@ -165,6 +165,10 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
 - Queue shows a computed `validation_status` indicator (`valid`, `stale`, `duplicate_pending`) to highlight actionability.
 - Suggestions page now uses database-backed selectors for existing membership actions (remove/move ticker) and shows current theme members to reduce manual-entry errors during creation.
 - Applied suggestions update the same DuckDB theme source-of-truth tables used by Theme Manager and refresh runs.
+- Queue cleanup tools are available on the Suggestions page and operate on the **currently filtered queue**.
+- Primary cleanup action is bulk mark-as-`obsolete` (audit-preserving, no hard delete by default).
+- Optional bulk reject is also available for filtered pending/approved items.
+- Cleanup writes reviewer notes and timestamps so legacy/noisy suggestions can be retired without losing history.
 
 
 ## Deterministic rules engine
@@ -176,9 +180,11 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
   - `low_constituent_count_review` (`medium`): flags non-empty themes under the configurable member threshold (`RULE_LOW_CONSTITUENT_THRESHOLD`).
   - `empty_theme_review` (`high`): flags themes with zero members.
   - `inactive_theme_cleanup_review` (`medium`): flags inactive themes that still contain members.
-  - `repeated_live_failure_review` (`high`): optionally flags tickers with repeated live-refresh failures over a configurable lookback window.
+  - `repeated_live_failure_review` (`high`): flags tickers only when repeated **ticker-specific** live failures are dominant/actionable (`ticker_data_missing`, `ticker_symbol_issue`, `no_candles`). Provider-wide failures are suppressed from ticker proposal generation.
 - Overlap across themes is generally acceptable in this taxonomy, so duplicate-membership overlap is **not** treated as a default problem and no longer generates suggestions by default.
 - Rule runs show concise output by rule (`severity`, `evaluated`, `created`, `duplicates_skipped`, per-rule cap), and proposals remain auditable in queue history.
+- Live failures are categorized into: `provider_limit`, `provider_auth`, `provider_outage`, `ticker_data_missing`, `ticker_symbol_issue`, `no_candles`, `unknown`.
+- Provider-level failure patterns remain visible in Diagnostics and in rules-run provider signal summaries, but do not flood ticker-level review suggestions.
 - Noise guardrails are configurable in `src/config.py` (including `RULE_MAX_SUGGESTIONS_PER_RULE`).
 
 ## Theme Health / Maintenance view

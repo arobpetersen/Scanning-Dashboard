@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+import pandas as pd
+
 from .config import (
     RULE_LIVE_FAILURE_MIN_COUNT,
     RULE_LIVE_FAILURE_WINDOW_DAYS,
     RULE_LOW_CONSTITUENT_THRESHOLD,
     RULE_MAX_SUGGESTIONS_PER_RULE,
 )
+from .failure_classification import categorize_failure_message
 from .suggestions_service import SuggestionPayload, create_suggestion
 
 
@@ -17,6 +20,8 @@ RULE_SEVERITY = {
     "inactive_theme_cleanup_review": "medium",
     "repeated_live_failure_review": "high",
 }
+PROVIDER_LEVEL_FAILURE_CATEGORIES = {"provider_limit", "provider_auth", "provider_outage"}
+TICKER_ACTIONABLE_FAILURE_CATEGORIES = {"ticker_data_missing", "ticker_symbol_issue", "no_candles"}
 
 
 def _try_create(conn, payload: SuggestionPayload, stats: dict, rule_name: str) -> None:
@@ -42,6 +47,60 @@ def _cap(df, limit: int):
     return df.head(limit)
 
 
+def _ticker_repeated_live_failure_candidates(conn, window_days: int, min_count: int) -> tuple[pd.DataFrame, dict]:
+    failures = conn.execute(
+        """
+        SELECT f.ticker, f.error_message
+        FROM refresh_failures f
+        JOIN refresh_runs r ON r.run_id = f.run_id
+        WHERE r.provider = 'live'
+          AND f.ticker IS NOT NULL
+          AND f.created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+        """,
+        [window_days],
+    ).df()
+
+    if failures.empty:
+        return failures, {"provider_level_failures": 0, "ticker_actionable_failures": 0, "suppressed_tickers": 0}
+
+    failures = failures.copy()
+    failures["failure_category"] = failures["error_message"].apply(categorize_failure_message)
+
+    provider_level = int(failures[failures["failure_category"].isin(PROVIDER_LEVEL_FAILURE_CATEGORIES)].shape[0])
+    ticker_actionable = int(failures[failures["failure_category"].isin(TICKER_ACTIONABLE_FAILURE_CATEGORIES)].shape[0])
+
+    grouped = (
+        failures.groupby("ticker")
+        .agg(
+            total_failures=("failure_category", "size"),
+            actionable_failures=("failure_category", lambda s: int(s.isin(TICKER_ACTIONABLE_FAILURE_CATEGORIES).sum())),
+            provider_failures=("failure_category", lambda s: int(s.isin(PROVIDER_LEVEL_FAILURE_CATEGORIES).sum())),
+            actionable_categories=("failure_category", lambda s: ", ".join(sorted(set(c for c in s if c in TICKER_ACTIONABLE_FAILURE_CATEGORIES)))),
+            all_categories=("failure_category", lambda s: ", ".join(sorted(set(s)))),
+        )
+        .reset_index()
+    )
+    grouped["actionable_share"] = grouped["actionable_failures"] / grouped["total_failures"].clip(lower=1)
+
+    candidates = grouped[
+        (grouped["actionable_failures"] >= min_count)
+        & (grouped["actionable_share"] >= 0.6)
+    ].sort_values(["actionable_failures", "actionable_share", "ticker"], ascending=[False, False, True])
+
+    suppressed_tickers = int(
+        grouped[
+            (grouped["total_failures"] >= min_count)
+            & (~grouped["ticker"].isin(candidates["ticker"]))
+            & (grouped["provider_failures"] >= grouped["actionable_failures"])
+        ].shape[0]
+    )
+    return candidates, {
+        "provider_level_failures": provider_level,
+        "ticker_actionable_failures": ticker_actionable,
+        "suppressed_tickers": suppressed_tickers,
+    }
+
+
 def run_rules_engine(
     conn,
     low_constituent_threshold: int = RULE_LOW_CONSTITUENT_THRESHOLD,
@@ -58,9 +117,9 @@ def run_rules_engine(
         "by_rule_evaluated": defaultdict(int),
         "by_rule_created": defaultdict(int),
         "by_rule_duplicates": defaultdict(int),
+        "provider_failure_signal": {},
     }
 
-    # A) low_constituent_count_review: non-empty but thin themes
     thin = conn.execute(
         """
         SELECT t.id, t.name, COUNT(m.ticker) AS ticker_count
@@ -86,7 +145,6 @@ def run_rules_engine(
             "low_constituent_count_review",
         )
 
-    # B) empty_theme_review
     empty_themes = conn.execute(
         """
         SELECT t.id, t.name
@@ -111,7 +169,6 @@ def run_rules_engine(
             "empty_theme_review",
         )
 
-    # C) inactive_theme_cleanup_review
     inactive_with_members = conn.execute(
         """
         SELECT t.id, t.name, COUNT(m.ticker) AS ticker_count
@@ -136,21 +193,13 @@ def run_rules_engine(
             "inactive_theme_cleanup_review",
         )
 
-    # D) repeated_live_failure_review (if live failure data exists)
-    repeated_failures = conn.execute(
-        """
-        SELECT f.ticker, COUNT(*) AS fail_count, MAX(f.created_at) AS last_failure_at
-        FROM refresh_failures f
-        JOIN refresh_runs r ON r.run_id = f.run_id
-        WHERE r.provider = 'live'
-          AND f.ticker IS NOT NULL
-          AND f.created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
-        GROUP BY f.ticker
-        HAVING COUNT(*) >= ?
-        ORDER BY fail_count DESC, f.ticker
-        """,
-        [live_failure_window_days, live_failure_min_count],
-    ).df()
+    repeated_failures, provider_signal = _ticker_repeated_live_failure_candidates(
+        conn,
+        window_days=live_failure_window_days,
+        min_count=live_failure_min_count,
+    )
+    stats["provider_failure_signal"] = provider_signal
+
     for _, r in _cap(repeated_failures, max_suggestions_per_rule).iterrows():
         _try_create(
             conn,
@@ -159,8 +208,9 @@ def run_rules_engine(
                 source="rules_engine",
                 priority=RULE_SEVERITY["repeated_live_failure_review"],
                 rationale=(
-                    f"Rule repeated_live_failure_review: ticker {str(r['ticker'])} failed live refresh "
-                    f"{int(r['fail_count'])} times in the last {live_failure_window_days} days."
+                    f"Rule repeated_live_failure_review: ticker {str(r['ticker'])} had {int(r['actionable_failures'])} "
+                    f"ticker-specific live failures in the last {live_failure_window_days} days "
+                    f"({r['actionable_categories']}; total failures={int(r['total_failures'])}, provider-related={int(r['provider_failures'])})."
                 ),
                 proposed_ticker=str(r["ticker"]),
             ),

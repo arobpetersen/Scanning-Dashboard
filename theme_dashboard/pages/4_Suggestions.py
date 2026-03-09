@@ -5,6 +5,8 @@ from src.rules_engine import run_rules_engine
 from src.suggestions_service import (
     SuggestionPayload,
     apply_suggestion,
+    bulk_update_filtered_status,
+    count_filtered_suggestions,
     create_suggestion,
     list_suggestions,
     recent_applied_suggestions,
@@ -32,6 +34,14 @@ if st.button("Run deterministic rules engine"):
     )
     if summary["rule_results"]:
         st.dataframe(summary["rule_results"], width="stretch", hide_index=True)
+    signal = summary.get("provider_failure_signal") or {}
+    if signal:
+        st.caption(
+            "Live failure signal: "
+            f"provider_level_failures={signal.get('provider_level_failures', 0)}, "
+            f"ticker_actionable_failures={signal.get('ticker_actionable_failures', 0)}, "
+            f"suppressed_tickers={signal.get('suppressed_tickers', 0)}"
+        )
     if summary["errors"]:
         st.warning("Some rule outputs were skipped:")
         st.code("\n".join(summary["errors"]))
@@ -123,7 +133,7 @@ if st.button("Create suggestion"):
 st.subheader("Queue Filters")
 fc1, fc2, fc3, fc4 = st.columns(4)
 with fc1:
-    status_filter = st.selectbox("Status", ["all", "pending", "approved", "rejected", "applied"], index=0)
+    status_filter = st.selectbox("Status", ["all", "pending", "approved", "rejected", "applied", "obsolete"], index=0)
 with fc2:
     type_filter = st.selectbox(
         "Type",
@@ -149,11 +159,63 @@ with get_conn() as conn:
     recent_applied = recent_applied_suggestions(conn, limit=10)
 
 cmap = {row["status"]: int(row["cnt"]) for _, row in counts.iterrows()}
-mc1, mc2, mc3, mc4 = st.columns(4)
+mc1, mc2, mc3, mc4, mc5 = st.columns(5)
 mc1.metric("Pending", cmap.get("pending", 0))
 mc2.metric("Approved", cmap.get("approved", 0))
 mc3.metric("Rejected", cmap.get("rejected", 0))
 mc4.metric("Applied", cmap.get("applied", 0))
+mc5.metric("Obsolete", cmap.get("obsolete", 0))
+
+st.subheader("Queue Management (Filtered)")
+with get_conn() as conn:
+    cleanup_count = count_filtered_suggestions(
+        conn,
+        status_filter,
+        type_filter,
+        source_filter,
+        search_filter,
+        statuses_subset=["pending", "approved", "rejected"],
+    )
+st.caption(f"Bulk actions apply to current filters and will affect **{cleanup_count}** suggestions (pending/approved/rejected only).")
+cleanup_notes = st.text_input("Bulk action notes", value="Marked obsolete via filtered queue cleanup")
+confirm_cleanup = st.checkbox("I confirm this bulk action should run on the filtered queue")
+qc1, qc2 = st.columns(2)
+with qc1:
+    if st.button("Mark filtered as obsolete", type="secondary"):
+        if not confirm_cleanup:
+            st.warning("Please confirm bulk action before proceeding.")
+        else:
+            with get_conn() as conn:
+                changed = bulk_update_filtered_status(
+                    conn,
+                    new_status="obsolete",
+                    reviewer_notes=cleanup_notes,
+                    status=status_filter,
+                    suggestion_type=type_filter,
+                    source=source_filter,
+                    search_text=search_filter,
+                    allowed_current_statuses=["pending", "approved", "rejected"],
+                )
+            st.success(f"Marked {changed} suggestion(s) as obsolete.")
+            st.rerun()
+with qc2:
+    if st.button("Bulk reject filtered"):
+        if not confirm_cleanup:
+            st.warning("Please confirm bulk action before proceeding.")
+        else:
+            with get_conn() as conn:
+                changed = bulk_update_filtered_status(
+                    conn,
+                    new_status="rejected",
+                    reviewer_notes=cleanup_notes,
+                    status=status_filter,
+                    suggestion_type=type_filter,
+                    source=source_filter,
+                    search_text=search_filter,
+                    allowed_current_statuses=["pending", "approved"],
+                )
+            st.success(f"Rejected {changed} suggestion(s).")
+            st.rerun()
 
 st.subheader("Suggestions")
 if queue.empty:

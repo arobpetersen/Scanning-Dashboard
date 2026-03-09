@@ -12,6 +12,7 @@ from src.config import (
     massive_api_key,
 )
 from src.database import get_conn, init_db
+from src.failure_classification import categorize_failure_message
 from src.fetch_data import mark_stale_running_runs
 from src.provider_live import LiveProvider
 from src.queries import last_refresh_run, refresh_history, row_counts, snapshot_counts
@@ -125,25 +126,6 @@ else:
             [run_id],
         ).df()
 
-        top_error_reasons = conn.execute(
-            """
-            SELECT
-              CASE
-                WHEN lower(error_message) LIKE '%rate_limit%' OR lower(error_message) LIKE '%429%' THEN 'rate_limit'
-                WHEN lower(error_message) LIKE '%no_candles%' THEN 'no_candles'
-                WHEN lower(error_message) LIKE '%config%' THEN 'config'
-                WHEN lower(error_message) LIKE '%request_error%' THEN 'request_error'
-                ELSE 'other'
-              END AS error_category,
-              COUNT(*) AS cnt
-            FROM refresh_failures
-            WHERE run_id = ?
-            GROUP BY 1
-            ORDER BY cnt DESC
-            """,
-            [run_id],
-        ).df()
-
         live_failure_sample = conn.execute(
             """
             SELECT r.run_id, f.ticker, f.error_message, f.created_at
@@ -155,14 +137,29 @@ else:
             """
         ).df()
 
+
+    top_error_reasons = (
+        recent_failures.assign(error_category=recent_failures["error_message"].apply(categorize_failure_message))
+        .groupby("error_category", as_index=False)
+        .size()
+        .rename(columns={"size": "cnt"})
+        .sort_values("cnt", ascending=False)
+    ) if not recent_failures.empty else recent_failures
+
+    provider_level_cats = {"provider_limit", "provider_auth", "provider_outage"}
+    provider_issue_count = (
+        int(top_error_reasons[top_error_reasons["error_category"].isin(provider_level_cats)]["cnt"].sum())
+        if not top_error_reasons.empty
+        else 0
+    )
     if recent_failures.empty:
         st.success("No failures in latest run.")
     else:
         if not top_error_reasons.empty:
             st.write("**Most common failure categories (latest run)**")
             st.dataframe(top_error_reasons, width="stretch")
-            if top_error_reasons.iloc[0]["error_category"] == "rate_limit":
-                st.warning("Rate limiting appears to be the primary failure mode in the latest run.")
+            if provider_issue_count > 0:
+                st.warning(f"Provider-level failures in latest run: {provider_issue_count}. These should not drive ticker-level review suggestions.")
         st.dataframe(recent_failures, width="stretch")
 
     st.subheader("Recent live failure samples")

@@ -16,6 +16,7 @@ VALID_TYPES = {
 }
 VALID_SOURCES = {"manual", "rules_engine", "ai_proposal", "imported"}
 VALID_PRIORITIES = {"low", "medium", "high"}
+VALID_STATUSES = {"pending", "approved", "rejected", "applied", "obsolete"}
 
 
 @dataclass
@@ -215,13 +216,12 @@ def _compute_validation_status(conn, row: pd.Series) -> str:
     return "valid"
 
 
-def list_suggestions(
-    conn,
-    status: str | None = None,
-    suggestion_type: str | None = None,
-    source: str | None = None,
-    search_text: str | None = None,
-) -> pd.DataFrame:
+def _build_filter_clauses(
+    status: str | None,
+    suggestion_type: str | None,
+    source: str | None,
+    search_text: str | None,
+) -> tuple[list[str], list[object]]:
     clauses = []
     params: list[object] = []
 
@@ -241,6 +241,17 @@ def list_suggestions(
         needle = f"%{search_text.strip()}%"
         params.extend([needle, needle, needle, needle])
 
+    return clauses, params
+
+
+def list_suggestions(
+    conn,
+    status: str | None = None,
+    suggestion_type: str | None = None,
+    source: str | None = None,
+    search_text: str | None = None,
+) -> pd.DataFrame:
+    clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
     df = conn.execute(
@@ -261,6 +272,83 @@ def list_suggestions(
     df = df.copy()
     df["validation_status"] = df.apply(lambda r: _compute_validation_status(conn, r), axis=1)
     return df
+
+
+def count_filtered_suggestions(
+    conn,
+    status: str | None,
+    suggestion_type: str | None,
+    source: str | None,
+    search_text: str | None,
+    statuses_subset: list[str] | None = None,
+) -> int:
+    clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+    if statuses_subset:
+        placeholders = ", ".join(["?"] * len(statuses_subset))
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(statuses_subset)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return int(
+        conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            {where}
+            """,
+            params,
+        ).fetchone()[0]
+    )
+
+
+def bulk_update_filtered_status(
+    conn,
+    new_status: str,
+    reviewer_notes: str,
+    status: str | None,
+    suggestion_type: str | None,
+    source: str | None,
+    search_text: str | None,
+    allowed_current_statuses: list[str] | None = None,
+) -> int:
+    if new_status not in VALID_STATUSES:
+        raise ValueError(f"Invalid status: {new_status}")
+
+    clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+    if allowed_current_statuses:
+        placeholders = ", ".join(["?"] * len(allowed_current_statuses))
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(allowed_current_statuses)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    ids = conn.execute(
+        f"""
+        SELECT s.suggestion_id
+        FROM theme_suggestions s
+        LEFT JOIN themes t ON t.id = s.existing_theme_id
+        LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+        {where}
+        """,
+        params,
+    ).df()
+    if ids.empty:
+        return 0
+
+    id_list = [int(x) for x in ids["suggestion_id"].tolist()]
+    placeholders = ", ".join(["?"] * len(id_list))
+    note = reviewer_notes.strip()
+    conn.execute(
+        f"""
+        UPDATE theme_suggestions
+        SET status = ?,
+            reviewed_at = CURRENT_TIMESTAMP,
+            reviewer_notes = CASE WHEN ? = '' THEN reviewer_notes ELSE ? END
+        WHERE suggestion_id IN ({placeholders})
+        """,
+        [new_status, note, note, *id_list],
+    )
+    return len(id_list)
 
 
 def review_suggestion(conn, suggestion_id: int, new_status: str, reviewer_notes: str) -> None:
