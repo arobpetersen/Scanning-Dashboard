@@ -70,19 +70,6 @@ trend_cols = ["delta_avg_1m", "delta_positive_1m_breadth_pct", "delta_composite_
 selected_cols = base_cols + trend_cols if show_trends else base_cols
 
 view = rankings[selected_cols].rename(
-view = rankings[
-    [
-        "theme",
-        "category",
-        "ticker_count",
-        "avg_1w",
-        "avg_1m",
-        "avg_3m",
-        "positive_1m_breadth_pct",
-        "composite_score",
-        "is_active",
-    ]
-].rename(
     columns={
         "avg_1w": "avg 1W %",
         "avg_1m": "avg 1M %",
@@ -97,7 +84,6 @@ view = rankings[
 st.dataframe(view, width="stretch")
 
 with st.expander("Ranking and trend formulas (auditable)"):
-with st.expander("Ranking formulas (auditable)"):
     st.code(
         """
 avg_1w = mean(perf_1w)

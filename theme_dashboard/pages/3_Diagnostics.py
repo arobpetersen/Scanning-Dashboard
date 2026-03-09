@@ -5,7 +5,6 @@ import streamlit as st
 from src.config import DEFAULT_PROVIDER, STALE_DATA_HOURS
 from src.database import get_conn, init_db
 from src.queries import last_refresh_run, refresh_history, row_counts, snapshot_counts
-from src.queries import last_refresh_run, refresh_history, row_counts
 from src.theme_service import seed_if_needed
 
 st.set_page_config(page_title="Diagnostics", layout="wide")
@@ -25,9 +24,6 @@ sc1, sc2, sc3 = st.columns(3)
 sc1.metric("Ticker snapshot rows", int(snaps.iloc[0]["ticker_snapshot_rows"]))
 sc2.metric("Theme snapshot rows", int(snaps.iloc[0]["theme_snapshot_rows"]))
 sc3.metric("Runs with theme snapshots", int(snaps.iloc[0]["runs_with_theme_snapshots"]))
-
-
-st.write(f"Current provider setting: `{DEFAULT_PROVIDER}`")
 
 if last_run.empty:
     st.warning("No refresh runs found.")

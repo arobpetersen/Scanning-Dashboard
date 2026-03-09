@@ -35,6 +35,7 @@ def run_refresh(conn, provider_name: str) -> int:
                 """,
                 [run_id],
             )
+            persist_theme_snapshot_for_run(conn, run_id)
             return run_id
 
         df, failures = provider.fetch_ticker_data(tickers)

@@ -29,17 +29,6 @@ def latest_completed_run_id(conn) -> int | None:
     if runs.empty:
         return None
     return int(runs.iloc[0]["run_id"])
-def latest_completed_run_id(conn) -> int | None:
-    row = conn.execute(
-        """
-        SELECT run_id
-        FROM refresh_runs
-        WHERE status IN ('success', 'partial') AND finished_at IS NOT NULL
-        ORDER BY run_id DESC
-        LIMIT 1
-        """
-    ).fetchone()
-    return row[0] if row else None
 
 
 def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:

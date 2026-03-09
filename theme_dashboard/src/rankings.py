@@ -3,18 +3,9 @@ from __future__ import annotations
 import pandas as pd
 
 from .config import COMPOSITE_WEIGHTS
-from .queries import latest_completed_runs
 
 
 METRIC_COLUMNS = [
-from .queries import latest_completed_run_id
-
-
-RANKING_COLUMNS = [
-    "theme_id",
-    "theme",
-    "category",
-    "is_active",
     "ticker_count",
     "avg_1w",
     "avg_1m",
@@ -27,26 +18,6 @@ RANKING_COLUMNS = [
 
 
 def _compute_theme_metrics(raw: pd.DataFrame) -> pd.DataFrame:
-def compute_theme_rankings(conn) -> pd.DataFrame:
-    run_id = latest_completed_run_id(conn)
-    if run_id is None:
-        return pd.DataFrame(columns=RANKING_COLUMNS)
-
-    raw = conn.execute(
-        """
-        SELECT t.id AS theme_id, t.name AS theme, t.category, t.is_active,
-               m.ticker, s.perf_1w, s.perf_1m, s.perf_3m
-        FROM themes t
-        LEFT JOIN theme_membership m ON t.id = m.theme_id
-        LEFT JOIN ticker_snapshots s
-          ON m.ticker = s.ticker AND s.run_id = ?
-        """,
-        [run_id],
-    ).df()
-
-    if raw.empty:
-        return pd.DataFrame(columns=RANKING_COLUMNS)
-
     grouped = raw.groupby(["theme_id", "theme", "category", "is_active"], dropna=False)
     out = grouped.agg(
         ticker_count=("ticker", "count"),
@@ -115,71 +86,53 @@ def persist_theme_snapshot_for_run(conn, run_id: int) -> None:
 
 
 def compute_theme_rankings(conn) -> pd.DataFrame:
-    runs = latest_completed_runs(conn, limit=2)
-    if runs.empty:
-        return pd.DataFrame()
-
-    latest_run_id = int(runs.iloc[0]["run_id"])
-    latest = conn.execute(
+    rankings = conn.execute(
         """
-        SELECT ts.theme_id, t.name AS theme, t.category, t.is_active,
-               ts.ticker_count, ts.avg_1w, ts.avg_1m, ts.avg_3m,
-               ts.positive_1w_breadth_pct, ts.positive_1m_breadth_pct, ts.positive_3m_breadth_pct,
-               ts.composite_score
-        FROM theme_snapshots ts
-        JOIN themes t ON t.id = ts.theme_id
-        WHERE ts.run_id = ?
-        """,
-        [latest_run_id],
-    ).df()
-
-    if latest.empty:
-        return pd.DataFrame()
-
-    if len(runs) > 1:
-        prev_run_id = int(runs.iloc[1]["run_id"])
-        prev = conn.execute(
-            """
-            SELECT theme_id, avg_1w, avg_1m, avg_3m, positive_1m_breadth_pct, composite_score
-            FROM theme_snapshots
-            WHERE run_id = ?
-            """,
-            [prev_run_id],
-        ).df()
-        prev = prev.rename(
-            columns={
-                "avg_1w": "prev_avg_1w",
-                "avg_1m": "prev_avg_1m",
-                "avg_3m": "prev_avg_3m",
-                "positive_1m_breadth_pct": "prev_positive_1m_breadth_pct",
-                "composite_score": "prev_composite_score",
-            }
+        WITH ranked AS (
+            SELECT
+                ts.theme_id,
+                ts.run_id,
+                ts.snapshot_time,
+                ts.ticker_count,
+                ts.avg_1w,
+                ts.avg_1m,
+                ts.avg_3m,
+                ts.positive_1w_breadth_pct,
+                ts.positive_1m_breadth_pct,
+                ts.positive_3m_breadth_pct,
+                ts.composite_score,
+                LAG(ts.avg_1w) OVER (PARTITION BY ts.theme_id ORDER BY ts.run_id) AS prev_avg_1w,
+                LAG(ts.avg_1m) OVER (PARTITION BY ts.theme_id ORDER BY ts.run_id) AS prev_avg_1m,
+                LAG(ts.avg_3m) OVER (PARTITION BY ts.theme_id ORDER BY ts.run_id) AS prev_avg_3m,
+                LAG(ts.positive_1m_breadth_pct) OVER (PARTITION BY ts.theme_id ORDER BY ts.run_id) AS prev_positive_1m_breadth_pct,
+                LAG(ts.composite_score) OVER (PARTITION BY ts.theme_id ORDER BY ts.run_id) AS prev_composite_score,
+                ROW_NUMBER() OVER (PARTITION BY ts.theme_id ORDER BY ts.run_id DESC) AS rn
+            FROM theme_snapshots ts
         )
-        latest = latest.merge(prev, on="theme_id", how="left")
-    else:
-        latest["prev_avg_1w"] = pd.NA
-        latest["prev_avg_1m"] = pd.NA
-        latest["prev_avg_3m"] = pd.NA
-        latest["prev_positive_1m_breadth_pct"] = pd.NA
-        latest["prev_composite_score"] = pd.NA
-
-    latest["delta_avg_1w"] = (latest["avg_1w"] - latest["prev_avg_1w"]).round(2)
-    latest["delta_avg_1m"] = (latest["avg_1m"] - latest["prev_avg_1m"]).round(2)
-    latest["delta_avg_3m"] = (latest["avg_3m"] - latest["prev_avg_3m"]).round(2)
-    latest["delta_positive_1m_breadth_pct"] = (
-        latest["positive_1m_breadth_pct"] - latest["prev_positive_1m_breadth_pct"]
-    ).round(2)
-    latest["delta_composite_score"] = (latest["composite_score"] - latest["prev_composite_score"]).round(2)
-
-    return latest.sort_values("composite_score", ascending=False)
-    numeric_cols = [
-        "avg_1w",
-        "avg_1m",
-        "avg_3m",
-        "positive_1w_breadth_pct",
-        "positive_1m_breadth_pct",
-        "positive_3m_breadth_pct",
-        "composite_score",
-    ]
-    out[numeric_cols] = out[numeric_cols].round(2)
-    return out[RANKING_COLUMNS].sort_values("composite_score", ascending=False)
+        SELECT
+            r.theme_id,
+            t.name AS theme,
+            t.category,
+            t.is_active,
+            r.run_id,
+            r.snapshot_time,
+            r.ticker_count,
+            ROUND(r.avg_1w, 2) AS avg_1w,
+            ROUND(r.avg_1m, 2) AS avg_1m,
+            ROUND(r.avg_3m, 2) AS avg_3m,
+            ROUND(r.positive_1w_breadth_pct, 2) AS positive_1w_breadth_pct,
+            ROUND(r.positive_1m_breadth_pct, 2) AS positive_1m_breadth_pct,
+            ROUND(r.positive_3m_breadth_pct, 2) AS positive_3m_breadth_pct,
+            ROUND(r.composite_score, 2) AS composite_score,
+            ROUND(r.avg_1w - r.prev_avg_1w, 2) AS delta_avg_1w,
+            ROUND(r.avg_1m - r.prev_avg_1m, 2) AS delta_avg_1m,
+            ROUND(r.avg_3m - r.prev_avg_3m, 2) AS delta_avg_3m,
+            ROUND(r.positive_1m_breadth_pct - r.prev_positive_1m_breadth_pct, 2) AS delta_positive_1m_breadth_pct,
+            ROUND(r.composite_score - r.prev_composite_score, 2) AS delta_composite_score
+        FROM ranked r
+        JOIN themes t ON t.id = r.theme_id
+        WHERE r.rn = 1
+        ORDER BY composite_score DESC
+        """
+    ).df()
+    return rankings
