@@ -1,0 +1,4386 @@
+{
+  "themes": [
+    {
+      "name": "AI - Semiconductors",
+      "category": "Artificial Intelligence",
+      "tickers": [
+        "NVDA",
+        "AMD",
+        "AVGO",
+        "MRVL",
+        "ARM",
+        "QCOM",
+        "MU",
+        "INTC",
+        "TSM",
+        "ASML",
+        "AMAT",
+        "LRCX",
+        "KLAC",
+        "SNPS",
+        "CDNS"
+      ]
+    },
+    {
+      "name": "AI - Software",
+      "category": "Artificial Intelligence",
+      "tickers": [
+        "PLTR",
+        "PATH",
+        "AI",
+        "SNOW",
+        "MDB",
+        "DDOG",
+        "NET",
+        "CRWD",
+        "BBAI",
+        "SOUN",
+        "UPST",
+        "EXAI",
+        "AISP",
+        "GFAI",
+        "BTDR"
+      ]
+    },
+    {
+      "name": "AI - Data Centers",
+      "category": "Artificial Intelligence",
+      "tickers": [
+        "HUT",
+        "BITF",
+        "IREN",
+        "SMR",
+        "INOD",
+        "CORZ",
+        "DTCR",
+        "IRM",
+        "APLD",
+        "GDS",
+        "CLSK",
+        "DTST",
+        "WULF",
+        "VNET",
+        "EOSE",
+        "NNE"
+      ]
+    },
+    {
+      "name": "AI - Mega Cap",
+      "category": "Artificial Intelligence",
+      "tickers": [
+        "MSFT",
+        "GOOGL",
+        "META",
+        "AMZN",
+        "AAPL",
+        "ORCL",
+        "IBM",
+        "CRM",
+        "NVDA"
+      ]
+    },
+    {
+      "name": "AI - Infrastructure",
+      "category": "Artificial Intelligence",
+      "tickers": [
+        "DELL",
+        "HPE",
+        "SMCI",
+        "NTAP",
+        "PSTG",
+        "VRT",
+        "ANET",
+        "CSCO",
+        "JNPR",
+        "CIEN"
+      ]
+    },
+    {
+      "name": "AI - Speech & NLP",
+      "category": "Artificial Intelligence",
+      "tickers": [
+        "SOUN",
+        "LMND",
+        "AUR",
+        "GENI",
+        "VEEV"
+      ]
+    },
+    {
+      "name": "AI - Computer Vision",
+      "category": "Artificial Intelligence",
+      "tickers": [
+        "ISRG",
+        "LAZR",
+        "INVZ",
+        "AEVA",
+        "OUST",
+        "CPTN",
+        "VLDR",
+        "MBLY"
+      ]
+    },
+    {
+      "name": "AI - Enterprise Apps",
+      "category": "Artificial Intelligence",
+      "tickers": [
+        "CRM",
+        "NOW",
+        "WDAY",
+        "HUBS",
+        "ZM",
+        "TEAM",
+        "DOCU",
+        "ADBE",
+        "INTU"
+      ]
+    },
+    {
+      "name": "AI - Robotics",
+      "category": "Artificial Intelligence",
+      "tickers": [
+        "NVDA",
+        "ISRG",
+        "IRBT",
+        "PATH",
+        "SYM",
+        "ROK",
+        "ABB",
+        "FANUY"
+      ]
+    },
+    {
+      "name": "AI - Edge Computing",
+      "category": "Artificial Intelligence",
+      "tickers": [
+        "ANET",
+        "CSCO",
+        "JNPR",
+        "CIEN",
+        "LITE",
+        "ACIA",
+        "INFN"
+      ]
+    },
+    {
+      "name": "Semis - Memory",
+      "category": "Semiconductors",
+      "tickers": [
+        "MU",
+        "WDC",
+        "STX",
+        "RMBS",
+        "MKSI",
+        "AEHR",
+        "CRUS"
+      ]
+    },
+    {
+      "name": "Semis - Equipment",
+      "category": "Semiconductors",
+      "tickers": [
+        "ASML",
+        "AMAT",
+        "LRCX",
+        "KLAC",
+        "TER",
+        "ENTG",
+        "ACLS",
+        "FORM",
+        "UCTT",
+        "CAMT",
+        "ICHR",
+        "KLIC",
+        "ONTO"
+      ]
+    },
+    {
+      "name": "Semis - Analog",
+      "category": "Semiconductors",
+      "tickers": [
+        "TXN",
+        "ADI",
+        "MCHP",
+        "ON",
+        "NXPI",
+        "SWKS",
+        "QRVO",
+        "MPWR",
+        "SLAB",
+        "DIOD",
+        "SITM"
+      ]
+    },
+    {
+      "name": "Semis - Foundry",
+      "category": "Semiconductors",
+      "tickers": [
+        "TSM",
+        "INTC",
+        "GFS",
+        "UMC",
+        "SSNLF"
+      ]
+    },
+    {
+      "name": "Semis - Power",
+      "category": "Semiconductors",
+      "tickers": [
+        "ON",
+        "WOLF",
+        "DIOD",
+        "VSH",
+        "LFUS",
+        "POWI"
+      ]
+    },
+    {
+      "name": "Semis - RF & Wireless",
+      "category": "Semiconductors",
+      "tickers": [
+        "SWKS",
+        "QRVO",
+        "QCOM",
+        "CRUS",
+        "SLAB",
+        "SITM"
+      ]
+    },
+    {
+      "name": "Semis - Automotive",
+      "category": "Semiconductors",
+      "tickers": [
+        "ON",
+        "NXPI",
+        "MCHP",
+        "ADI",
+        "TXN",
+        "WOLF",
+        "MBLY"
+      ]
+    },
+    {
+      "name": "Semis - Packaging & Test",
+      "category": "Semiconductors",
+      "tickers": [
+        "AMKR",
+        "ASX",
+        "COHU",
+        "AEHR",
+        "FORM"
+      ]
+    },
+    {
+      "name": "Cybersecurity",
+      "category": "Technology - Software",
+      "tickers": [
+        "CRWD",
+        "PANW",
+        "FTNT",
+        "ZS",
+        "S",
+        "OKTA",
+        "CYBR",
+        "TENB",
+        "QLYS",
+        "RPD",
+        "VRNS",
+        "NET",
+        "FSLY"
+      ]
+    },
+    {
+      "name": "Cybersecurity - Identity",
+      "category": "Technology - Software",
+      "tickers": [
+        "OKTA",
+        "CYBR",
+        "PING",
+        "SAIL",
+        "SCWX",
+        "FORGEROCK"
+      ]
+    },
+    {
+      "name": "Cybersecurity - Endpoint",
+      "category": "Technology - Software",
+      "tickers": [
+        "CRWD",
+        "S",
+        "VMW",
+        "CHKP",
+        "ESET"
+      ]
+    },
+    {
+      "name": "Cybersecurity - Network",
+      "category": "Technology - Software",
+      "tickers": [
+        "PANW",
+        "FTNT",
+        "ZS",
+        "NET",
+        "FSLY",
+        "AKAM"
+      ]
+    },
+    {
+      "name": "Cloud Computing",
+      "category": "Technology - Software",
+      "tickers": [
+        "AMZN",
+        "MSFT",
+        "GOOGL",
+        "SNOW",
+        "NET",
+        "DDOG",
+        "MDB",
+        "ESTC",
+        "CFLT",
+        "PATH",
+        "DBX"
+      ]
+    },
+    {
+      "name": "Cloud - Infrastructure",
+      "category": "Technology - Software",
+      "tickers": [
+        "AMZN",
+        "MSFT",
+        "GOOGL",
+        "ORCL",
+        "IBM",
+        "VMW",
+        "CTXS"
+      ]
+    },
+    {
+      "name": "Cloud - DevOps",
+      "category": "Technology - Software",
+      "tickers": [
+        "DDOG",
+        "ESTC",
+        "SPLK",
+        "DT",
+        "NEWR",
+        "GTLB",
+        "CFLT"
+      ]
+    },
+    {
+      "name": "Quantum Computing",
+      "category": "Technology - Software",
+      "tickers": [
+        "IONQ",
+        "RGTI",
+        "QBTS",
+        "QUBT",
+        "IBM",
+        "GOOGL",
+        "FORM",
+        "ARQQ"
+      ]
+    },
+    {
+      "name": "Software - Enterprise",
+      "category": "Technology - Software",
+      "tickers": [
+        "CRM",
+        "NOW",
+        "WDAY",
+        "HUBS",
+        "ZM",
+        "TEAM",
+        "DOCU",
+        "ADBE",
+        "INTU",
+        "PANW"
+      ]
+    },
+    {
+      "name": "Software - SMB",
+      "category": "Technology - Software",
+      "tickers": [
+        "HUBS",
+        "ZM",
+        "BILL",
+        "TOST",
+        "SQ",
+        "SHOP",
+        "BIGC",
+        "WEAV"
+      ]
+    },
+    {
+      "name": "Software - Vertical",
+      "category": "Technology - Software",
+      "tickers": [
+        "VEEV",
+        "CPRT",
+        "CDW",
+        "GWRE",
+        "MANH",
+        "PCTY",
+        "PAYC"
+      ]
+    },
+    {
+      "name": "Software - Low Code",
+      "category": "Technology - Software",
+      "tickers": [
+        "APPN",
+        "FROG",
+        "ASAN",
+        "MNDY",
+        "TEAM"
+      ]
+    },
+    {
+      "name": "Internet - E-Commerce",
+      "category": "Technology - Internet",
+      "tickers": [
+        "AMZN",
+        "BABA",
+        "JD",
+        "PDD",
+        "MELI",
+        "SE",
+        "SHOP",
+        "ETSY",
+        "EBAY",
+        "W",
+        "CHWY",
+        "CVNA",
+        "CARG"
+      ]
+    },
+    {
+      "name": "Internet - Social",
+      "category": "Technology - Internet",
+      "tickers": [
+        "META",
+        "SNAP",
+        "PINS",
+        "RDDT",
+        "MTCH",
+        "BMBL",
+        "GRND",
+        "TWTR"
+      ]
+    },
+    {
+      "name": "Internet - Search & Ads",
+      "category": "Technology - Internet",
+      "tickers": [
+        "GOOGL",
+        "META",
+        "TTD",
+        "APP",
+        "DV",
+        "MGNI",
+        "PUBM",
+        "DSP",
+        "CRTO",
+        "ZETA",
+        "IAS"
+      ]
+    },
+    {
+      "name": "Internet - Travel",
+      "category": "Technology - Internet",
+      "tickers": [
+        "BKNG",
+        "ABNB",
+        "EXPE",
+        "TCOM",
+        "TRIP",
+        "MMYT",
+        "DESP",
+        "TRVG"
+      ]
+    },
+    {
+      "name": "Internet - Food Delivery",
+      "category": "Technology - Internet",
+      "tickers": [
+        "DASH",
+        "UBER",
+        "LYFT",
+        "GRUB",
+        "TKWY"
+      ]
+    },
+    {
+      "name": "Internet - Marketplace",
+      "category": "Technology - Internet",
+      "tickers": [
+        "ETSY",
+        "EBAY",
+        "MELI",
+        "CPNG",
+        "FTCH",
+        "POSH",
+        "REAL",
+        "CARS",
+        "CVNA",
+        "CARG"
+      ]
+    },
+    {
+      "name": "Internet - Classifieds",
+      "category": "Technology - Internet",
+      "tickers": [
+        "ZG",
+        "RDFN",
+        "OPEN",
+        "COMP",
+        "CARG",
+        "CARS"
+      ]
+    },
+    {
+      "name": "Internet - Content",
+      "category": "Technology - Internet",
+      "tickers": [
+        "NFLX",
+        "SPOT",
+        "GOOGL",
+        "META",
+        "SNAP",
+        "TME",
+        "BILI"
+      ]
+    },
+    {
+      "name": "Video Games",
+      "category": "Technology - Internet",
+      "tickers": [
+        "EA",
+        "TTWO",
+        "RBLX",
+        "U",
+        "NTDOY",
+        "SONY",
+        "MSFT",
+        "NTES",
+        "SE",
+        "DKNG",
+        "SKLZ",
+        "ZNGA",
+        "GLUU"
+      ]
+    },
+    {
+      "name": "Streaming & Media",
+      "category": "Technology - Internet",
+      "tickers": [
+        "NFLX",
+        "DIS",
+        "WBD",
+        "PARA",
+        "ROKU",
+        "SPOT",
+        "FUBO",
+        "LGF.A",
+        "SIRI",
+        "IHRT",
+        "ATUS",
+        "CMCSA"
+      ]
+    },
+    {
+      "name": "Space - Launch",
+      "category": "Space & Aerospace",
+      "tickers": [
+        "RKLB",
+        "LUNR",
+        "RDW",
+        "BKSY",
+        "MNTS",
+        "ASTR",
+        "VORB"
+      ]
+    },
+    {
+      "name": "Space - Satellites",
+      "category": "Space & Aerospace",
+      "tickers": [
+        "ASTS",
+        "GSAT",
+        "IRDM",
+        "VSAT",
+        "SATS",
+        "KTOS",
+        "GILT",
+        "SATL"
+      ]
+    },
+    {
+      "name": "Space - Defense",
+      "category": "Space & Aerospace",
+      "tickers": [
+        "LMT",
+        "NOC",
+        "BA",
+        "RTX",
+        "KTOS",
+        "LDOS",
+        "BWXT",
+        "RKLB"
+      ]
+    },
+    {
+      "name": "Space - Earth Observation",
+      "category": "Space & Aerospace",
+      "tickers": [
+        "PL",
+        "BKSY",
+        "SPIR",
+        "MAXR"
+      ]
+    },
+    {
+      "name": "Space - Communications",
+      "category": "Space & Aerospace",
+      "tickers": [
+        "ASTS",
+        "GSAT",
+        "IRDM",
+        "VSAT",
+        "GRMN"
+      ]
+    },
+    {
+      "name": "Aerospace - Commercial",
+      "category": "Space & Aerospace",
+      "tickers": [
+        "BA",
+        "EADSY",
+        "ERJ",
+        "TXT",
+        "SPR",
+        "HXL",
+        "TGI"
+      ]
+    },
+    {
+      "name": "Aerospace - Suppliers",
+      "category": "Space & Aerospace",
+      "tickers": [
+        "SPR",
+        "TDG",
+        "HXL",
+        "TGI",
+        "WWD",
+        "MOG.A",
+        "ATRO",
+        "DCO",
+        "CRS"
+      ]
+    },
+    {
+      "name": "Aircraft Leasing",
+      "category": "Space & Aerospace",
+      "tickers": [
+        "AER",
+        "AL",
+        "AYR",
+        "FLYE",
+        "WLFC"
+      ]
+    },
+    {
+      "name": "Defense - Prime Contractors",
+      "category": "Defense",
+      "tickers": [
+        "LMT",
+        "RTX",
+        "NOC",
+        "GD",
+        "BA",
+        "LHX",
+        "HII",
+        "TXT"
+      ]
+    },
+    {
+      "name": "Defense - Electronics",
+      "category": "Defense",
+      "tickers": [
+        "LHX",
+        "HII",
+        "KTOS",
+        "MRCY",
+        "AXON",
+        "DRS",
+        "MANT"
+      ]
+    },
+    {
+      "name": "Defense - Cybersecurity",
+      "category": "Defense",
+      "tickers": [
+        "LMT",
+        "RTX",
+        "PLTR",
+        "BAH",
+        "LDOS",
+        "CACI",
+        "SAIC",
+        "MANT"
+      ]
+    },
+    {
+      "name": "Defense - Drones & UAV",
+      "category": "Defense",
+      "tickers": [
+        "AVAV",
+        "KTOS",
+        "LMT",
+        "NOC",
+        "RTX",
+        "RCAT"
+      ]
+    },
+    {
+      "name": "Defense - Missiles",
+      "category": "Defense",
+      "tickers": [
+        "LMT",
+        "RTX",
+        "NOC",
+        "BA",
+        "KTOS"
+      ]
+    },
+    {
+      "name": "Defense - Naval",
+      "category": "Defense",
+      "tickers": [
+        "HII",
+        "GD",
+        "LMT",
+        "NOC",
+        "BWX"
+      ]
+    },
+    {
+      "name": "Defense - Services",
+      "category": "Defense",
+      "tickers": [
+        "BAH",
+        "LDOS",
+        "CACI",
+        "SAIC",
+        "MANT",
+        "KBR",
+        "TTEK"
+      ]
+    },
+    {
+      "name": "Defense - Small Cap",
+      "category": "Defense",
+      "tickers": [
+        "KTOS",
+        "MRCY",
+        "AVAV",
+        "AXON",
+        "RCAT",
+        "TATT"
+      ]
+    },
+    {
+      "name": "Oil - Supermajors",
+      "category": "Energy - Oil & Gas",
+      "tickers": [
+        "XOM",
+        "CVX",
+        "SHEL",
+        "BP",
+        "TTE"
+      ]
+    },
+    {
+      "name": "Oil - Large Cap",
+      "category": "Energy - Oil & Gas",
+      "tickers": [
+        "COP",
+        "OXY",
+        "EOG",
+        "PXD",
+        "HES",
+        "DVN",
+        "MRO",
+        "APA"
+      ]
+    },
+    {
+      "name": "Oil - E&P",
+      "category": "Energy - Oil & Gas",
+      "tickers": [
+        "EOG",
+        "PXD",
+        "DVN",
+        "FANG",
+        "PR",
+        "MTDR",
+        "CTRA",
+        "OVV",
+        "MRO",
+        "CHRD",
+        "PDCE",
+        "SM"
+      ]
+    },
+    {
+      "name": "Oil - Services",
+      "category": "Energy - Oil & Gas",
+      "tickers": [
+        "SLB",
+        "HAL",
+        "BKR",
+        "FTI",
+        "NOV",
+        "CHX",
+        "HP",
+        "PTEN",
+        "LBRT",
+        "OII",
+        "WHD"
+      ]
+    },
+    {
+      "name": "Oil - Refiners",
+      "category": "Energy - Oil & Gas",
+      "tickers": [
+        "VLO",
+        "MPC",
+        "PSX",
+        "PBF",
+        "DK",
+        "PARR",
+        "HFC",
+        "CVI",
+        "CLMT"
+      ]
+    },
+    {
+      "name": "Oil - Offshore Drillers",
+      "category": "Energy - Oil & Gas",
+      "tickers": [
+        "RIG",
+        "VAL",
+        "DO",
+        "NE",
+        "SDRL",
+        "BORR",
+        "PACD"
+      ]
+    },
+    {
+      "name": "Oil - Offshore Services",
+      "category": "Energy - Oil & Gas",
+      "tickers": [
+        "OII",
+        "FTI",
+        "TRGP",
+        "TDW",
+        "HLX",
+        "GMLP"
+      ]
+    },
+    {
+      "name": "Natural Gas - Producers",
+      "category": "Energy - Oil & Gas",
+      "tickers": [
+        "EQT",
+        "AR",
+        "RRC",
+        "SWN",
+        "CTRA",
+        "CNX",
+        "CHK",
+        "COG"
+      ]
+    },
+    {
+      "name": "Natural Gas - LNG",
+      "category": "Energy - Oil & Gas",
+      "tickers": [
+        "LNG",
+        "TELL",
+        "GLNG",
+        "FLNG",
+        "CQP",
+        "NEXT",
+        "NFE"
+      ]
+    },
+    {
+      "name": "Pipelines & Midstream",
+      "category": "Energy - Oil & Gas",
+      "tickers": [
+        "KMI",
+        "WMB",
+        "ET",
+        "EPD",
+        "MPLX",
+        "PAA",
+        "TRGP",
+        "OKE",
+        "AM",
+        "ENBL",
+        "DCP"
+      ]
+    },
+    {
+      "name": "Oil - Permian Basin",
+      "category": "Energy - Oil & Gas",
+      "tickers": [
+        "PXD",
+        "FANG",
+        "MTDR",
+        "PR",
+        "CDEV",
+        "ESTE",
+        "VTLE"
+      ]
+    },
+    {
+      "name": "Oil - Canada",
+      "category": "Energy - Oil & Gas",
+      "tickers": [
+        "SU",
+        "CNQ",
+        "IMO",
+        "CVE",
+        "TRP",
+        "ENB",
+        "PPL"
+      ]
+    },
+    {
+      "name": "Uranium & Nuclear",
+      "category": "Energy - Clean",
+      "tickers": [
+        "CCJ",
+        "UEC",
+        "UUUU",
+        "NXE",
+        "DNN",
+        "LEU",
+        "SMR",
+        "OKLO",
+        "BWXT",
+        "URA"
+      ]
+    },
+    {
+      "name": "Nuclear - SMR",
+      "category": "Energy - Clean",
+      "tickers": [
+        "SMR",
+        "OKLO",
+        "BWXT",
+        "NXE",
+        "LEU"
+      ]
+    },
+    {
+      "name": "Solar - Manufacturers",
+      "category": "Energy - Clean",
+      "tickers": [
+        "FSLR",
+        "CSIQ",
+        "JKS",
+        "DQ",
+        "MAXN",
+        "SPWR",
+        "ARRY",
+        "SHLS"
+      ]
+    },
+    {
+      "name": "Solar - Residential",
+      "category": "Energy - Clean",
+      "tickers": [
+        "ENPH",
+        "SEDG",
+        "RUN",
+        "NOVA",
+        "SUNW",
+        "SPWR"
+      ]
+    },
+    {
+      "name": "Solar - Utility",
+      "category": "Energy - Clean",
+      "tickers": [
+        "FSLR",
+        "NEE",
+        "AES",
+        "CWEN",
+        "ARRY"
+      ]
+    },
+    {
+      "name": "Wind",
+      "category": "Energy - Clean",
+      "tickers": [
+        "NEE",
+        "GE",
+        "VWSYF",
+        "CWEN",
+        "AES",
+        "BEP"
+      ]
+    },
+    {
+      "name": "Clean Energy - Hydrogen",
+      "category": "Energy - Clean",
+      "tickers": [
+        "PLUG",
+        "BE",
+        "FCEL",
+        "BLDP",
+        "HYZON",
+        "NKLA",
+        "CLNE"
+      ]
+    },
+    {
+      "name": "Clean Energy - Fuel Cells",
+      "category": "Energy - Clean",
+      "tickers": [
+        "PLUG",
+        "BE",
+        "FCEL",
+        "BLDP",
+        "HYZON"
+      ]
+    },
+    {
+      "name": "Energy Storage & Batteries",
+      "category": "Energy - Clean",
+      "tickers": [
+        "TSLA",
+        "ENVX",
+        "QS",
+        "SLDP",
+        "AMPX",
+        "MVST",
+        "SES",
+        "FREYR",
+        "DCRC"
+      ]
+    },
+    {
+      "name": "Utilities - Renewable",
+      "category": "Utilities",
+      "tickers": [
+        "NEE",
+        "AES",
+        "BEP",
+        "CWEN",
+        "ORA",
+        "AY"
+      ]
+    },
+    {
+      "name": "Carbon & Environment",
+      "category": "Energy - Clean",
+      "tickers": [
+        "KRBN",
+        "CLVR",
+        "TECO",
+        "CIG",
+        "CLIR"
+      ]
+    },
+    {
+      "name": "Biofuels & Ethanol",
+      "category": "Energy - Clean",
+      "tickers": [
+        "GPRE",
+        "REGI",
+        "ADM",
+        "ALTO",
+        "PEIX",
+        "REX"
+      ]
+    },
+    {
+      "name": "Utilities - Electric",
+      "category": "Utilities",
+      "tickers": [
+        "NEE",
+        "DUK",
+        "SO",
+        "D",
+        "AEP",
+        "XEL",
+        "WEC",
+        "ES",
+        "PPL",
+        "EIX",
+        "PEG"
+      ]
+    },
+    {
+      "name": "Utilities - Gas",
+      "category": "Utilities",
+      "tickers": [
+        "SRE",
+        "NI",
+        "ATO",
+        "OGS",
+        "NJR",
+        "SWX",
+        "RGCO"
+      ]
+    },
+    {
+      "name": "Utilities - Water",
+      "category": "Utilities",
+      "tickers": [
+        "AWK",
+        "WTR",
+        "XYL",
+        "WTRG",
+        "CWT",
+        "SJW",
+        "YORW"
+      ]
+    },
+    {
+      "name": "Utilities - Multi",
+      "category": "Utilities",
+      "tickers": [
+        "DUK",
+        "SO",
+        "D",
+        "AEP",
+        "XEL",
+        "WEC"
+      ]
+    },
+    {
+      "name": "Utilities - Independent Power",
+      "category": "Utilities",
+      "tickers": [
+        "VST",
+        "NRG",
+        "CWEN",
+        "ORA",
+        "TAL"
+      ]
+    },
+    {
+      "name": "Data Center Power",
+      "category": "Utilities",
+      "tickers": [
+        "VST",
+        "CEG",
+        "TLN",
+        "NRG",
+        "ETR",
+        "SO",
+        "AEP",
+        "DUK"
+      ]
+    },
+    {
+      "name": "Utilities - Regulated",
+      "category": "Utilities",
+      "tickers": [
+        "DUK",
+        "SO",
+        "AEP",
+        "XEL",
+        "WEC",
+        "CMS",
+        "DTE",
+        "EVRG"
+      ]
+    },
+    {
+      "name": "Utilities - Unregulated",
+      "category": "Utilities",
+      "tickers": [
+        "VST",
+        "NRG",
+        "CEG",
+        "TLN",
+        "ORA"
+      ]
+    },
+    {
+      "name": "Gold - Majors",
+      "category": "Metals & Mining",
+      "tickers": [
+        "NEM",
+        "GOLD",
+        "AEM",
+        "KGC",
+        "FNV",
+        "WPM",
+        "RGLD"
+      ]
+    },
+    {
+      "name": "Gold - Mid Tier",
+      "category": "Metals & Mining",
+      "tickers": [
+        "AGI",
+        "AU",
+        "BTG",
+        "EGO",
+        "HMY",
+        "OR",
+        "DRD",
+        "SA",
+        "IAG",
+        "NGD"
+      ]
+    },
+    {
+      "name": "Gold - Juniors",
+      "category": "Metals & Mining",
+      "tickers": [
+        "KGC",
+        "EXK",
+        "USAU",
+        "GORO",
+        "GPL",
+        "EXN"
+      ]
+    },
+    {
+      "name": "Gold - Royalty",
+      "category": "Metals & Mining",
+      "tickers": [
+        "FNV",
+        "WPM",
+        "RGLD",
+        "OR",
+        "SAND",
+        "MMX",
+        "TFPM"
+      ]
+    },
+    {
+      "name": "Silver Miners",
+      "category": "Metals & Mining",
+      "tickers": [
+        "AG",
+        "PAAS",
+        "HL",
+        "CDE",
+        "MAG",
+        "FSM",
+        "EXK",
+        "SILV",
+        "SVM",
+        "ASM",
+        "GPL"
+      ]
+    },
+    {
+      "name": "Copper",
+      "category": "Metals & Mining",
+      "tickers": [
+        "FCX",
+        "SCCO",
+        "TECK",
+        "HBM",
+        "ERO",
+        "IVPAF",
+        "COPX",
+        "EROS"
+      ]
+    },
+    {
+      "name": "Lithium",
+      "category": "Metals & Mining",
+      "tickers": [
+        "ALB",
+        "SQM",
+        "LTHM",
+        "LAC",
+        "PLL",
+        "SGML",
+        "ALTM",
+        "LILM",
+        "IONR"
+      ]
+    },
+    {
+      "name": "Rare Earths",
+      "category": "Metals & Mining",
+      "tickers": [
+        "TMC",
+        "UROY",
+        "UEC",
+        "CRML",
+        "NNE",
+        "USAR",
+        "LEU",
+        "UUUU",
+        "NB",
+        "METC",
+        "LTBR",
+        "MP",
+        "UAMY",
+        "OKLO",
+        "SMR"
+      ]
+    },
+    {
+      "name": "Steel",
+      "category": "Metals & Mining",
+      "tickers": [
+        "NUE",
+        "STLD",
+        "CLF",
+        "X",
+        "RS",
+        "CMC",
+        "MT",
+        "TX",
+        "GGB",
+        "SID",
+        "PKX"
+      ]
+    },
+    {
+      "name": "Aluminum",
+      "category": "Metals & Mining",
+      "tickers": [
+        "AA",
+        "CENX",
+        "KALU",
+        "ARNC"
+      ]
+    },
+    {
+      "name": "Nickel & Cobalt",
+      "category": "Metals & Mining",
+      "tickers": [
+        "VALE",
+        "BHP",
+        "GLEN",
+        "ERO"
+      ]
+    },
+    {
+      "name": "Platinum & Palladium",
+      "category": "Metals & Mining",
+      "tickers": [
+        "SBSW",
+        "IMPUY",
+        "ANGPY"
+      ]
+    },
+    {
+      "name": "Zinc & Lead",
+      "category": "Metals & Mining",
+      "tickers": [
+        "TECK",
+        "HBM",
+        "NEXA"
+      ]
+    },
+    {
+      "name": "Diversified Mining",
+      "category": "Metals & Mining",
+      "tickers": [
+        "BHP",
+        "RIO",
+        "VALE",
+        "FCX",
+        "TECK",
+        "GLNCY"
+      ]
+    },
+    {
+      "name": "Coal",
+      "category": "Metals & Mining",
+      "tickers": [
+        "BTU",
+        "ARCH",
+        "AMR",
+        "CEIX",
+        "HCC",
+        "ARLP",
+        "METC",
+        "NC",
+        "CONSOL"
+      ]
+    },
+    {
+      "name": "Banks - Mega",
+      "category": "Financials - Banks",
+      "tickers": [
+        "JPM",
+        "BAC",
+        "WFC",
+        "C",
+        "GS",
+        "MS"
+      ]
+    },
+    {
+      "name": "Banks - Large",
+      "category": "Financials - Banks",
+      "tickers": [
+        "USB",
+        "PNC",
+        "TFC",
+        "SCHW",
+        "COF",
+        "BK",
+        "STT",
+        "NTRS",
+        "CFG"
+      ]
+    },
+    {
+      "name": "Banks - Super Regional",
+      "category": "Financials - Banks",
+      "tickers": [
+        "USB",
+        "PNC",
+        "TFC",
+        "MTB",
+        "FITB",
+        "KEY",
+        "RF",
+        "HBAN",
+        "CFG"
+      ]
+    },
+    {
+      "name": "Banks - Regional",
+      "category": "Financials - Banks",
+      "tickers": [
+        "WAL",
+        "ZION",
+        "KEY",
+        "CFG",
+        "FITB",
+        "RF",
+        "HBAN",
+        "CMA",
+        "EWBC",
+        "FHN",
+        "WBS",
+        "UMBF",
+        "BOKF",
+        "CBSH",
+        "PNFP"
+      ]
+    },
+    {
+      "name": "Banks - Community",
+      "category": "Financials - Banks",
+      "tickers": [
+        "PACW",
+        "CUBI",
+        "HOPE",
+        "FFIC",
+        "WAFD",
+        "GBCI",
+        "CVBF",
+        "UBSI"
+      ]
+    },
+    {
+      "name": "Banks - Midwest",
+      "category": "Financials - Banks",
+      "tickers": [
+        "HBAN",
+        "CFG",
+        "KEY",
+        "FHN",
+        "BOKF",
+        "CBSH"
+      ]
+    },
+    {
+      "name": "Banks - Southeast",
+      "category": "Financials - Banks",
+      "tickers": [
+        "RF",
+        "ZION",
+        "SNV",
+        "ONB",
+        "SBCF",
+        "SSB"
+      ]
+    },
+    {
+      "name": "Banks - Northeast",
+      "category": "Financials - Banks",
+      "tickers": [
+        "MTB",
+        "CFG",
+        "EWBC",
+        "NYCB",
+        "VLY",
+        "DCOM"
+      ]
+    },
+    {
+      "name": "Banks - West",
+      "category": "Financials - Banks",
+      "tickers": [
+        "WAL",
+        "EWBC",
+        "PACW",
+        "CVBF",
+        "PPBI",
+        "BANC"
+      ]
+    },
+    {
+      "name": "Banks - Texas",
+      "category": "Financials - Banks",
+      "tickers": [
+        "BOKF",
+        "CFR",
+        "TCBI",
+        "IBTX",
+        "HTLF"
+      ]
+    },
+    {
+      "name": "Insurance - Life",
+      "category": "Financials - Insurance",
+      "tickers": [
+        "MET",
+        "PRU",
+        "AFL",
+        "LNC",
+        "PFG",
+        "VOYA",
+        "UNM",
+        "GL",
+        "RGA"
+      ]
+    },
+    {
+      "name": "Insurance - P&C",
+      "category": "Financials - Insurance",
+      "tickers": [
+        "PGR",
+        "TRV",
+        "ALL",
+        "CB",
+        "HIG",
+        "CNA",
+        "WRB",
+        "THG",
+        "KMPR",
+        "SIGI"
+      ]
+    },
+    {
+      "name": "Insurance - Health",
+      "category": "Financials - Insurance",
+      "tickers": [
+        "UNH",
+        "ELV",
+        "CI",
+        "HUM",
+        "CNC",
+        "MOH",
+        "ANTM"
+      ]
+    },
+    {
+      "name": "Insurance - Specialty",
+      "category": "Financials - Insurance",
+      "tickers": [
+        "AIG",
+        "ACGL",
+        "RNR",
+        "EG",
+        "RYAN",
+        "KNSL",
+        "HCI"
+      ]
+    },
+    {
+      "name": "Insurance - Brokers",
+      "category": "Financials - Insurance",
+      "tickers": [
+        "AON",
+        "MMC",
+        "AJG",
+        "WTW",
+        "BRO",
+        "RYAN"
+      ]
+    },
+    {
+      "name": "Insurance - Reinsurance",
+      "category": "Financials - Insurance",
+      "tickers": [
+        "RNR",
+        "ACGL",
+        "EG",
+        "GLRE",
+        "TPRE"
+      ]
+    },
+    {
+      "name": "Insurance - Title",
+      "category": "Financials - Insurance",
+      "tickers": [
+        "FNF",
+        "FAF",
+        "STC",
+        "ITIC"
+      ]
+    },
+    {
+      "name": "Insurtech",
+      "category": "Financials - Insurance",
+      "tickers": [
+        "LMND",
+        "ROOT",
+        "HIPO",
+        "MILE",
+        "GOAT"
+      ]
+    },
+    {
+      "name": "Asset Managers",
+      "category": "Financials - Other",
+      "tickers": [
+        "BLK",
+        "BX",
+        "KKR",
+        "APO",
+        "ARES",
+        "CG",
+        "OWL",
+        "TROW",
+        "IVZ",
+        "BEN",
+        "AMG"
+      ]
+    },
+    {
+      "name": "Private Equity",
+      "category": "Financials - Other",
+      "tickers": [
+        "BX",
+        "KKR",
+        "APO",
+        "CG",
+        "ARES",
+        "OWL",
+        "TPG",
+        "BAM"
+      ]
+    },
+    {
+      "name": "Hedge Fund Hotels",
+      "category": "Financials - Other",
+      "tickers": [
+        "GS",
+        "MS",
+        "JPM",
+        "BLK",
+        "BX",
+        "TROW"
+      ]
+    },
+    {
+      "name": "Exchanges & Data",
+      "category": "Financials - Other",
+      "tickers": [
+        "CME",
+        "ICE",
+        "NDAQ",
+        "CBOE",
+        "SPGI",
+        "MCO",
+        "MSCI",
+        "FDS",
+        "MORN",
+        "TW",
+        "VIRT"
+      ]
+    },
+    {
+      "name": "Fintech - Payments",
+      "category": "Financials - Other",
+      "tickers": [
+        "V",
+        "MA",
+        "PYPL",
+        "SQ",
+        "AFRM",
+        "SOFI",
+        "FI",
+        "FIS",
+        "GPN",
+        "FOUR",
+        "PAYO",
+        "MQ",
+        "RPAY"
+      ]
+    },
+    {
+      "name": "Fintech - Lending",
+      "category": "Financials - Other",
+      "tickers": [
+        "UPST",
+        "LC",
+        "TREE",
+        "SOFI",
+        "AFRM",
+        "PSFE"
+      ]
+    },
+    {
+      "name": "Fintech - Banking",
+      "category": "Financials - Other",
+      "tickers": [
+        "SOFI",
+        "NU",
+        "LC",
+        "ALLY",
+        "HOOD",
+        "COIN"
+      ]
+    },
+    {
+      "name": "Crypto & Bitcoin",
+      "category": "Financials - Other",
+      "tickers": [
+        "COIN",
+        "MSTR",
+        "RIOT",
+        "MARA",
+        "CLSK",
+        "HUT",
+        "CIFR",
+        "BITF",
+        "BTBT",
+        "SI",
+        "GREE",
+        "CORZ",
+        "IREN"
+      ]
+    },
+    {
+      "name": "Mortgage Finance",
+      "category": "Financials - Other",
+      "tickers": [
+        "RKT",
+        "UWMC",
+        "COOP",
+        "GHLD",
+        "LDI",
+        "PFSI"
+      ]
+    },
+    {
+      "name": "Specialty Finance",
+      "category": "Financials - Other",
+      "tickers": [
+        "AXP",
+        "DFS",
+        "SYF",
+        "ALLY",
+        "CACC",
+        "OMF",
+        "OPRT",
+        "NAVI"
+      ]
+    },
+    {
+      "name": "REITs - Data Centers",
+      "category": "Financials - REITs",
+      "tickers": [
+        "EQIX",
+        "DLR",
+        "AMT",
+        "CCI",
+        "SBAC",
+        "CONE",
+        "QTS",
+        "UNIT"
+      ]
+    },
+    {
+      "name": "REITs - Industrial",
+      "category": "Financials - REITs",
+      "tickers": [
+        "PLD",
+        "STAG",
+        "REXR",
+        "FR",
+        "EGP",
+        "TRNO",
+        "IIPR",
+        "COLD"
+      ]
+    },
+    {
+      "name": "REITs - Office",
+      "category": "Financials - REITs",
+      "tickers": [
+        "BXP",
+        "VNO",
+        "SLG",
+        "KRC",
+        "HIW",
+        "DEI",
+        "JBGS",
+        "CUZ",
+        "PGRE",
+        "OFC"
+      ]
+    },
+    {
+      "name": "REITs - Retail",
+      "category": "Financials - REITs",
+      "tickers": [
+        "SPG",
+        "O",
+        "KIM",
+        "REG",
+        "FRT",
+        "BRX",
+        "ROIC",
+        "SITC",
+        "AKR",
+        "NNN"
+      ]
+    },
+    {
+      "name": "REITs - Residential",
+      "category": "Financials - REITs",
+      "tickers": [
+        "EQR",
+        "AVB",
+        "ESS",
+        "MAA",
+        "UDR",
+        "INVH",
+        "AMH",
+        "CPT",
+        "AIV",
+        "NXRT"
+      ]
+    },
+    {
+      "name": "REITs - Healthcare",
+      "category": "Financials - REITs",
+      "tickers": [
+        "WELL",
+        "VTR",
+        "PEAK",
+        "HR",
+        "OHI",
+        "MPW",
+        "SBRA",
+        "NHI",
+        "LTC",
+        "CTRE"
+      ]
+    },
+    {
+      "name": "REITs - Hotels",
+      "category": "Financials - REITs",
+      "tickers": [
+        "HST",
+        "RHP",
+        "PK",
+        "SHO",
+        "DRH",
+        "APLE",
+        "RLJ",
+        "XHR",
+        "PEB",
+        "SVC"
+      ]
+    },
+    {
+      "name": "REITs - Storage",
+      "category": "Financials - REITs",
+      "tickers": [
+        "PSA",
+        "EXR",
+        "CUBE",
+        "LSI",
+        "NSA"
+      ]
+    },
+    {
+      "name": "REITs - Specialty",
+      "category": "Financials - REITs",
+      "tickers": [
+        "VICI",
+        "GLPI",
+        "AMT",
+        "CCI",
+        "SBAC",
+        "LAMR",
+        "OUT"
+      ]
+    },
+    {
+      "name": "REITs - Mortgage",
+      "category": "Financials - REITs",
+      "tickers": [
+        "NLY",
+        "AGNC",
+        "STWD",
+        "BXMT",
+        "TRTX",
+        "KREF",
+        "LADR"
+      ]
+    },
+    {
+      "name": "REITs - Timber",
+      "category": "Financials - REITs",
+      "tickers": [
+        "WY",
+        "RYN",
+        "PCH",
+        "CUT"
+      ]
+    },
+    {
+      "name": "REITs - Net Lease",
+      "category": "Financials - REITs",
+      "tickers": [
+        "O",
+        "NNN",
+        "STOR",
+        "EPRT",
+        "ADC",
+        "FCPT",
+        "SRC"
+      ]
+    },
+    {
+      "name": "Biotech - Large",
+      "category": "Healthcare - Biotech",
+      "tickers": [
+        "AMGN",
+        "GILD",
+        "REGN",
+        "VRTX",
+        "BIIB",
+        "MRNA",
+        "BNTX",
+        "SGEN",
+        "ALNY"
+      ]
+    },
+    {
+      "name": "Biotech - Mid Cap",
+      "category": "Healthcare - Biotech",
+      "tickers": [
+        "SRPT",
+        "ALNY",
+        "BMRN",
+        "EXAS",
+        "IONS",
+        "RARE",
+        "NBIX",
+        "PCVX",
+        "UTHR"
+      ]
+    },
+    {
+      "name": "Biotech - Small Cap",
+      "category": "Healthcare - Biotech",
+      "tickers": [
+        "DRNA",
+        "KRYS",
+        "BLUE",
+        "RETA",
+        "CYTK",
+        "TVTX",
+        "IMVT",
+        "KRTX",
+        "SWTX"
+      ]
+    },
+    {
+      "name": "Biotech - Oncology",
+      "category": "Healthcare - Biotech",
+      "tickers": [
+        "SGEN",
+        "EXEL",
+        "INCY",
+        "IMVT",
+        "ARVN",
+        "KYMR",
+        "BOLT",
+        "ERAS",
+        "RCUS",
+        "IOVA"
+      ]
+    },
+    {
+      "name": "Biotech - Gene Therapy",
+      "category": "Healthcare - Biotech",
+      "tickers": [
+        "CRSP",
+        "EDIT",
+        "NTLA",
+        "BEAM",
+        "VERV",
+        "PRME",
+        "QURE",
+        "SGMO",
+        "RARE"
+      ]
+    },
+    {
+      "name": "Biotech - mRNA",
+      "category": "Healthcare - Biotech",
+      "tickers": [
+        "MRNA",
+        "BNTX",
+        "CVAC",
+        "ARCT",
+        "TRIL"
+      ]
+    },
+    {
+      "name": "Biotech - CNS",
+      "category": "Healthcare - Biotech",
+      "tickers": [
+        "BIIB",
+        "SGEN",
+        "SAGE",
+        "AXSM",
+        "CRTX",
+        "PRAX",
+        "ANVS",
+        "ATAI"
+      ]
+    },
+    {
+      "name": "Biotech - Immunology",
+      "category": "Healthcare - Biotech",
+      "tickers": [
+        "AMGN",
+        "ABBV",
+        "JNJ",
+        "REGN",
+        "SGEN",
+        "ICPT",
+        "HZNP"
+      ]
+    },
+    {
+      "name": "Biotech - Rare Disease",
+      "category": "Healthcare - Biotech",
+      "tickers": [
+        "VRTX",
+        "ALNY",
+        "BMRN",
+        "RARE",
+        "SGEN",
+        "PTCT",
+        "FOLD"
+      ]
+    },
+    {
+      "name": "Biotech - Antibody",
+      "category": "Healthcare - Biotech",
+      "tickers": [
+        "REGN",
+        "ABBV",
+        "BMY",
+        "AMGN",
+        "GILD",
+        "JAZZ"
+      ]
+    },
+    {
+      "name": "Biotech - Cell Therapy",
+      "category": "Healthcare - Biotech",
+      "tickers": [
+        "KITE",
+        "JUNO",
+        "BLUE",
+        "FATE",
+        "CRISPR",
+        "KYMR"
+      ]
+    },
+    {
+      "name": "Biotech - Tools",
+      "category": "Healthcare - Biotech",
+      "tickers": [
+        "TMO",
+        "DHR",
+        "ILMN",
+        "A",
+        "BIO",
+        "TECH",
+        "RGEN",
+        "AZTA"
+      ]
+    },
+    {
+      "name": "Pharma - Big",
+      "category": "Healthcare - Pharma",
+      "tickers": [
+        "LLY",
+        "NVO",
+        "JNJ",
+        "PFE",
+        "MRK",
+        "ABBV",
+        "AZN",
+        "BMY",
+        "SNY",
+        "GSK",
+        "NVS"
+      ]
+    },
+    {
+      "name": "Pharma - Specialty",
+      "category": "Healthcare - Pharma",
+      "tickers": [
+        "JAZZ",
+        "UTHR",
+        "NBIX",
+        "PTCT",
+        "RARE",
+        "HZNP",
+        "INCY",
+        "SUPN",
+        "CORT"
+      ]
+    },
+    {
+      "name": "Pharma - Generic",
+      "category": "Healthcare - Pharma",
+      "tickers": [
+        "TEVA",
+        "MYL",
+        "AGN",
+        "PRGO",
+        "AMRX",
+        "LMNX"
+      ]
+    },
+    {
+      "name": "GLP-1 & Obesity",
+      "category": "Healthcare - Pharma",
+      "tickers": [
+        "LLY",
+        "NVO",
+        "AMGN",
+        "PFE",
+        "VKTX",
+        "HIMS",
+        "GPCR",
+        "ALT",
+        "VTYX"
+      ]
+    },
+    {
+      "name": "Pharma - Vaccines",
+      "category": "Healthcare - Pharma",
+      "tickers": [
+        "PFE",
+        "MRNA",
+        "BNTX",
+        "JNJ",
+        "MRK",
+        "GSK",
+        "SNY",
+        "NVAX"
+      ]
+    },
+    {
+      "name": "Pharma - Diabetes",
+      "category": "Healthcare - Pharma",
+      "tickers": [
+        "LLY",
+        "NVO",
+        "SNY",
+        "MRK",
+        "AZN",
+        "PODD",
+        "TNDM",
+        "DXCM"
+      ]
+    },
+    {
+      "name": "Pharma - Cardiovascular",
+      "category": "Healthcare - Pharma",
+      "tickers": [
+        "JNJ",
+        "PFE",
+        "MRK",
+        "BMY",
+        "AMGN",
+        "ABBV"
+      ]
+    },
+    {
+      "name": "Pharma - CNS & Pain",
+      "category": "Healthcare - Pharma",
+      "tickers": [
+        "JNJ",
+        "LLY",
+        "PFE",
+        "ABBV",
+        "BMY",
+        "JAZZ",
+        "AXSM"
+      ]
+    },
+    {
+      "name": "Medical Devices",
+      "category": "Healthcare - Devices & Services",
+      "tickers": [
+        "MDT",
+        "ABT",
+        "SYK",
+        "ISRG",
+        "BSX",
+        "EW",
+        "DXCM",
+        "PODD",
+        "HOLX",
+        "ALGN",
+        "ZBH",
+        "GMED"
+      ]
+    },
+    {
+      "name": "Medical Devices - Cardio",
+      "category": "Healthcare - Devices & Services",
+      "tickers": [
+        "MDT",
+        "ABT",
+        "BSX",
+        "EW",
+        "DXCM",
+        "SYK"
+      ]
+    },
+    {
+      "name": "Medical Devices - Ortho",
+      "category": "Healthcare - Devices & Services",
+      "tickers": [
+        "ZBH",
+        "SYK",
+        "GMED",
+        "NuVA",
+        "SIBN",
+        "OFIX"
+      ]
+    },
+    {
+      "name": "Medical Devices - Surgical",
+      "category": "Healthcare - Devices & Services",
+      "tickers": [
+        "ISRG",
+        "MDT",
+        "SYK",
+        "MASI",
+        "IRTC"
+      ]
+    },
+    {
+      "name": "Medical Equipment",
+      "category": "Healthcare - Devices & Services",
+      "tickers": [
+        "TMO",
+        "DHR",
+        "A",
+        "BDX",
+        "BAX",
+        "RMD",
+        "IDXX",
+        "MTD",
+        "IQV",
+        "HOLX"
+      ]
+    },
+    {
+      "name": "Healthcare Services",
+      "category": "Healthcare - Devices & Services",
+      "tickers": [
+        "UNH",
+        "HCA",
+        "CNC",
+        "ELV",
+        "HUM",
+        "CI",
+        "CVS",
+        "MOH",
+        "WCG"
+      ]
+    },
+    {
+      "name": "Hospitals",
+      "category": "Healthcare - Devices & Services",
+      "tickers": [
+        "HCA",
+        "UHS",
+        "THC",
+        "CYH",
+        "LPLA",
+        "SEM"
+      ]
+    },
+    {
+      "name": "Healthcare IT",
+      "category": "Healthcare - Devices & Services",
+      "tickers": [
+        "VEEV",
+        "HIMS",
+        "DOCS",
+        "AMWL",
+        "TDOC",
+        "CERT",
+        "GDRX",
+        "PHR",
+        "ONEM"
+      ]
+    },
+    {
+      "name": "Diagnostics & Labs",
+      "category": "Healthcare - Devices & Services",
+      "tickers": [
+        "DGX",
+        "LH",
+        "EXAS",
+        "GH",
+        "NTRA",
+        "CDNA",
+        "CLOV",
+        "ME",
+        "NEO"
+      ]
+    },
+    {
+      "name": "CRO & CMO",
+      "category": "Healthcare - Devices & Services",
+      "tickers": [
+        "IQV",
+        "CRL",
+        "MEDP",
+        "ICLR",
+        "WST",
+        "CTLT",
+        "AVTR"
+      ]
+    },
+    {
+      "name": "Dental",
+      "category": "Healthcare - Devices & Services",
+      "tickers": [
+        "ALGN",
+        "XRAY",
+        "HSIC",
+        "PDCO",
+        "SDC"
+      ]
+    },
+    {
+      "name": "Animal Health",
+      "category": "Healthcare - Devices & Services",
+      "tickers": [
+        "ZTS",
+        "IDXX",
+        "ELAN",
+        "PET",
+        "HSKA"
+      ]
+    },
+    {
+      "name": "Senior Living & Care",
+      "category": "Healthcare - Specialty",
+      "tickers": [
+        "WELL",
+        "VTR",
+        "OHI",
+        "SBRA",
+        "NHI",
+        "ENSG",
+        "PNTG"
+      ]
+    },
+    {
+      "name": "Home Health",
+      "category": "Healthcare - Specialty",
+      "tickers": [
+        "AMED",
+        "LHCG",
+        "ADUS",
+        "PNTG",
+        "SEM"
+      ]
+    },
+    {
+      "name": "Behavioral Health",
+      "category": "Healthcare - Specialty",
+      "tickers": [
+        "UHS",
+        "ACHC",
+        "SGRY",
+        "LVGO"
+      ]
+    },
+    {
+      "name": "Vision Care",
+      "category": "Healthcare - Specialty",
+      "tickers": [
+        "EYE",
+        "COO",
+        "ABT",
+        "JNJ",
+        "ALVO"
+      ]
+    },
+    {
+      "name": "Women's Health",
+      "category": "Healthcare - Specialty",
+      "tickers": [
+        "HIMS",
+        "TMC",
+        "NTRA",
+        "HOLX",
+        "INVO"
+      ]
+    },
+    {
+      "name": "Men's Health",
+      "category": "Healthcare - Specialty",
+      "tickers": [
+        "HIMS",
+        "HUMA",
+        "GDRX"
+      ]
+    },
+    {
+      "name": "Telehealth",
+      "category": "Healthcare - Specialty",
+      "tickers": [
+        "TDOC",
+        "AMWL",
+        "DOCS",
+        "HIMS",
+        "TALK"
+      ]
+    },
+    {
+      "name": "Weight Loss & Obesity",
+      "category": "Healthcare - Specialty",
+      "tickers": [
+        "LLY",
+        "NVO",
+        "HIMS",
+        "WW",
+        "AMGN",
+        "GPCR",
+        "VKTX"
+      ]
+    },
+    {
+      "name": "Retail - E-Commerce",
+      "category": "Consumer - Retail",
+      "tickers": [
+        "AMZN",
+        "SHOP",
+        "MELI",
+        "SE",
+        "ETSY",
+        "W",
+        "CHWY",
+        "CVNA",
+        "WISH"
+      ]
+    },
+    {
+      "name": "Retail - Discount",
+      "category": "Consumer - Retail",
+      "tickers": [
+        "WMT",
+        "COST",
+        "TGT",
+        "DG",
+        "DLTR",
+        "BJ",
+        "PSMT",
+        "BIG",
+        "OLLI"
+      ]
+    },
+    {
+      "name": "Retail - Home Improvement",
+      "category": "Consumer - Retail",
+      "tickers": [
+        "HD",
+        "LOW",
+        "TSCO",
+        "WSM",
+        "RH",
+        "FLOR",
+        "FND",
+        "TILE",
+        "SHW"
+      ]
+    },
+    {
+      "name": "Retail - Specialty",
+      "category": "Consumer - Retail",
+      "tickers": [
+        "ULTA",
+        "FIVE",
+        "ROST",
+        "TJX",
+        "BURL",
+        "GPS",
+        "ANF",
+        "AEO",
+        "EXPR",
+        "VSCO"
+      ]
+    },
+    {
+      "name": "Retail - Department",
+      "category": "Consumer - Retail",
+      "tickers": [
+        "M",
+        "JWN",
+        "KSS",
+        "DDS",
+        "JCP"
+      ]
+    },
+    {
+      "name": "Retail - Grocery",
+      "category": "Consumer - Retail",
+      "tickers": [
+        "KR",
+        "ACI",
+        "SFM",
+        "GO",
+        "IMKTA",
+        "WMK"
+      ]
+    },
+    {
+      "name": "Retail - Drug",
+      "category": "Consumer - Retail",
+      "tickers": [
+        "WBA",
+        "CVS",
+        "RAD"
+      ]
+    },
+    {
+      "name": "Retail - Auto Parts",
+      "category": "Consumer - Retail",
+      "tickers": [
+        "AZO",
+        "AAP",
+        "ORLY",
+        "GPC",
+        "LKQ"
+      ]
+    },
+    {
+      "name": "Retail - Electronics",
+      "category": "Consumer - Retail",
+      "tickers": [
+        "BBY",
+        "GME",
+        "CONN"
+      ]
+    },
+    {
+      "name": "Retail - Pet",
+      "category": "Consumer - Retail",
+      "tickers": [
+        "CHWY",
+        "WOOF",
+        "BARK",
+        "PET",
+        "FRPT"
+      ]
+    },
+    {
+      "name": "Retail - Sporting Goods",
+      "category": "Consumer - Retail",
+      "tickers": [
+        "DKS",
+        "BGFV",
+        "ASO",
+        "HIBB",
+        "FL"
+      ]
+    },
+    {
+      "name": "Retail - Office",
+      "category": "Consumer - Retail",
+      "tickers": [
+        "SPLS",
+        "ODP"
+      ]
+    },
+    {
+      "name": "Restaurants - Fast Food",
+      "category": "Consumer - Restaurants",
+      "tickers": [
+        "MCD",
+        "YUM",
+        "QSR",
+        "WEN",
+        "JACK",
+        "PZZA",
+        "DPZ",
+        "BROS",
+        "LOCO"
+      ]
+    },
+    {
+      "name": "Restaurants - Fast Casual",
+      "category": "Consumer - Restaurants",
+      "tickers": [
+        "CMG",
+        "SHAK",
+        "CAVA",
+        "WING",
+        "NDLS",
+        "TACO",
+        "BLMN",
+        "PLAY"
+      ]
+    },
+    {
+      "name": "Restaurants - Casual Dining",
+      "category": "Consumer - Restaurants",
+      "tickers": [
+        "DRI",
+        "TXRH",
+        "EAT",
+        "CAKE",
+        "RUTH",
+        "BJRI",
+        "DENN",
+        "CBRL"
+      ]
+    },
+    {
+      "name": "Restaurants - Coffee",
+      "category": "Consumer - Restaurants",
+      "tickers": [
+        "SBUX",
+        "BROS",
+        "DNKN",
+        "PEET"
+      ]
+    },
+    {
+      "name": "Restaurants - Pizza",
+      "category": "Consumer - Restaurants",
+      "tickers": [
+        "DPZ",
+        "PZZA",
+        "YUM"
+      ]
+    },
+    {
+      "name": "Restaurants - International",
+      "category": "Consumer - Restaurants",
+      "tickers": [
+        "QSR",
+        "YUM",
+        "MCD",
+        "SBUX",
+        "DPZ"
+      ]
+    },
+    {
+      "name": "Beverages - Soft Drinks",
+      "category": "Consumer - Food & Beverage",
+      "tickers": [
+        "KO",
+        "PEP",
+        "MNST",
+        "CELH",
+        "KDP",
+        "COKE"
+      ]
+    },
+    {
+      "name": "Beverages - Alcohol",
+      "category": "Consumer - Food & Beverage",
+      "tickers": [
+        "BUD",
+        "TAP",
+        "STZ",
+        "DEO",
+        "BF.B",
+        "SAM",
+        "ABEV"
+      ]
+    },
+    {
+      "name": "Beverages - Spirits",
+      "category": "Consumer - Food & Beverage",
+      "tickers": [
+        "DEO",
+        "BF.B",
+        "STZ",
+        "MGPI"
+      ]
+    },
+    {
+      "name": "Beverages - Energy",
+      "category": "Consumer - Food & Beverage",
+      "tickers": [
+        "MNST",
+        "CELH",
+        "BANG",
+        "KDP",
+        "PEP"
+      ]
+    },
+    {
+      "name": "Packaged Foods",
+      "category": "Consumer - Food & Beverage",
+      "tickers": [
+        "GIS",
+        "K",
+        "CAG",
+        "CPB",
+        "SJM",
+        "HRL",
+        "TSN",
+        "HSY",
+        "MDLZ",
+        "KHC",
+        "POST"
+      ]
+    },
+    {
+      "name": "Snacks & Candy",
+      "category": "Consumer - Food & Beverage",
+      "tickers": [
+        "HSY",
+        "MDLZ",
+        "TR",
+        "JJSF",
+        "TWNK"
+      ]
+    },
+    {
+      "name": "Meat & Poultry",
+      "category": "Consumer - Food & Beverage",
+      "tickers": [
+        "TSN",
+        "HRL",
+        "PPC",
+        "JBSS",
+        "BRFS"
+      ]
+    },
+    {
+      "name": "Household Products",
+      "category": "Consumer - Food & Beverage",
+      "tickers": [
+        "PG",
+        "CL",
+        "CLX",
+        "KMB",
+        "CHD",
+        "SPB",
+        "IPAR",
+        "ELF",
+        "COTY",
+        "EL"
+      ]
+    },
+    {
+      "name": "Gaming & Casinos",
+      "category": "Consumer - Leisure",
+      "tickers": [
+        "LVS",
+        "WYNN",
+        "MGM",
+        "CZR",
+        "PENN",
+        "DKNG",
+        "BYD",
+        "RRR",
+        "MCRI",
+        "GDEN"
+      ]
+    },
+    {
+      "name": "Sports Betting",
+      "category": "Consumer - Leisure",
+      "tickers": [
+        "DKNG",
+        "PENN",
+        "MGM",
+        "CZR",
+        "RSI",
+        "GENI",
+        "BETZ",
+        "FUBO"
+      ]
+    },
+    {
+      "name": "Theme Parks",
+      "category": "Consumer - Leisure",
+      "tickers": [
+        "DIS",
+        "CMCSA",
+        "SIX",
+        "FUN",
+        "SEAS",
+        "PRKS"
+      ]
+    },
+    {
+      "name": "Cruise Lines",
+      "category": "Consumer - Leisure",
+      "tickers": [
+        "CCL",
+        "RCL",
+        "NCLH"
+      ]
+    },
+    {
+      "name": "Hotels & Lodging",
+      "category": "Consumer - Leisure",
+      "tickers": [
+        "MAR",
+        "HLT",
+        "H",
+        "WH",
+        "CHH",
+        "IHG",
+        "STAY",
+        "APTS"
+      ]
+    },
+    {
+      "name": "Travel & Leisure",
+      "category": "Consumer - Leisure",
+      "tickers": [
+        "BKNG",
+        "ABNB",
+        "EXPE",
+        "TCOM",
+        "TRIP",
+        "LYV",
+        "MTN",
+        "PLNT"
+      ]
+    },
+    {
+      "name": "Fitness",
+      "category": "Consumer - Leisure",
+      "tickers": [
+        "PLNT",
+        "PTON",
+        "NLS",
+        "XPOF",
+        "FRGI"
+      ]
+    },
+    {
+      "name": "Outdoor Recreation",
+      "category": "Consumer - Leisure",
+      "tickers": [
+        "YETI",
+        "BC",
+        "CWH",
+        "LCII",
+        "FOXF",
+        "POOL",
+        "SCS"
+      ]
+    },
+    {
+      "name": "Toys & Games",
+      "category": "Consumer - Leisure",
+      "tickers": [
+        "HAS",
+        "MAT",
+        "FNKO",
+        "JAKK"
+      ]
+    },
+    {
+      "name": "Luxury & Apparel",
+      "category": "Consumer - Leisure",
+      "tickers": [
+        "LVMUY",
+        "RMS",
+        "CPRI",
+        "TPR",
+        "RL",
+        "NKE",
+        "LULU",
+        "VFC",
+        "PVH",
+        "GOOS"
+      ]
+    },
+    {
+      "name": "Heavy Equipment",
+      "category": "Industrials - Machinery",
+      "tickers": [
+        "CAT",
+        "DE",
+        "CNHI",
+        "AGCO",
+        "TEX",
+        "OSK",
+        "PCAR",
+        "CMI",
+        "ALSN"
+      ]
+    },
+    {
+      "name": "Construction Equipment",
+      "category": "Industrials - Machinery",
+      "tickers": [
+        "CAT",
+        "DE",
+        "OSK",
+        "TEX",
+        "MTW",
+        "ASTE"
+      ]
+    },
+    {
+      "name": "Agricultural Equipment",
+      "category": "Industrials - Machinery",
+      "tickers": [
+        "DE",
+        "AGCO",
+        "CNHI",
+        "TITN",
+        "LNN",
+        "AGX"
+      ]
+    },
+    {
+      "name": "Mining Equipment",
+      "category": "Industrials - Machinery",
+      "tickers": [
+        "CAT",
+        "JOY",
+        "TEX",
+        "HAYN"
+      ]
+    },
+    {
+      "name": "Industrial Machinery",
+      "category": "Industrials - Machinery",
+      "tickers": [
+        "PH",
+        "EMR",
+        "ROK",
+        "ETN",
+        "HON",
+        "MMM",
+        "ITW",
+        "DOV",
+        "SWK",
+        "ROP"
+      ]
+    },
+    {
+      "name": "Pumps & Valves",
+      "category": "Industrials - Machinery",
+      "tickers": [
+        "FLS",
+        "XYL",
+        "IDEX",
+        "RXN",
+        "GGG",
+        "MWA"
+      ]
+    },
+    {
+      "name": "HVAC & Building",
+      "category": "Industrials - Machinery",
+      "tickers": [
+        "CARR",
+        "TT",
+        "LII",
+        "WSO",
+        "JCI",
+        "GNRC"
+      ]
+    },
+    {
+      "name": "Automation & Controls",
+      "category": "Industrials - Machinery",
+      "tickers": [
+        "ROK",
+        "EMR",
+        "HON",
+        "ABB",
+        "FANUY"
+      ]
+    },
+    {
+      "name": "Railroads",
+      "category": "Industrials - Transport",
+      "tickers": [
+        "UNP",
+        "CSX",
+        "NSC",
+        "CP",
+        "CNI"
+      ]
+    },
+    {
+      "name": "Trucking - LTL",
+      "category": "Industrials - Transport",
+      "tickers": [
+        "ODFL",
+        "XPO",
+        "SAIA",
+        "ARCB"
+      ]
+    },
+    {
+      "name": "Trucking - TL",
+      "category": "Industrials - Transport",
+      "tickers": [
+        "WERN",
+        "JBHT",
+        "KNX",
+        "SNDR",
+        "HTLD",
+        "MRTN"
+      ]
+    },
+    {
+      "name": "Airlines - Legacy",
+      "category": "Industrials - Transport",
+      "tickers": [
+        "DAL",
+        "UAL",
+        "AAL",
+        "LUV"
+      ]
+    },
+    {
+      "name": "Airlines - LCC",
+      "category": "Industrials - Transport",
+      "tickers": [
+        "LUV",
+        "JBLU",
+        "SAVE",
+        "ULCC",
+        "ALK"
+      ]
+    },
+    {
+      "name": "Airlines - International",
+      "category": "Industrials - Transport",
+      "tickers": [
+        "AAL",
+        "UAL",
+        "DAL"
+      ]
+    },
+    {
+      "name": "Shipping - Container",
+      "category": "Industrials - Transport",
+      "tickers": [
+        "ZIM",
+        "MATX",
+        "DAC"
+      ]
+    },
+    {
+      "name": "Shipping - Dry Bulk",
+      "category": "Industrials - Transport",
+      "tickers": [
+        "GOGL",
+        "SBLK",
+        "GNK",
+        "EGLE",
+        "CTRM",
+        "DSX",
+        "SB"
+      ]
+    },
+    {
+      "name": "Waste Management",
+      "category": "Industrials - Services",
+      "tickers": [
+        "WM",
+        "RSG",
+        "WCN",
+        "CLH",
+        "CWST",
+        "SRCL",
+        "GFL",
+        "ECOL"
+      ]
+    },
+    {
+      "name": "Security Services",
+      "category": "Industrials - Services",
+      "tickers": [
+        "G",
+        "BCO",
+        "BRC",
+        "ALLE",
+        "NSSC"
+      ]
+    },
+    {
+      "name": "Staffing",
+      "category": "Industrials - Services",
+      "tickers": [
+        "RHI",
+        "MAN",
+        "ASGN",
+        "KFY",
+        "HSII",
+        "TBI",
+        "HSON",
+        "BFAM"
+      ]
+    },
+    {
+      "name": "Engineering & Construction",
+      "category": "Industrials - Services",
+      "tickers": [
+        "ACM",
+        "J",
+        "TTEK",
+        "MTZ",
+        "PWR",
+        "DY",
+        "FLR",
+        "EME",
+        "PRIM",
+        "GVA"
+      ]
+    },
+    {
+      "name": "Environmental Services",
+      "category": "Industrials - Services",
+      "tickers": [
+        "WM",
+        "RSG",
+        "CLH",
+        "SRCL",
+        "ECOL",
+        "CCLP"
+      ]
+    },
+    {
+      "name": "Consulting",
+      "category": "Industrials - Services",
+      "tickers": [
+        "ACN",
+        "IT",
+        "LDOS",
+        "BAH",
+        "FCN",
+        "HUB.B"
+      ]
+    },
+    {
+      "name": "Facilities",
+      "category": "Industrials - Services",
+      "tickers": [
+        "ABM",
+        "CBRE",
+        "JLL",
+        "ARMK",
+        "RMR"
+      ]
+    },
+    {
+      "name": "Testing & Inspection",
+      "category": "Industrials - Services",
+      "tickers": [
+        "SGS",
+        "BV",
+        "ALS",
+        "EXPO",
+        "NSC"
+      ]
+    },
+    {
+      "name": "Chemicals - Diversified",
+      "category": "Materials & Chemicals",
+      "tickers": [
+        "LYB",
+        "DOW",
+        "DD",
+        "CE",
+        "EMN",
+        "HUN",
+        "OLN",
+        "WLK",
+        "AXTA",
+        "CC"
+      ]
+    },
+    {
+      "name": "Chemicals - Specialty",
+      "category": "Materials & Chemicals",
+      "tickers": [
+        "APD",
+        "SHW",
+        "PPG",
+        "ECL",
+        "IFF",
+        "ALB",
+        "FMC",
+        "ROL",
+        "AVNT"
+      ]
+    },
+    {
+      "name": "Chemicals - Agricultural",
+      "category": "Materials & Chemicals",
+      "tickers": [
+        "NTR",
+        "MOS",
+        "CF",
+        "FMC",
+        "SMG",
+        "CTVA"
+      ]
+    },
+    {
+      "name": "Chemicals - Plastics",
+      "category": "Materials & Chemicals",
+      "tickers": [
+        "LYB",
+        "DOW",
+        "WLK",
+        "CC",
+        "TROX"
+      ]
+    },
+    {
+      "name": "Building Materials",
+      "category": "Materials & Chemicals",
+      "tickers": [
+        "VMC",
+        "MLM",
+        "SUM",
+        "USCR",
+        "EXP",
+        "USLM"
+      ]
+    },
+    {
+      "name": "Packaging - Paper",
+      "category": "Materials & Chemicals",
+      "tickers": [
+        "IP",
+        "PKG",
+        "WRK",
+        "GPK",
+        "SON",
+        "SEE"
+      ]
+    },
+    {
+      "name": "Packaging - Plastic & Metal",
+      "category": "Materials & Chemicals",
+      "tickers": [
+        "BALL",
+        "CCK",
+        "SEE",
+        "SLGN",
+        "ATR",
+        "BLL"
+      ]
+    },
+    {
+      "name": "Paper & Forest Products",
+      "category": "Materials & Chemicals",
+      "tickers": [
+        "WY",
+        "RYN",
+        "PCH",
+        "LPX",
+        "WFG"
+      ]
+    },
+    {
+      "name": "Coatings & Paints",
+      "category": "Materials & Chemicals",
+      "tickers": [
+        "SHW",
+        "PPG",
+        "AXTA",
+        "RPM",
+        "AZEK"
+      ]
+    },
+    {
+      "name": "Industrial Gases",
+      "category": "Materials & Chemicals",
+      "tickers": [
+        "APD",
+        "LIN",
+        "ECL"
+      ]
+    },
+    {
+      "name": "Homebuilders - Large",
+      "category": "Real Estate - Non REIT",
+      "tickers": [
+        "LEN",
+        "DHI",
+        "PHM",
+        "NVR",
+        "TOL"
+      ]
+    },
+    {
+      "name": "Homebuilders - Mid",
+      "category": "Real Estate - Non REIT",
+      "tickers": [
+        "KBH",
+        "MTH",
+        "MHO",
+        "TPH",
+        "CCS",
+        "GRBK",
+        "DFH"
+      ]
+    },
+    {
+      "name": "Homebuilders - Entry Level",
+      "category": "Real Estate - Non REIT",
+      "tickers": [
+        "LGI",
+        "TMHC",
+        "CVCO"
+      ]
+    },
+    {
+      "name": "Building Products",
+      "category": "Real Estate - Non REIT",
+      "tickers": [
+        "CARR",
+        "JCI",
+        "TT",
+        "LII",
+        "AZEK",
+        "TREX",
+        "AWI",
+        "DOOR",
+        "BLDR"
+      ]
+    },
+    {
+      "name": "Real Estate Services",
+      "category": "Real Estate - Non REIT",
+      "tickers": [
+        "CBRE",
+        "JLL",
+        "CWK",
+        "RMR",
+        "NMRK",
+        "RDFN",
+        "OPEN",
+        "COMP"
+      ]
+    },
+    {
+      "name": "Real Estate Tech",
+      "category": "Real Estate - Non REIT",
+      "tickers": [
+        "ZG",
+        "RDFN",
+        "OPEN",
+        "COMP",
+        "EXPI",
+        "FTHM"
+      ]
+    },
+    {
+      "name": "Auto - Traditional OEM",
+      "category": "Autos & EV",
+      "tickers": [
+        "GM",
+        "F",
+        "TM",
+        "HMC",
+        "STLA",
+        "VWAGY"
+      ]
+    },
+    {
+      "name": "Auto - Luxury",
+      "category": "Autos & EV",
+      "tickers": [
+        "TSLA",
+        "RACE",
+        "MBGAF",
+        "BMWYY",
+        "POAHY"
+      ]
+    },
+    {
+      "name": "EV - Manufacturers",
+      "category": "Autos & EV",
+      "tickers": [
+        "TSLA",
+        "RIVN",
+        "LCID",
+        "NIO",
+        "XPEV",
+        "LI",
+        "PSNY",
+        "FFIE",
+        "FSR",
+        "WKHS",
+        "RIDE"
+      ]
+    },
+    {
+      "name": "EV - Charging",
+      "category": "Autos & EV",
+      "tickers": [
+        "CHPT",
+        "BLNK",
+        "EVGO",
+        "ABB",
+        "WBX",
+        "VLTA",
+        "AMPX",
+        "SBE"
+      ]
+    },
+    {
+      "name": "EV - Components",
+      "category": "Autos & EV",
+      "tickers": [
+        "LEA",
+        "APT",
+        "ALV",
+        "BWA",
+        "GNTX",
+        "ADNT",
+        "MGA"
+      ]
+    },
+    {
+      "name": "EV - Batteries",
+      "category": "Autos & EV",
+      "tickers": [
+        "TSLA",
+        "QS",
+        "SLDP",
+        "ENVX",
+        "AMPX",
+        "MVST",
+        "SES",
+        "FREYR"
+      ]
+    },
+    {
+      "name": "Autonomous Vehicles",
+      "category": "Autos & EV",
+      "tickers": [
+        "TSLA",
+        "GOOGL",
+        "GM",
+        "MBLY",
+        "LAZR",
+        "INVZ",
+        "AEVA",
+        "OUST",
+        "VLDR"
+      ]
+    },
+    {
+      "name": "LIDAR",
+      "category": "Autos & EV",
+      "tickers": [
+        "LAZR",
+        "INVZ",
+        "AEVA",
+        "OUST",
+        "LIDR",
+        "HSAI",
+        "MBLY",
+        "CPTN"
+      ]
+    },
+    {
+      "name": "Auto Parts",
+      "category": "Autos & EV",
+      "tickers": [
+        "APTV",
+        "BWA",
+        "LEA",
+        "VC",
+        "ALV",
+        "GNTX",
+        "DAN",
+        "MTOR",
+        "CWH"
+      ]
+    },
+    {
+      "name": "Auto Dealers",
+      "category": "Autos & EV",
+      "tickers": [
+        "AN",
+        "LAD",
+        "PAG",
+        "SAH",
+        "ABG",
+        "GPI",
+        "RUSHA"
+      ]
+    },
+    {
+      "name": "Trucks & RV",
+      "category": "Autos & EV",
+      "tickers": [
+        "PCAR",
+        "CMI",
+        "NAV",
+        "OSK",
+        "WGO",
+        "THO",
+        "CWH",
+        "LCII"
+      ]
+    },
+    {
+      "name": "3D Printing",
+      "category": "Emerging Tech",
+      "tickers": [
+        "DDD",
+        "SSYS",
+        "XMTR",
+        "DM",
+        "MKFG",
+        "NNDM",
+        "VJET",
+        "MTLS"
+      ]
+    },
+    {
+      "name": "Drones & UAV",
+      "category": "Emerging Tech",
+      "tickers": [
+        "AVAV",
+        "JOBY",
+        "ACHR",
+        "RCAT",
+        "UAVS",
+        "KTOS",
+        "AGX"
+      ]
+    },
+    {
+      "name": "AR/VR & Metaverse",
+      "category": "Emerging Tech",
+      "tickers": [
+        "META",
+        "AAPL",
+        "MSFT",
+        "SNAP",
+        "U",
+        "RBLX",
+        "IMMR",
+        "VUZI",
+        "KOPN"
+      ]
+    },
+    {
+      "name": "IoT & Smart Home",
+      "category": "Emerging Tech",
+      "tickers": [
+        "GOOGL",
+        "AMZN",
+        "AAPL",
+        "ADT",
+        "LOGI",
+        "ARLO",
+        "SMRT"
+      ]
+    },
+    {
+      "name": "5G Infrastructure",
+      "category": "Emerging Tech",
+      "tickers": [
+        "ERIC",
+        "NOK",
+        "CSCO",
+        "QCOM",
+        "MRVL",
+        "VIAVI",
+        "COMM",
+        "CIEN",
+        "INFN"
+      ]
+    },
+    {
+      "name": "Edge Computing",
+      "category": "Emerging Tech",
+      "tickers": [
+        "ANET",
+        "FSLY",
+        "NET",
+        "AKAM",
+        "LLNW"
+      ]
+    },
+    {
+      "name": "Wearables",
+      "category": "Emerging Tech",
+      "tickers": [
+        "AAPL",
+        "GRMN",
+        "FIT",
+        "HEAR",
+        "VUZI"
+      ]
+    },
+    {
+      "name": "Smart Grid",
+      "category": "Emerging Tech",
+      "tickers": [
+        "ITRI",
+        "GNRC",
+        "PWR",
+        "ETN",
+        "EMR"
+      ]
+    },
+    {
+      "name": "Telecom - Wireless",
+      "category": "Telecom",
+      "tickers": [
+        "T",
+        "VZ",
+        "TMUS"
+      ]
+    },
+    {
+      "name": "Telecom - Cable",
+      "category": "Telecom",
+      "tickers": [
+        "CMCSA",
+        "CHTR",
+        "CABO",
+        "ATUS",
+        "LBRDA"
+      ]
+    },
+    {
+      "name": "Telecom - Infrastructure",
+      "category": "Telecom",
+      "tickers": [
+        "AMT",
+        "CCI",
+        "SBAC",
+        "UNIT",
+        "LMRK"
+      ]
+    },
+    {
+      "name": "Telecom - Fiber",
+      "category": "Telecom",
+      "tickers": [
+        "LUMN",
+        "FTR",
+        "CTL",
+        "CCOI"
+      ]
+    },
+    {
+      "name": "Telecom - Satellite",
+      "category": "Telecom",
+      "tickers": [
+        "ASTS",
+        "GSAT",
+        "IRDM",
+        "VSAT"
+      ]
+    },
+    {
+      "name": "Telecom - Equipment",
+      "category": "Telecom",
+      "tickers": [
+        "CSCO",
+        "JNPR",
+        "NOK",
+        "ERIC",
+        "CIEN"
+      ]
+    },
+    {
+      "name": "Media - Traditional",
+      "category": "Media & Entertainment",
+      "tickers": [
+        "DIS",
+        "CMCSA",
+        "PARA",
+        "WBD",
+        "FOXA",
+        "NWS",
+        "NYT",
+        "NXST",
+        "GTN"
+      ]
+    },
+    {
+      "name": "Media - Streaming",
+      "category": "Media & Entertainment",
+      "tickers": [
+        "NFLX",
+        "DIS",
+        "WBD",
+        "PARA",
+        "ROKU",
+        "SPOT",
+        "FUBO"
+      ]
+    },
+    {
+      "name": "Media - Music",
+      "category": "Media & Entertainment",
+      "tickers": [
+        "SPOT",
+        "WMG",
+        "UMG",
+        "LYV",
+        "IHRT",
+        "SIRI"
+      ]
+    },
+    {
+      "name": "Media - Publishing",
+      "category": "Media & Entertainment",
+      "tickers": [
+        "NYT",
+        "NWSA",
+        "GCI",
+        "LEE",
+        "TRNC"
+      ]
+    },
+    {
+      "name": "Advertising - Digital",
+      "category": "Media & Entertainment",
+      "tickers": [
+        "GOOGL",
+        "META",
+        "TTD",
+        "MGNI",
+        "PUBM",
+        "DV",
+        "IAS",
+        "ZETA"
+      ]
+    },
+    {
+      "name": "Advertising - Traditional",
+      "category": "Media & Entertainment",
+      "tickers": [
+        "IPG",
+        "OMC",
+        "WPP",
+        "JCD"
+      ]
+    },
+    {
+      "name": "Media - Sports",
+      "category": "Media & Entertainment",
+      "tickers": [
+        "DIS",
+        "FOXA",
+        "WBD",
+        "DKNG",
+        "MSG",
+        "MSGS",
+        "BATRA"
+      ]
+    },
+    {
+      "name": "Live Entertainment",
+      "category": "Media & Entertainment",
+      "tickers": [
+        "LYV",
+        "MSG",
+        "MSGE",
+        "DIS",
+        "SIX",
+        "FUN"
+      ]
+    },
+    {
+      "name": "China Tech",
+      "category": "International",
+      "tickers": [
+        "BABA",
+        "JD",
+        "PDD",
+        "BIDU",
+        "NTES",
+        "TME",
+        "BILI",
+        "NIO",
+        "XPEV",
+        "LI",
+        "KWEB",
+        "DIDI"
+      ]
+    },
+    {
+      "name": "China Finance",
+      "category": "International",
+      "tickers": [
+        "BABA",
+        "JD",
+        "BEKE",
+        "FUTU",
+        "TIGR",
+        "LU",
+        "FINV"
+      ]
+    },
+    {
+      "name": "China EV",
+      "category": "International",
+      "tickers": [
+        "NIO",
+        "XPEV",
+        "LI",
+        "BYD",
+        "BYDDF"
+      ]
+    },
+    {
+      "name": "India",
+      "category": "International",
+      "tickers": [
+        "IBN",
+        "HDB",
+        "INFY",
+        "WIT",
+        "INDA",
+        "SIFY",
+        "RDY",
+        "TTM",
+        "VEDL",
+        "RELI"
+      ]
+    },
+    {
+      "name": "Latin America",
+      "category": "International",
+      "tickers": [
+        "NU",
+        "MELI",
+        "STNE",
+        "PAGS",
+        "VALE",
+        "PBR",
+        "ITUB",
+        "BBD",
+        "ABEV",
+        "AMX"
+      ]
+    },
+    {
+      "name": "Latin America - E-Commerce",
+      "category": "International",
+      "tickers": [
+        "MELI",
+        "VTEX",
+        "DLOCAL",
+        "STNE",
+        "PAGS"
+      ]
+    },
+    {
+      "name": "Japan",
+      "category": "International",
+      "tickers": [
+        "TM",
+        "SONY",
+        "NTDOY",
+        "MUFG",
+        "NMR",
+        "HMC",
+        "SMFG",
+        "MFG",
+        "NTT"
+      ]
+    },
+    {
+      "name": "Korea",
+      "category": "International",
+      "tickers": [
+        "SAMSUNG",
+        "LG",
+        "HYMTF",
+        "KB",
+        "SHG"
+      ]
+    },
+    {
+      "name": "Taiwan",
+      "category": "International",
+      "tickers": [
+        "TSM",
+        "UMC",
+        "ASX",
+        "HIMX",
+        "SILC"
+      ]
+    },
+    {
+      "name": "Europe - Banks",
+      "category": "International",
+      "tickers": [
+        "DB",
+        "UBS",
+        "CS",
+        "HSBC",
+        "BCS",
+        "LYG",
+        "SAN",
+        "BBVA",
+        "ING"
+      ]
+    },
+    {
+      "name": "Europe - Luxury",
+      "category": "International",
+      "tickers": [
+        "LVMUY",
+        "MC",
+        "RMS",
+        "BURBY",
+        "MONC"
+      ]
+    },
+    {
+      "name": "Emerging Markets",
+      "category": "International",
+      "tickers": [
+        "VWO",
+        "EEM",
+        "IEMG",
+        "SCHE",
+        "EMQQ",
+        "FM"
+      ]
+    },
+    {
+      "name": "Agriculture - Diversified",
+      "category": "Commodities & Agriculture",
+      "tickers": [
+        "ADM",
+        "BG",
+        "CTVA",
+        "DE",
+        "MOS",
+        "NTR",
+        "CF",
+        "FMC",
+        "SMG",
+        "AGCO"
+      ]
+    },
+    {
+      "name": "Agriculture - Seeds",
+      "category": "Commodities & Agriculture",
+      "tickers": [
+        "CTVA",
+        "FMC",
+        "SMG",
+        "LSF"
+      ]
+    },
+    {
+      "name": "Agriculture - Equipment",
+      "category": "Commodities & Agriculture",
+      "tickers": [
+        "DE",
+        "AGCO",
+        "CNHI",
+        "CAT",
+        "TITN"
+      ]
+    },
+    {
+      "name": "Water - Utilities",
+      "category": "Commodities & Agriculture",
+      "tickers": [
+        "AWK",
+        "WTR",
+        "WTRG",
+        "CWT",
+        "SJW"
+      ]
+    },
+    {
+      "name": "Water - Technology",
+      "category": "Commodities & Agriculture",
+      "tickers": [
+        "XYL",
+        "PNR",
+        "FBIN",
+        "WTS",
+        "MWA"
+      ]
+    },
+    {
+      "name": "Timber & Forest",
+      "category": "Commodities & Agriculture",
+      "tickers": [
+        "WY",
+        "RYN",
+        "PCH",
+        "LPX",
+        "WFG",
+        "CUT"
+      ]
+    },
+    {
+      "name": "Livestock & Meat",
+      "category": "Commodities & Agriculture",
+      "tickers": [
+        "TSN",
+        "HRL",
+        "PPC",
+        "BRFS",
+        "JBSS"
+      ]
+    },
+    {
+      "name": "Grain & Oilseed",
+      "category": "Commodities & Agriculture",
+      "tickers": [
+        "ADM",
+        "BG",
+        "INGR",
+        "AGM"
+      ]
+    },
+    {
+      "name": "Cannabis",
+      "category": "Specialty Themes",
+      "tickers": [
+        "LSDIF",
+        "CRON",
+        "GTBIF",
+        "VFF",
+        "GRWG",
+        "INCR",
+        "ACB",
+        "MJ",
+        "TCNNF",
+        "SNDL",
+        "MSOS",
+        "VRNO",
+        "CURLF",
+        "MAPS",
+        "CRLBF",
+        "IIPR",
+        "TSNDF",
+        "ISPR",
+        "TLRY",
+        "CGC",
+        "MSOX",
+        "LFLYD",
+        "AFCG",
+        "YCBD",
+        "IMCC",
+        "FLGC",
+        "AKAN",
+        "QCLS",
+        "FMTOF"
+      ]
+    },
+    {
+      "name": "Psychedelics",
+      "category": "Specialty Themes",
+      "tickers": [
+        "CMPS",
+        "MNMD",
+        "ATAI",
+        "FTRP",
+        "CYBN",
+        "DRUG"
+      ]
+    },
+    {
+      "name": "Alcohol & Spirits",
+      "category": "Specialty Themes",
+      "tickers": [
+        "BUD",
+        "TAP",
+        "STZ",
+        "DEO",
+        "BF.B",
+        "SAM",
+        "MGPI",
+        "ABEV"
+      ]
+    },
+    {
+      "name": "Tobacco",
+      "category": "Specialty Themes",
+      "tickers": [
+        "MO",
+        "PM",
+        "BTI",
+        "IMBBY",
+        "TPB",
+        "VGR",
+        "XXII"
+      ]
+    },
+    {
+      "name": "Pet Industry",
+      "category": "Specialty Themes",
+      "tickers": [
+        "CHWY",
+        "IDXX",
+        "ZTS",
+        "TRUP",
+        "WOOF",
+        "BARK",
+        "PET",
+        "FRPT"
+      ]
+    },
+    {
+      "name": "Education",
+      "category": "Specialty Themes",
+      "tickers": [
+        "CHGG",
+        "DUOL",
+        "COUR",
+        "LRN",
+        "STRA",
+        "TWOU",
+        "PRDO",
+        "UDMY"
+      ]
+    },
+    {
+      "name": "Funeral & Death Care",
+      "category": "Specialty Themes",
+      "tickers": [
+        "SCI",
+        "CSV",
+        "MATW",
+        "STON"
+      ]
+    },
+    {
+      "name": "Prisons",
+      "category": "Specialty Themes",
+      "tickers": [
+        "GEO",
+        "CXW"
+      ]
+    },
+    {
+      "name": "Meme Stocks",
+      "category": "Specialty Themes",
+      "tickers": [
+        "GME",
+        "AMC",
+        "BB",
+        "CLOV",
+        "WISH",
+        "SPCE",
+        "PLTR",
+        "BBIG"
+      ]
+    },
+    {
+      "name": "SPACs",
+      "category": "Specialty Themes",
+      "tickers": [
+        "PSTH",
+        "IPOF",
+        "DWAC",
+        "CFVI"
+      ]
+    },
+    {
+      "name": "ARK Holdings",
+      "category": "Specialty Themes",
+      "tickers": [
+        "TSLA",
+        "COIN",
+        "SQ",
+        "ROKU",
+        "SHOP",
+        "PATH",
+        "DKNG",
+        "ZM",
+        "HOOD",
+        "U",
+        "TWLO"
+      ]
+    },
+    {
+      "name": "Buffett Portfolio",
+      "category": "Specialty Themes",
+      "tickers": [
+        "AAPL",
+        "BAC",
+        "AXP",
+        "KO",
+        "CVX",
+        "OXY",
+        "KHC",
+        "MCO",
+        "DVA",
+        "VRSN"
+      ]
+    },
+    {
+      "name": "Dividend Aristocrats",
+      "category": "Specialty Themes",
+      "tickers": [
+        "JNJ",
+        "PG",
+        "KO",
+        "PEP",
+        "MMM",
+        "ABT",
+        "MCD",
+        "XOM",
+        "CVX",
+        "CL"
+      ]
+    },
+    {
+      "name": "High Short Interest",
+      "category": "Specialty Themes",
+      "tickers": [
+        "GME",
+        "AMC",
+        "SPCE",
+        "BBBY",
+        "CLOV",
+        "RIDE",
+        "GOEV"
+      ]
+    },
+    {
+      "name": "Insider Buying",
+      "category": "Specialty Themes",
+      "tickers": [
+        "GOOGL",
+        "META",
+        "JPM",
+        "WFC",
+        "GS"
+      ]
+    },
+    {
+      "name": "Value - Deep",
+      "category": "Factor Themes",
+      "tickers": [
+        "BRK.B",
+        "JPM",
+        "BAC",
+        "WFC",
+        "C",
+        "XOM",
+        "CVX",
+        "T",
+        "VZ"
+      ]
+    },
+    {
+      "name": "Growth - High",
+      "category": "Factor Themes",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "AMD",
+        "SHOP",
+        "SQ",
+        "DDOG",
+        "SNOW",
+        "NET",
+        "CRWD"
+      ]
+    },
+    {
+      "name": "Quality",
+      "category": "Factor Themes",
+      "tickers": [
+        "MSFT",
+        "AAPL",
+        "GOOGL",
+        "JNJ",
+        "PG",
+        "V",
+        "MA",
+        "UNH",
+        "HD"
+      ]
+    },
+    {
+      "name": "Momentum",
+      "category": "Factor Themes",
+      "tickers": [
+        "NVDA",
+        "META",
+        "LLY",
+        "AVGO",
+        "ORCL",
+        "COST",
+        "NFLX"
+      ]
+    },
+    {
+      "name": "Low Vol",
+      "category": "Factor Themes",
+      "tickers": [
+        "JNJ",
+        "PG",
+        "KO",
+        "PEP",
+        "WMT",
+        "MCD",
+        "VZ",
+        "T"
+      ]
+    }
+  ]
+}
