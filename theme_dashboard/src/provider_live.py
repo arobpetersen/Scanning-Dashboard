@@ -17,6 +17,8 @@ class LiveProvider(ProviderBase):
     def __init__(self, api_key: str | None = None, timeout_s: int = 20):
         self.api_key = api_key or finnhub_api_key()
         self.timeout_s = timeout_s
+        self.session = requests.Session()
+        self._profile_cache: dict[str, dict] = {}
 
     @property
     def is_configured(self) -> bool:
@@ -25,12 +27,23 @@ class LiveProvider(ProviderBase):
     def _get(self, path: str, **params) -> dict:
         if not self.api_key:
             raise RuntimeError("Finnhub API key not configured")
+
         if "from_" in params:
             params["from"] = params.pop("from_")
         params["token"] = self.api_key
-        resp = requests.get(f"{self.base_url}{path}", params=params, timeout=self.timeout_s)
-        resp.raise_for_status()
-        return resp.json()
+
+        response = self.session.get(f"{self.base_url}{path}", params=params, timeout=self.timeout_s)
+        if response.status_code == 429:
+            raise RuntimeError("RATE_LIMIT: Finnhub returned HTTP 429")
+        response.raise_for_status()
+
+        payload = response.json()
+        if isinstance(payload, dict) and payload.get("error"):
+            error_text = str(payload["error"])
+            if "limit" in error_text.lower() or "429" in error_text:
+                raise RuntimeError(f"RATE_LIMIT: {error_text}")
+            raise RuntimeError(error_text)
+        return payload
 
     @staticmethod
     def _calc_return(closes: list[float], lookback_days: int) -> float | None:
@@ -46,7 +59,7 @@ class LiveProvider(ProviderBase):
     def _avg_volume(volumes: list[float], lookback_days: int = 21) -> float | None:
         if not volumes:
             return None
-        sample = volumes[-lookback_days:]
+        sample = [v for v in volumes[-lookback_days:] if v is not None]
         if not sample:
             return None
         return float(sum(sample) / len(sample))
@@ -55,32 +68,39 @@ class LiveProvider(ProviderBase):
         rows: list[dict] = []
         failures: list[dict] = []
 
+        normalized = sorted({(t or "").strip().upper() for t in tickers if (t or "").strip()})
+        if not normalized:
+            return pd.DataFrame(), []
+
         if not self.is_configured:
             return pd.DataFrame(), [
                 {
                     "ticker": t,
-                    "error_message": "Finnhub API key missing. Set FINNHUB_API_KEY environment variable.",
+                    "error_message": "CONFIG: Finnhub API key missing. Set FINNHUB_API_KEY environment variable.",
                 }
-                for t in sorted(set(tickers))
+                for t in normalized
             ]
 
         now = datetime.now(timezone.utc)
         to_ts = int(now.timestamp())
-        from_ts = to_ts - 200 * 24 * 60 * 60
+        from_ts = to_ts - 240 * 24 * 60 * 60
 
-        for raw in sorted(set(tickers)):
-            ticker = raw.strip().upper()
-            if not ticker:
-                continue
+        for ticker in normalized:
             try:
                 quote = self._get("/quote", symbol=ticker)
                 candles = self._get("/stock/candle", symbol=ticker, resolution="D", from_=from_ts, to=to_ts)
-                profile = self._get("/stock/profile2", symbol=ticker)
+                profile = self._profile_cache.get(ticker)
+                if profile is None:
+                    profile = self._get("/stock/profile2", symbol=ticker)
+                    self._profile_cache[ticker] = profile
+
+                if candles.get("s") != "ok":
+                    raise RuntimeError(f"NO_CANDLES: Finnhub candle status={candles.get('s')}")
 
                 closes = candles.get("c", []) or []
                 volumes = candles.get("v", []) or []
                 if not closes:
-                    raise RuntimeError("No historical close data returned by Finnhub")
+                    raise RuntimeError("NO_CANDLES: No historical close data returned by Finnhub")
 
                 perf_1w = self._calc_return(closes, 5)
                 perf_1m = self._calc_return(closes, 21)
@@ -109,6 +129,13 @@ class LiveProvider(ProviderBase):
                     }
                 )
             except Exception as exc:
-                failures.append({"ticker": ticker, "error_message": f"Finnhub fetch failed: {exc}"})
+                msg = str(exc)
+                if "RATE_LIMIT" in msg or "429" in msg:
+                    msg = f"RATE_LIMIT: {msg}"
+                elif "NO_CANDLES" in msg:
+                    msg = f"NO_CANDLES: {msg}"
+                else:
+                    msg = f"REQUEST_ERROR: {msg}"
+                failures.append({"ticker": ticker, "error_message": f"Finnhub fetch failed: {msg}"})
 
         return pd.DataFrame(rows), failures

@@ -64,6 +64,8 @@ export FINNHUB_API_KEY="your_api_key_here"
 
 If `FINNHUB_API_KEY` is not set and you choose `live`, the app shows a warning and gracefully falls back to `mock` for refresh so the app remains usable.
 
+> Keep secrets local: do **not** hardcode API keys in source files and do **not** commit `.env` or shell files containing secrets.
+
 ## First run behavior
 1. `src/database.py` initializes local DuckDB tables automatically.
 2. If the `themes` table is empty, `src/theme_service.py::seed_if_needed()` imports `themes_seed_structured.json`.
@@ -120,3 +122,23 @@ If `FINNHUB_API_KEY` is not set and you choose `live`, the app shows a warning a
 - `composite_score = 0.25*avg_1w + 0.50*avg_1m + 0.25*avg_3m`
 
 Weights are configured in `src/config.py`.
+
+
+## Refresh safety and operational workflow
+- Only one refresh run can be active at a time. If a run is already `running`, a new request is blocked and logged with status `blocked`.
+- Stale run protection is enabled: runs left in `running` state beyond the timeout are auto-marked `failed` with a stale-run error message.
+- Timeout is configurable via `REFRESH_STALE_TIMEOUT_MINUTES` in `src/config.py`.
+- Progress is visible during refresh in the homepage (provider, completed/total tickers, success/failure counts, elapsed seconds).
+- `success_count` and `failure_count` are updated incrementally during execution for better observability in Diagnostics.
+
+## Scoped refresh behavior
+To keep live runs operationally usable, the homepage supports scoped refresh:
+- **Active themes**: full active ticker universe
+- **Selected theme** (**default in live mode**): tickers from a single theme
+- **Custom ticker list**: manual ticker subset
+
+Large full-universe live refreshes can be slow due to API calls and may hit rate limits. Prefer scoped refresh for day-to-day live usage.
+
+During refresh, progress is persisted incrementally (`success_count`, `failure_count`, and progress notes) so Diagnostics can show in-flight activity.
+
+Live safeguard: the run stops early if repeated rate-limit errors are detected (configured by `LIVE_RATE_LIMIT_STOP_THRESHOLD` in `src/config.py`) and is finalized cleanly with a summary error message.
