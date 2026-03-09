@@ -94,5 +94,7 @@ def row_counts(conn) -> pd.DataFrame:
         SELECT 'refresh_runs', COUNT(*) FROM refresh_runs
         UNION ALL
         SELECT 'refresh_failures', COUNT(*) FROM refresh_failures
+        UNION ALL
+        SELECT 'refresh_run_tickers', COUNT(*) FROM refresh_run_tickers
         """
     ).df()

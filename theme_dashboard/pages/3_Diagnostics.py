@@ -62,6 +62,12 @@ else:
     c4.metric("Success", int(run["success_count"]))
     c5.metric("Failures", int(run["failure_count"]))
 
+    scope_type = run.get("scope_type") if "scope_type" in last_run.columns else None
+    scope_theme_name = run.get("scope_theme_name") if "scope_theme_name" in last_run.columns else None
+    st.write(f"**Last run scope:** `{scope_type or 'n/a'}`")
+    st.write(f"**Last run selected theme:** `{scope_theme_name or 'n/a'}`")
+    st.write(f"**Last run attempted tickers:** `{int(run['ticker_count'])}`")
+
     if int(run["failure_count"]) > 0 or str(run["status"]) in {"failed", "partial", "blocked"}:
         st.error("Latest refresh has issues. Review run details and failed tickers below.")
 
@@ -72,6 +78,17 @@ else:
         age_hours = (datetime.now(timezone.utc) - finished_at).total_seconds() / 3600
         if age_hours > STALE_DATA_HOURS:
             st.warning(f"Data appears stale ({age_hours:.1f} hours since last refresh).")
+
+    with get_conn() as conn:
+        tickers_used = conn.execute(
+            "SELECT ticker FROM refresh_run_tickers WHERE run_id = ? ORDER BY ticker LIMIT 50",
+            [int(run["run_id"])],
+        ).df()
+    with st.expander("Last run ticker sample (up to 50)"):
+        if tickers_used.empty:
+            st.info("No ticker universe recorded for this run.")
+        else:
+            st.dataframe(tickers_used, width="stretch")
 
     st.subheader("Last refresh run details")
     st.dataframe(last_run, width="stretch")

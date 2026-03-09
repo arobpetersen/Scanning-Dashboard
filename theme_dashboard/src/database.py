@@ -37,7 +37,15 @@ CREATE TABLE IF NOT EXISTS refresh_runs (
     ticker_count BIGINT NOT NULL DEFAULT 0,
     success_count BIGINT NOT NULL DEFAULT 0,
     failure_count BIGINT NOT NULL DEFAULT 0,
+    scope_type VARCHAR,
+    scope_theme_name VARCHAR,
     error_message VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS refresh_run_tickers (
+    run_id BIGINT NOT NULL,
+    ticker VARCHAR NOT NULL,
+    PRIMARY KEY(run_id, ticker)
 );
 
 CREATE TABLE IF NOT EXISTS ticker_snapshots (
@@ -87,6 +95,7 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_ticker ON ticker_snapshots(ticker);
 CREATE INDEX IF NOT EXISTS idx_theme_snapshots_run_id ON theme_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_theme_snapshots_theme_id ON theme_snapshots(theme_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_failures_run_id ON refresh_failures(run_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_run_tickers_run_id ON refresh_run_tickers(run_id);
 """
 
 
@@ -102,3 +111,15 @@ def get_conn():
 def init_db() -> None:
     with get_conn() as conn:
         conn.execute(SCHEMA_SQL)
+        conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_type VARCHAR")
+        conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_theme_name VARCHAR")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS refresh_run_tickers (
+                run_id BIGINT NOT NULL,
+                ticker VARCHAR NOT NULL,
+                PRIMARY KEY(run_id, ticker)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_refresh_run_tickers_run_id ON refresh_run_tickers(run_id)")

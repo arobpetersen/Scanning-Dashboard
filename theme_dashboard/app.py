@@ -5,7 +5,7 @@ from src.database import get_conn, init_db
 from src.fetch_data import RefreshBlockedError, run_refresh
 from src.queries import last_refresh_run
 from src.rankings import compute_theme_rankings
-from src.theme_service import get_theme_members, list_themes, seed_if_needed
+from src.theme_service import active_ticker_universe, get_theme_members, list_themes, seed_if_needed
 
 st.set_page_config(page_title="Thematic Stock Dashboard", layout="wide")
 st.title("Thematic Stock Dashboard (Local v1)")
@@ -23,11 +23,9 @@ show_trends = st.sidebar.checkbox("Show trend deltas vs prior snapshot", value=T
 
 scope_options = ["Active themes", "Selected theme", "Custom ticker list"]
 default_scope_index = 1 if provider_name == "live" else 0
-scope_mode = st.sidebar.radio(
-    "Refresh scope",
-    scope_options,
-    index=default_scope_index,
-)
+scope_mode = st.sidebar.radio("Refresh scope", scope_options, index=default_scope_index)
+
+selected_theme_name: str | None = None
 selected_tickers: list[str] | None = None
 if scope_mode == "Selected theme":
     theme_options = themes[["id", "name", "is_active"]].sort_values("name")
@@ -36,6 +34,7 @@ if scope_mode == "Selected theme":
         options=theme_options.to_dict("records"),
         format_func=lambda t: f"{t['name']} ({'active' if t['is_active'] else 'inactive'})",
     )
+    selected_theme_name = str(selected_theme["name"])
     with get_conn() as conn:
         selected_tickers = get_theme_members(conn, int(selected_theme["id"]))["ticker"].tolist()
 elif scope_mode == "Custom ticker list":
@@ -43,18 +42,35 @@ elif scope_mode == "Custom ticker list":
     parts = [p.strip().upper() for p in raw.replace("\n", " ").replace(",", " ").split(" ") if p.strip()]
     selected_tickers = sorted(set(parts))
 
+with get_conn() as conn:
+    if scope_mode == "Active themes":
+        resolved_tickers = active_ticker_universe(conn)
+    else:
+        resolved_tickers = sorted(set(selected_tickers or []))
+
 live_key_present = bool(finnhub_api_key())
 if provider_name == "live" and not live_key_present:
     st.warning(
         f"Live provider selected but {FINNHUB_API_KEY_ENV} is not set. Refresh will gracefully fall back to mock data."
     )
 
+scope_type = {
+    "Active themes": "active_themes",
+    "Selected theme": "selected_theme",
+    "Custom ticker list": "custom_tickers",
+}[scope_mode]
+
 col1, col2, col3 = st.columns(3)
 with col1:
     st.write(f"**Provider selection:** `{provider_name}`")
     st.write(f"**Scope:** {scope_mode}")
+    if selected_theme_name:
+        st.write(f"**Selected theme:** {selected_theme_name}")
+    st.write(f"**Tickers in scope:** {len(resolved_tickers)}")
     if provider_name == "live" and scope_mode == "Active themes":
         st.info("Live + Active themes can be slow and may hit rate limits. Prefer Selected theme or Custom ticker list.")
+    with st.expander("Show resolved ticker universe"):
+        st.code(", ".join(resolved_tickers) if resolved_tickers else "(none)")
 
 with col2:
     if st.button("Refresh now", type="primary"):
@@ -76,7 +92,14 @@ with col2:
 
         try:
             with get_conn() as conn:
-                run_id = run_refresh(conn, provider_name, tickers=selected_tickers, progress_callback=_progress)
+                run_id = run_refresh(
+                    conn,
+                    provider_name,
+                    tickers=resolved_tickers,
+                    progress_callback=_progress,
+                    scope_type=scope_type,
+                    scope_theme_name=selected_theme_name,
+                )
             progress_bar.progress(100)
             st.success(f"Refresh completed. Run ID: {run_id}")
             st.rerun()

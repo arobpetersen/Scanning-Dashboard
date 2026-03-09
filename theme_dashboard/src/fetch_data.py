@@ -67,6 +67,8 @@ def run_refresh(
     provider_name: str,
     tickers: Iterable[str] | None = None,
     progress_callback: Callable[[dict], None] | None = None,
+    scope_type: str | None = None,
+    scope_theme_name: str | None = None,
 ) -> int:
     mark_stale_running_runs(conn)
 
@@ -75,10 +77,10 @@ def run_refresh(
         run_id = int(running[0])
         conn.execute(
             """
-            INSERT INTO refresh_runs(provider, started_at, finished_at, status, ticker_count, error_message)
-            VALUES (?, ?, CURRENT_TIMESTAMP, 'blocked', 0, ?)
+            INSERT INTO refresh_runs(provider, started_at, finished_at, status, ticker_count, scope_type, scope_theme_name, error_message)
+            VALUES (?, ?, CURRENT_TIMESTAMP, 'blocked', 0, ?, ?, ?)
             """,
-            [provider_name, datetime.utcnow(), f"Refresh blocked: run {run_id} is already running."],
+            [provider_name, datetime.utcnow(), scope_type, scope_theme_name, f"Refresh blocked: run {run_id} is already running."],
         )
         raise RefreshBlockedError(f"Refresh already running (run_id={run_id}).", run_id)
 
@@ -88,12 +90,15 @@ def run_refresh(
 
     run_id = conn.execute(
         """
-        INSERT INTO refresh_runs(provider, started_at, status, ticker_count)
-        VALUES (?, ?, 'running', ?)
+        INSERT INTO refresh_runs(provider, started_at, status, ticker_count, scope_type, scope_theme_name)
+        VALUES (?, ?, 'running', ?, ?, ?)
         RETURNING run_id
         """,
-        [provider.name, datetime.utcnow(), len(clean_tickers)],
+        [provider.name, datetime.utcnow(), len(clean_tickers), scope_type, scope_theme_name],
     ).fetchone()[0]
+
+    for ticker in clean_tickers:
+        conn.execute("INSERT INTO refresh_run_tickers(run_id, ticker) VALUES (?, ?)", [run_id, ticker])
 
     success_count = 0
     failure_count = 0
