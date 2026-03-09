@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from datetime import date, datetime
+from decimal import Decimal
 
+import numpy as np
+import pandas as pd
 import requests
 
-from .config import AI_MAX_PROPOSALS, AI_MODEL, OPENAI_API_KEY_ENV
+from .config import AI_MAX_PROPOSALS, AI_MODEL, OPENAI_API_KEY_ENV, openai_api_key
 from .suggestions_service import SuggestionPayload, create_suggestion
 
 
 SYSTEM_PROMPT = """You are an equity-theme taxonomy assistant.
-Return STRICT JSON list only (no markdown) with fields:
+Return STRICT JSON object: {"proposals": [...]} with fields:
 - suggestion_type (one of add_ticker_to_theme, remove_ticker_from_theme, create_theme, rename_theme, review_theme)
 - rationale (required, concise evidence-based)
 - priority (low|medium|high)
@@ -25,7 +28,30 @@ Rules:
 """
 
 
+def _to_json_safe(value):
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _to_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_json_safe(v) for v in value]
+    return str(value)
+
+
+def sanitize_context(context: dict) -> dict:
+    return _to_json_safe(context)
+
+
 def _call_openai(api_key: str, prompt: str, context: dict, max_proposals: int) -> list[dict]:
+    safe_context = sanitize_context(context)
     url = "https://api.openai.com/v1/responses"
     payload = {
         "model": AI_MODEL,
@@ -36,17 +62,16 @@ def _call_openai(api_key: str, prompt: str, context: dict, max_proposals: int) -
                 "content": (
                     f"Generate up to {max_proposals} proposals.\n"
                     f"User instruction: {prompt}\n"
-                    f"Context JSON: {json.dumps(context)[:12000]}"
+                    f"Context JSON: {json.dumps(safe_context)[:14000]}"
                 ),
             },
         ],
-        "text": {"format": {"type": "json_object"}},
     }
     r = requests.post(url, headers={"Authorization": f"Bearer {api_key}"}, json=payload, timeout=45)
     r.raise_for_status()
     data = r.json()
     text = data.get("output_text", "")
-    parsed = json.loads(text)
+    parsed = json.loads(text) if text else {}
     items = parsed.get("proposals") if isinstance(parsed, dict) else parsed
     if not isinstance(items, list):
         return []
@@ -54,9 +79,7 @@ def _call_openai(api_key: str, prompt: str, context: dict, max_proposals: int) -
 
 
 def generate_ai_suggestions(conn, prompt: str, context: dict, max_proposals: int = AI_MAX_PROPOSALS) -> dict:
-    import os
-
-    api_key = os.getenv(OPENAI_API_KEY_ENV, "").strip()
+    api_key = openai_api_key()
     if not api_key:
         raise ValueError(f"{OPENAI_API_KEY_ENV} is not set. Configure it to run AI proposal generation.")
 

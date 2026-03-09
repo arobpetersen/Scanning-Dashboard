@@ -204,14 +204,11 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
 
 
 ## Simplified page structure
-- **Home / Theme Operations Dashboard**: main control center for refresh, ranking state, and queue/health summaries.
-- **Theme Explorer**: single-theme deep dive for latest member metrics and recent snapshots.
-- **Theme Registry**: CRUD management for themes and memberships.
-- **Operations & Diagnostics**: refresh run history, provider/failure diagnostics, and failure categorization.
-- **Suggestions Queue**: create/review/apply suggestions plus bulk cleanup (`obsolete`) on filtered queue.
-- **Theme Health / Maintenance**: cross-theme maintenance quality table and filters.
-- **Historical Performance**: lookback-based trend and leadership movement analysis.
-- **AI Proposal Assistant**: manual trigger to generate AI proposals into queue only.
+- **Dashboard**: operations control center for refresh, high-level rankings, and key queue signals.
+- **Themes**: consolidated explore + manage experience (detail, members, create/edit/delete, ticker membership).
+- **Historical Performance**: lookback-based trend and leadership rotation analysis.
+- **Suggestions**: consolidated manual creation, queue review/apply, bulk cleanup, rules trigger, and AI assistant.
+- **Health**: consolidated operations diagnostics + provider/failure visibility + theme health maintenance.
 
 ## Historical theme tracking and leadership movement
 - Historical page supports common windows (1 week, 1 month, 3 months) and custom days.
@@ -226,3 +223,10 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
 - Generated suggestions still require normal human review (`approve/reject`) and optional apply flow.
 - AI supports proposal types: `add_ticker_to_theme`, `remove_ticker_from_theme`, `create_theme`, `rename_theme`, `review_theme`.
 - AI proposals include rationale/evidence text, and weak proposals can be skipped.
+
+
+## AI proposal request serialization
+- AI context is sanitized to JSON-safe primitives before request construction.
+- Pandas/Datetime values (including `Timestamp`) are converted to ISO-8601 strings to avoid `Object of type Timestamp is not JSON serializable`.
+- AI key messaging reflects real key presence: warning is shown only when `OPENAI_API_KEY` is missing.
+- AI remains queue-only: proposals are inserted as `source = ai_proposal` and must follow normal review/approve/apply governance.

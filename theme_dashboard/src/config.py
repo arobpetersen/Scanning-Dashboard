@@ -32,3 +32,8 @@ COMPOSITE_WEIGHTS = {
 def massive_api_key() -> str | None:
     value = os.getenv(MASSIVE_API_KEY_ENV, "").strip()
     return value or None
+
+
+def openai_api_key() -> str | None:
+    value = os.getenv(OPENAI_API_KEY_ENV, "").strip()
+    return value or None

@@ -117,4 +117,4 @@ st.dataframe(
 )
 st.line_chart(view[["theme", "composite_score"]].set_index("theme"))
 
-st.caption("Navigation: Theme Explorer (single-theme), Historical Performance (cross-theme movement), Suggestions Queue (review/apply), Theme Health, Operations Diagnostics, AI Proposal Assistant.")
+st.caption("Navigation: Themes, Historical Performance, Suggestions, and Health.")
