@@ -9,7 +9,12 @@ from .theme_service import active_ticker_universe
 
 
 def get_provider(provider_name: str):
-    return LiveProvider() if provider_name == "live" else MockProvider()
+    if provider_name == "live":
+        live = LiveProvider()
+        if live.is_configured:
+            return live
+        return MockProvider()
+    return MockProvider()
 
 
 def run_refresh(conn, provider_name: str) -> int:

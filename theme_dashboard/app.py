@@ -1,6 +1,6 @@
 import streamlit as st
 
-from src.config import DEFAULT_PROVIDER
+from src.config import DEFAULT_PROVIDER, FINNHUB_API_KEY_ENV, finnhub_api_key
 from src.database import get_conn, init_db
 from src.fetch_data import run_refresh
 from src.queries import last_refresh_run
@@ -20,9 +20,15 @@ if seeded:
 provider_name = st.sidebar.selectbox("Data provider", ["mock", "live"], index=0 if DEFAULT_PROVIDER == "mock" else 1)
 show_trends = st.sidebar.checkbox("Show trend deltas vs prior snapshot", value=True)
 
+live_key_present = bool(finnhub_api_key())
+if provider_name == "live" and not live_key_present:
+    st.warning(
+        f"Live provider selected but {FINNHUB_API_KEY_ENV} is not set. Refresh will gracefully fall back to mock data."
+    )
+
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.write(f"**Provider:** `{provider_name}`")
+    st.write(f"**Provider selection:** `{provider_name}`")
 with col2:
     if st.button("Refresh now", type="primary"):
         with get_conn() as conn:
@@ -37,6 +43,7 @@ with get_conn() as conn:
 with col3:
     if not last_run.empty:
         st.write(f"**Last refresh:** {last_run.iloc[0]['finished_at']}")
+        st.write(f"**Last run provider used:** `{last_run.iloc[0]['provider']}`")
     else:
         st.write("**Last refresh:** never")
 

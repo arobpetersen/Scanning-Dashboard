@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import streamlit as st
 
-from src.config import DEFAULT_PROVIDER, STALE_DATA_HOURS
+from src.config import DEFAULT_PROVIDER, FINNHUB_API_KEY_ENV, STALE_DATA_HOURS, finnhub_api_key
 from src.database import get_conn, init_db
 from src.queries import last_refresh_run, refresh_history, row_counts, snapshot_counts
 from src.theme_service import seed_if_needed
@@ -18,7 +18,9 @@ with get_conn() as conn:
     counts = row_counts(conn)
     snaps = snapshot_counts(conn)
 
-st.write(f"Current provider setting: `{DEFAULT_PROVIDER}`")
+st.write(f"Default provider setting: `{DEFAULT_PROVIDER}`")
+key_present = bool(finnhub_api_key())
+st.write(f"Finnhub live configured: `{key_present}` (env: `{FINNHUB_API_KEY_ENV}`)")
 
 sc1, sc2, sc3 = st.columns(3)
 sc1.metric("Ticker snapshot rows", int(snaps.iloc[0]["ticker_snapshot_rows"]))
@@ -29,11 +31,12 @@ if last_run.empty:
     st.warning("No refresh runs found.")
 else:
     run = last_run.iloc[0]
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Last run id", int(run["run_id"]))
-    c2.metric("Status", str(run["status"]))
-    c3.metric("Success", int(run["success_count"]))
-    c4.metric("Failures", int(run["failure_count"]))
+    c2.metric("Provider used", str(run["provider"]))
+    c3.metric("Status", str(run["status"]))
+    c4.metric("Success", int(run["success_count"]))
+    c5.metric("Failures", int(run["failure_count"]))
 
     if int(run["failure_count"]) > 0 or str(run["status"]) == "failed":
         st.error("Latest refresh has failures. Review failed tickers below.")
