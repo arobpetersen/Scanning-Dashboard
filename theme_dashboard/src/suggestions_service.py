@@ -14,7 +14,6 @@ VALID_TYPES = {
     "rename_theme",
     "move_ticker_between_themes",
 }
-VALID_STATUSES = {"pending", "approved", "rejected", "applied"}
 VALID_SOURCES = {"manual", "rules_engine", "ai_proposal", "imported"}
 
 
@@ -43,9 +42,103 @@ def _norm_type(suggestion_type: str) -> str:
     return value
 
 
+def _theme_name_exists(conn, name: str) -> bool:
+    return conn.execute("SELECT COUNT(*) FROM themes WHERE lower(name)=lower(?)", [name]).fetchone()[0] > 0
+
+
+def _ticker_in_theme(conn, theme_id: int, ticker: str) -> bool:
+    return (
+        conn.execute("SELECT COUNT(*) FROM theme_membership WHERE theme_id=? AND ticker=?", [theme_id, ticker]).fetchone()[0]
+        > 0
+    )
+
+
+def validate_payload(conn, payload: SuggestionPayload) -> tuple[bool, str]:
+    t = _norm_type(payload.suggestion_type)
+    theme_name = (payload.proposed_theme_name or "").strip()
+    ticker = (payload.proposed_ticker or "").strip().upper()
+    theme_id = payload.existing_theme_id
+    target_id = payload.proposed_target_theme_id
+
+    if t == "add_ticker_to_theme":
+        if not ticker:
+            return False, "Ticker cannot be blank."
+        if theme_id is None:
+            return False, "Existing theme is required."
+        if _ticker_in_theme(conn, int(theme_id), ticker):
+            return False, "Ticker already exists in the selected theme."
+    elif t == "remove_ticker_from_theme":
+        if not ticker:
+            return False, "Ticker cannot be blank."
+        if theme_id is None:
+            return False, "Existing theme is required."
+        if not _ticker_in_theme(conn, int(theme_id), ticker):
+            return False, "Ticker is not currently in the selected theme."
+    elif t == "create_theme":
+        if not theme_name:
+            return False, "Theme name cannot be blank."
+        if _theme_name_exists(conn, theme_name):
+            return False, "Theme name already exists."
+    elif t == "rename_theme":
+        if theme_id is None:
+            return False, "Existing theme is required."
+        if not theme_name:
+            return False, "New theme name cannot be blank."
+        current = conn.execute("SELECT name FROM themes WHERE id=?", [theme_id]).fetchone()
+        if current is None:
+            return False, "Existing theme not found."
+        if current[0].strip().lower() == theme_name.lower():
+            return False, "New theme name matches current theme name."
+        if _theme_name_exists(conn, theme_name):
+            return False, "Theme name already exists."
+    elif t == "move_ticker_between_themes":
+        if not ticker:
+            return False, "Ticker cannot be blank."
+        if theme_id is None or target_id is None:
+            return False, "Source and target themes are required."
+        if int(theme_id) == int(target_id):
+            return False, "Source and target themes must be different."
+        if not _ticker_in_theme(conn, int(theme_id), ticker):
+            return False, "Ticker is not in the source theme."
+        if _ticker_in_theme(conn, int(target_id), ticker):
+            return False, "Ticker already exists in the target theme."
+
+    return True, "valid"
+
+
+def _is_duplicate_pending(conn, payload: SuggestionPayload) -> bool:
+    t = _norm_type(payload.suggestion_type)
+    theme_name = (payload.proposed_theme_name or "").strip()
+    ticker = (payload.proposed_ticker or "").strip().upper()
+
+    return (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM theme_suggestions
+            WHERE status='pending'
+              AND suggestion_type=?
+              AND COALESCE(existing_theme_id,-1)=COALESCE(?, -1)
+              AND COALESCE(proposed_target_theme_id,-1)=COALESCE(?, -1)
+              AND COALESCE(upper(proposed_ticker),'')=COALESCE(upper(?),'')
+              AND COALESCE(lower(proposed_theme_name),'')=COALESCE(lower(?),'')
+            """,
+            [t, payload.existing_theme_id, payload.proposed_target_theme_id, ticker or None, theme_name or None],
+        ).fetchone()[0]
+        > 0
+    )
+
+
 def create_suggestion(conn, payload: SuggestionPayload) -> int:
     suggestion_type = _norm_type(payload.suggestion_type)
     source = _norm_source(payload.source)
+
+    ok, message = validate_payload(conn, payload)
+    if not ok:
+        raise ValueError(message)
+
+    if _is_duplicate_pending(conn, payload):
+        raise ValueError("Equivalent pending suggestion already exists.")
 
     suggestion_id = conn.execute(
         """
@@ -69,11 +162,50 @@ def create_suggestion(conn, payload: SuggestionPayload) -> int:
     return int(suggestion_id)
 
 
+def _compute_validation_status(conn, row: pd.Series) -> str:
+    payload = SuggestionPayload(
+        suggestion_type=str(row["suggestion_type"]),
+        source=str(row["source"]),
+        rationale=str(row.get("rationale") or ""),
+        proposed_theme_name=row.get("proposed_theme_name"),
+        proposed_ticker=row.get("proposed_ticker"),
+        existing_theme_id=int(row["existing_theme_id"]) if pd.notna(row.get("existing_theme_id")) else None,
+        proposed_target_theme_id=int(row["proposed_target_theme_id"]) if pd.notna(row.get("proposed_target_theme_id")) else None,
+    )
+
+    if str(row["status"]) == "pending" and _is_duplicate_pending(conn, payload):
+        dup_count = conn.execute(
+            """
+            SELECT COUNT(*) FROM theme_suggestions
+            WHERE status='pending' AND suggestion_type=?
+              AND COALESCE(existing_theme_id,-1)=COALESCE(?, -1)
+              AND COALESCE(proposed_target_theme_id,-1)=COALESCE(?, -1)
+              AND COALESCE(upper(proposed_ticker),'')=COALESCE(upper(?),'')
+              AND COALESCE(lower(proposed_theme_name),'')=COALESCE(lower(?),'')
+            """,
+            [
+                payload.suggestion_type,
+                payload.existing_theme_id,
+                payload.proposed_target_theme_id,
+                payload.proposed_ticker,
+                payload.proposed_theme_name,
+            ],
+        ).fetchone()[0]
+        if dup_count > 1:
+            return "duplicate_pending"
+
+    ok, _ = validate_payload(conn, payload)
+    if str(row["status"]) in {"approved", "pending"} and not ok:
+        return "stale"
+    return "valid"
+
+
 def list_suggestions(
     conn,
     status: str | None = None,
     suggestion_type: str | None = None,
     source: str | None = None,
+    search_text: str | None = None,
 ) -> pd.DataFrame:
     clauses = []
     params: list[object] = []
@@ -87,10 +219,16 @@ def list_suggestions(
     if source and source != "all":
         clauses.append("source = ?")
         params.append(source)
+    if search_text:
+        clauses.append(
+            "(upper(COALESCE(proposed_ticker,'')) LIKE upper(?) OR lower(COALESCE(proposed_theme_name,'')) LIKE lower(?) OR lower(COALESCE(t.name,'')) LIKE lower(?) OR lower(COALESCE(tt.name,'')) LIKE lower(?))"
+        )
+        needle = f"%{search_text.strip()}%"
+        params.extend([needle, needle, needle, needle])
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
-    return conn.execute(
+    df = conn.execute(
         f"""
         SELECT s.*, t.name AS existing_theme_name, tt.name AS target_theme_name
         FROM theme_suggestions s
@@ -101,6 +239,13 @@ def list_suggestions(
         """,
         params,
     ).df()
+
+    if df.empty:
+        return df
+
+    df = df.copy()
+    df["validation_status"] = df.apply(lambda r: _compute_validation_status(conn, r), axis=1)
+    return df
 
 
 def review_suggestion(conn, suggestion_id: int, new_status: str, reviewer_notes: str) -> None:
@@ -122,7 +267,7 @@ def review_suggestion(conn, suggestion_id: int, new_status: str, reviewer_notes:
 def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None:
     row = conn.execute(
         """
-        SELECT suggestion_id, suggestion_type, status, proposed_theme_name, proposed_ticker,
+        SELECT suggestion_id, suggestion_type, status, source, proposed_theme_name, proposed_ticker,
                existing_theme_id, proposed_target_theme_id
         FROM theme_suggestions
         WHERE suggestion_id = ?
@@ -132,33 +277,35 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
     if row is None:
         raise ValueError("Suggestion not found")
 
-    _, suggestion_type, status, proposed_theme_name, proposed_ticker, existing_theme_id, target_theme_id = row
+    _, suggestion_type, status, source, proposed_theme_name, proposed_ticker, existing_theme_id, target_theme_id = row
     if status != "approved":
         raise ValueError("Only approved suggestions can be applied")
 
+    payload = SuggestionPayload(
+        suggestion_type=suggestion_type,
+        source=source,
+        proposed_theme_name=proposed_theme_name,
+        proposed_ticker=proposed_ticker,
+        existing_theme_id=existing_theme_id,
+        proposed_target_theme_id=target_theme_id,
+    )
+    ok, reason = validate_payload(conn, payload)
+    if not ok:
+        raise ValueError(f"Suggestion is no longer applicable: {reason}")
+
     if suggestion_type == "add_ticker_to_theme":
-        if existing_theme_id is None or not proposed_ticker:
-            raise ValueError("Missing theme or ticker")
         add_ticker(conn, int(existing_theme_id), proposed_ticker)
     elif suggestion_type == "remove_ticker_from_theme":
-        if existing_theme_id is None or not proposed_ticker:
-            raise ValueError("Missing theme or ticker")
         remove_ticker(conn, int(existing_theme_id), proposed_ticker)
     elif suggestion_type == "create_theme":
-        if not proposed_theme_name:
-            raise ValueError("Missing proposed theme name")
         create_theme(conn, proposed_theme_name, "Custom", True)
     elif suggestion_type == "rename_theme":
-        if existing_theme_id is None or not proposed_theme_name:
-            raise ValueError("Missing theme id or new name")
         theme = conn.execute("SELECT name, category, is_active FROM themes WHERE id = ?", [existing_theme_id]).fetchone()
         if theme is None:
             raise ValueError("Theme not found")
         _, category, is_active = theme
         update_theme(conn, int(existing_theme_id), proposed_theme_name, category, bool(is_active))
     elif suggestion_type == "move_ticker_between_themes":
-        if existing_theme_id is None or target_theme_id is None or not proposed_ticker:
-            raise ValueError("Missing source theme, target theme, or ticker")
         remove_ticker(conn, int(existing_theme_id), proposed_ticker)
         add_ticker(conn, int(target_theme_id), proposed_ticker)
     else:
@@ -184,4 +331,21 @@ def suggestion_status_counts(conn) -> pd.DataFrame:
         GROUP BY status
         ORDER BY status
         """
+    ).df()
+
+
+def recent_applied_suggestions(conn, limit: int = 10) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT s.suggestion_id, s.suggestion_type, s.source, s.proposed_ticker, s.proposed_theme_name,
+               t.name AS existing_theme_name, tt.name AS target_theme_name,
+               s.reviewer_notes, s.reviewed_at
+        FROM theme_suggestions s
+        LEFT JOIN themes t ON t.id = s.existing_theme_id
+        LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+        WHERE s.status = 'applied'
+        ORDER BY s.reviewed_at DESC, s.suggestion_id DESC
+        LIMIT ?
+        """,
+        [limit],
     ).df()

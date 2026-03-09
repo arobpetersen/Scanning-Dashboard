@@ -6,6 +6,7 @@ from src.suggestions_service import (
     apply_suggestion,
     create_suggestion,
     list_suggestions,
+    recent_applied_suggestions,
     review_suggestion,
     suggestion_status_counts,
 )
@@ -18,6 +19,8 @@ init_db()
 with get_conn() as conn:
     seed_if_needed(conn)
     themes = list_themes(conn, active_only=False)
+
+theme_options = themes[["id", "name"]].to_dict("records")
 
 st.subheader("Create Suggestion")
 suggestion_type = st.selectbox(
@@ -33,7 +36,6 @@ suggestion_type = st.selectbox(
 source = st.selectbox("Source", ["manual", "rules_engine", "ai_proposal", "imported"], index=0)
 rationale = st.text_area("Rationale", value="")
 
-theme_options = themes[["id", "name"]].to_dict("records")
 selected_existing_theme = None
 selected_target_theme = None
 proposed_theme_name = None
@@ -75,7 +77,7 @@ if st.button("Create suggestion"):
         st.error(f"Create failed: {exc}")
 
 st.subheader("Queue Filters")
-fc1, fc2, fc3 = st.columns(3)
+fc1, fc2, fc3, fc4 = st.columns(4)
 with fc1:
     status_filter = st.selectbox("Status", ["all", "pending", "approved", "rejected", "applied"], index=0)
 with fc2:
@@ -93,10 +95,13 @@ with fc2:
     )
 with fc3:
     source_filter = st.selectbox("Source", ["all", "manual", "rules_engine", "ai_proposal", "imported"], index=0)
+with fc4:
+    search_filter = st.text_input("Search ticker/theme", value="")
 
 with get_conn() as conn:
-    queue = list_suggestions(conn, status_filter, type_filter, source_filter)
+    queue = list_suggestions(conn, status_filter, type_filter, source_filter, search_filter)
     counts = suggestion_status_counts(conn)
+    recent_applied = recent_applied_suggestions(conn, limit=10)
 
 cmap = {row["status"]: int(row["cnt"]) for _, row in counts.iterrows()}
 mc1, mc2, mc3, mc4 = st.columns(4)
@@ -109,7 +114,21 @@ st.subheader("Suggestions")
 if queue.empty:
     st.info("No suggestions for selected filters.")
 else:
-    st.dataframe(queue, width="stretch")
+    view_cols = [
+        "suggestion_id",
+        "status",
+        "validation_status",
+        "suggestion_type",
+        "source",
+        "proposed_ticker",
+        "existing_theme_name",
+        "target_theme_name",
+        "proposed_theme_name",
+        "created_at",
+        "reviewed_at",
+        "reviewer_notes",
+    ]
+    st.dataframe(queue[view_cols], width="stretch")
 
     pending = queue[queue["status"] == "pending"]
     approved = queue[queue["status"] == "approved"]
@@ -118,11 +137,11 @@ else:
     if pending.empty:
         st.info("No pending suggestions in current filter.")
     else:
-        pending_options = pending[["suggestion_id", "suggestion_type", "source"]].to_dict("records")
+        pending_options = pending[["suggestion_id", "suggestion_type", "source", "validation_status"]].to_dict("records")
         selected_pending = st.selectbox(
             "Pending suggestion",
             options=pending_options,
-            format_func=lambda r: f"#{r['suggestion_id']} | {r['suggestion_type']} | {r['source']}",
+            format_func=lambda r: f"#{r['suggestion_id']} | {r['suggestion_type']} | {r['source']} | {r['validation_status']}",
         )
         notes = st.text_area("Reviewer notes", value="", key="review_notes")
         rc1, rc2 = st.columns(2)
@@ -143,11 +162,11 @@ else:
     if approved.empty:
         st.info("No approved suggestions available to apply.")
     else:
-        approved_options = approved[["suggestion_id", "suggestion_type"]].to_dict("records")
+        approved_options = approved[["suggestion_id", "suggestion_type", "validation_status"]].to_dict("records")
         selected_approved = st.selectbox(
             "Approved suggestion",
             options=approved_options,
-            format_func=lambda r: f"#{r['suggestion_id']} | {r['suggestion_type']}",
+            format_func=lambda r: f"#{r['suggestion_id']} | {r['suggestion_type']} | {r['validation_status']}",
         )
         apply_notes = st.text_area("Application notes (optional)", value="", key="apply_notes")
         if st.button("Apply approved suggestion"):
@@ -158,3 +177,9 @@ else:
                 st.rerun()
             except Exception as exc:
                 st.error(f"Apply failed: {exc}")
+
+st.subheader("Recently Applied Suggestions")
+if recent_applied.empty:
+    st.info("No applied suggestions yet.")
+else:
+    st.dataframe(recent_applied, width="stretch")

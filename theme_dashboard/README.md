@@ -158,4 +158,8 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
   2. Review suggestion (`approved` or `rejected`, with notes)
   3. Apply approved suggestion (status becomes `applied`)
 - Suggestions include source metadata (`manual`, `rules_engine`, `ai_proposal`, `imported`) so future automation engines can plug in cleanly.
+
+- Validation rules block invalid/redundant suggestions at creation time (e.g., add existing ticker, remove missing ticker, duplicate pending proposal, blank/duplicate theme names, invalid move semantics).
+- Approved suggestions are validated again at apply time to catch stale queue items after registry changes.
+- Queue shows a computed `validation_status` indicator (`valid`, `stale`, `duplicate_pending`) to highlight actionability.
 - Applied suggestions update the same DuckDB theme source-of-truth tables used by Theme Manager and refresh runs.
