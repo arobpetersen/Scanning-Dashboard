@@ -9,7 +9,7 @@ A local-first Streamlit app for **objective, formula-based theme ranking** and t
 - Calculates deterministic rankings from numeric ticker metrics only.
 - Stores historical ticker snapshots and historical theme snapshots on every successful/partial refresh.
 - Shows trend deltas between latest and prior theme snapshots.
-- Provides pages for Home, Theme Detail, Theme Manager, and Diagnostics.
+- Provides a simplified operations-centered page structure: Home (control center), Theme Explorer, Theme Registry, Operations & Diagnostics, Suggestions Queue, Theme Health, Historical Performance, and AI Proposal Assistant.
 
 ## Project structure
 
@@ -34,7 +34,11 @@ theme_dashboard/
   /pages
     1_Theme_Detail.py
     2_Theme_Manager.py
-    3_Diagnostics.py
+    3_Operations_Diagnostics.py
+    4_Suggestions_Queue.py
+    5_Theme_Health.py
+    6_Historical_Performance.py
+    7_AI_Proposal_Assistant.py
 ```
 
 ## Setup (foolproof)
@@ -69,7 +73,7 @@ If `MASSIVE_API_KEY` is not set and you choose `live`, the app shows a warning a
 ## First run behavior
 1. `src/database.py` initializes local DuckDB tables automatically.
 2. If the `themes` table is empty, `src/theme_service.py::seed_if_needed()` imports `themes_seed_structured.json`.
-3. From that point onward, all edits happen in DuckDB via Theme Manager.
+3. From that point onward, all edits happen in DuckDB via Theme Registry.
 
 ## Ongoing source of truth
 - **DuckDB is the ongoing source of truth** after initialization.
@@ -197,3 +201,28 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
   - latest theme snapshot timestamp,
   - simple health status (`healthy`, `watch`, `needs_attention`).
 - The page supports lightweight filtering for active/inactive, low-count, and empty-theme flags.
+
+
+## Simplified page structure
+- **Home / Theme Operations Dashboard**: main control center for refresh, ranking state, and queue/health summaries.
+- **Theme Explorer**: single-theme deep dive for latest member metrics and recent snapshots.
+- **Theme Registry**: CRUD management for themes and memberships.
+- **Operations & Diagnostics**: refresh run history, provider/failure diagnostics, and failure categorization.
+- **Suggestions Queue**: create/review/apply suggestions plus bulk cleanup (`obsolete`) on filtered queue.
+- **Theme Health / Maintenance**: cross-theme maintenance quality table and filters.
+- **Historical Performance**: lookback-based trend and leadership movement analysis.
+- **AI Proposal Assistant**: manual trigger to generate AI proposals into queue only.
+
+## Historical theme tracking and leadership movement
+- Historical page supports common windows (1 week, 1 month, 3 months) and custom days.
+- Includes top-N cross-theme trend line charts for metrics such as `composite_score`, `avg_1w`, `avg_1m`, `avg_3m`, `positive_1m_breadth_pct`, and `ticker_count`.
+- Shows biggest movers over selected window (`delta_composite`, breadth change), plus top-N membership changes (entered/dropped leaders).
+- Provides a single-theme history panel to inspect one theme over time with line charts and raw history table.
+
+## AI-assisted proposal generation (controlled)
+- AI proposal generation is **manual trigger only** from the AI Proposal Assistant page.
+- AI can only create records in `theme_suggestions` with `source = ai_proposal`; it never mutates registry tables directly.
+- AI outputs must pass the existing validation and duplicate-prevention rules in `suggestions_service.py`.
+- Generated suggestions still require normal human review (`approve/reject`) and optional apply flow.
+- AI supports proposal types: `add_ticker_to_theme`, `remove_ticker_from_theme`, `create_theme`, `rename_theme`, `review_theme`.
+- AI proposals include rationale/evidence text, and weak proposals can be skipped.

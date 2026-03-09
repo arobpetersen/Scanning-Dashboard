@@ -69,6 +69,107 @@ def theme_snapshot_history(conn, theme_id: int, limit: int = 20) -> pd.DataFrame
     ).df()
 
 
+def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT ts.run_id, ts.snapshot_time, ts.theme_id, t.name AS theme, t.category,
+               ts.ticker_count, ts.avg_1w, ts.avg_1m, ts.avg_3m,
+               ts.positive_1m_breadth_pct, ts.composite_score
+        FROM theme_snapshots ts
+        JOIN themes t ON t.id = ts.theme_id
+        WHERE ts.snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+        ORDER BY ts.snapshot_time ASC, ts.composite_score DESC
+        """,
+        [lookback_days],
+    ).df()
+
+
+def top_theme_movers(conn, lookback_days: int, top_n: int = 20) -> pd.DataFrame:
+    return conn.execute(
+        """
+        WITH in_window AS (
+            SELECT ts.theme_id, t.name AS theme, ts.snapshot_time, ts.composite_score, ts.positive_1m_breadth_pct,
+                   ROW_NUMBER() OVER (PARTITION BY ts.theme_id ORDER BY ts.snapshot_time ASC) AS first_rn,
+                   ROW_NUMBER() OVER (PARTITION BY ts.theme_id ORDER BY ts.snapshot_time DESC) AS last_rn
+            FROM theme_snapshots ts
+            JOIN themes t ON t.id = ts.theme_id
+            WHERE ts.snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+        ),
+        first_last AS (
+            SELECT
+                w.theme_id,
+                MAX(CASE WHEN w.first_rn = 1 THEN w.theme END) AS theme,
+                MAX(CASE WHEN w.first_rn = 1 THEN w.composite_score END) AS start_composite,
+                MAX(CASE WHEN w.last_rn = 1 THEN w.composite_score END) AS end_composite,
+                MAX(CASE WHEN w.first_rn = 1 THEN w.positive_1m_breadth_pct END) AS start_breadth,
+                MAX(CASE WHEN w.last_rn = 1 THEN w.positive_1m_breadth_pct END) AS end_breadth
+            FROM in_window w
+            GROUP BY w.theme_id
+        ),
+        ranks AS (
+            SELECT
+                ts.theme_id,
+                ROW_NUMBER() OVER (ORDER BY CASE WHEN ts.snapshot_time = (SELECT MIN(snapshot_time) FROM theme_snapshots WHERE snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')) THEN ts.composite_score END DESC) AS start_rank,
+                ROW_NUMBER() OVER (ORDER BY CASE WHEN ts.snapshot_time = (SELECT MAX(snapshot_time) FROM theme_snapshots WHERE snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')) THEN ts.composite_score END DESC) AS end_rank
+            FROM theme_snapshots ts
+            WHERE ts.snapshot_time IN (
+                SELECT MIN(snapshot_time) FROM theme_snapshots WHERE snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+                UNION ALL
+                SELECT MAX(snapshot_time) FROM theme_snapshots WHERE snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+            )
+        )
+        SELECT f.theme_id, f.theme,
+               ROUND(f.start_composite,2) AS start_composite,
+               ROUND(f.end_composite,2) AS end_composite,
+               ROUND(f.end_composite - f.start_composite,2) AS delta_composite,
+               ROUND(f.start_breadth,2) AS start_breadth,
+               ROUND(f.end_breadth,2) AS end_breadth,
+               ROUND(f.end_breadth - f.start_breadth,2) AS delta_breadth
+        FROM first_last f
+        QUALIFY ROW_NUMBER() OVER (ORDER BY end_composite DESC) <= ?
+        """,
+        [lookback_days, lookback_days, lookback_days, lookback_days, lookback_days, top_n],
+    ).df()
+
+
+def top_n_membership_changes(conn, lookback_days: int, top_n: int = 20) -> tuple[list[str], list[str]]:
+    first_top = conn.execute(
+        """
+        WITH bounds AS (
+            SELECT MIN(snapshot_time) AS start_time
+            FROM theme_snapshots
+            WHERE snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+        )
+        SELECT t.name
+        FROM theme_snapshots ts
+        JOIN themes t ON t.id = ts.theme_id
+        JOIN bounds b ON ts.snapshot_time = b.start_time
+        ORDER BY ts.composite_score DESC
+        LIMIT ?
+        """,
+        [lookback_days, top_n],
+    ).df()
+    last_top = conn.execute(
+        """
+        WITH bounds AS (
+            SELECT MAX(snapshot_time) AS end_time
+            FROM theme_snapshots
+            WHERE snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+        )
+        SELECT t.name
+        FROM theme_snapshots ts
+        JOIN themes t ON t.id = ts.theme_id
+        JOIN bounds b ON ts.snapshot_time = b.end_time
+        ORDER BY ts.composite_score DESC
+        LIMIT ?
+        """,
+        [lookback_days, top_n],
+    ).df()
+    start_set = set(first_top["name"].tolist()) if not first_top.empty else set()
+    end_set = set(last_top["name"].tolist()) if not last_top.empty else set()
+    return sorted(end_set - start_set), sorted(start_set - end_set)
+
+
 def theme_health_overview(conn, low_constituent_threshold: int, failure_window_days: int = 14) -> pd.DataFrame:
     return conn.execute(
         """
