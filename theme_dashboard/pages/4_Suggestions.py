@@ -10,7 +10,7 @@ from src.suggestions_service import (
     review_suggestion,
     suggestion_status_counts,
 )
-from src.theme_service import list_themes, seed_if_needed
+from src.theme_service import get_theme_members, list_themes, seed_if_needed
 
 st.set_page_config(page_title="Suggestions", layout="wide")
 st.title("Suggestions / Review Queue")
@@ -40,6 +40,7 @@ selected_existing_theme = None
 selected_target_theme = None
 proposed_theme_name = None
 proposed_ticker = None
+current_members: list[str] = []
 
 if suggestion_type in {"add_ticker_to_theme", "remove_ticker_from_theme", "rename_theme", "move_ticker_between_themes"}:
     selected_existing_theme = st.selectbox(
@@ -47,16 +48,39 @@ if suggestion_type in {"add_ticker_to_theme", "remove_ticker_from_theme", "renam
         options=theme_options,
         format_func=lambda t: f"{t['name']} [{t['id']}]",
     )
-if suggestion_type in {"add_ticker_to_theme", "remove_ticker_from_theme", "move_ticker_between_themes"}:
-    proposed_ticker = st.text_input("Ticker", value="")
-if suggestion_type in {"create_theme", "rename_theme"}:
-    proposed_theme_name = st.text_input("Proposed theme name", value="")
+    with get_conn() as conn:
+        current_members = get_theme_members(conn, int(selected_existing_theme["id"]))["ticker"].tolist()
+
+if suggestion_type == "rename_theme" and selected_existing_theme:
+    st.caption(f"Current theme name: **{selected_existing_theme['name']}**")
+
+if suggestion_type == "add_ticker_to_theme":
+    proposed_ticker = st.text_input("Ticker to add", value="")
+    with st.expander("Current theme members", expanded=False):
+        if not current_members:
+            st.info("Theme currently has no members.")
+        else:
+            st.write(", ".join(current_members))
+
+if suggestion_type == "remove_ticker_from_theme":
+    if not current_members:
+        st.warning("Selected theme has no members to remove.")
+    else:
+        proposed_ticker = st.selectbox("Ticker to remove", options=current_members)
+
 if suggestion_type == "move_ticker_between_themes":
+    if not current_members:
+        st.warning("Selected source theme has no members to move.")
+    else:
+        proposed_ticker = st.selectbox("Ticker to move", options=current_members)
     selected_target_theme = st.selectbox(
         "Target theme",
         options=theme_options,
         format_func=lambda t: f"{t['name']} [{t['id']}]",
     )
+
+if suggestion_type in {"create_theme", "rename_theme"}:
+    proposed_theme_name = st.text_input("Proposed theme name", value="")
 
 if st.button("Create suggestion"):
     try:

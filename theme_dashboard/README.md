@@ -162,4 +162,5 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
 - Validation rules block invalid/redundant suggestions at creation time (e.g., add existing ticker, remove missing ticker, duplicate pending proposal, blank/duplicate theme names, invalid move semantics).
 - Approved suggestions are validated again at apply time to catch stale queue items after registry changes.
 - Queue shows a computed `validation_status` indicator (`valid`, `stale`, `duplicate_pending`) to highlight actionability.
+- Suggestions page now uses database-backed selectors for existing membership actions (remove/move ticker) and shows current theme members to reduce manual-entry errors during creation.
 - Applied suggestions update the same DuckDB theme source-of-truth tables used by Theme Manager and refresh runs.
