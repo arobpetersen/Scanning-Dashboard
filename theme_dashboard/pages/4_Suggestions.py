@@ -1,6 +1,7 @@
 import streamlit as st
 
 from src.database import get_conn, init_db
+from src.rules_engine import run_rules_engine
 from src.suggestions_service import (
     SuggestionPayload,
     apply_suggestion,
@@ -22,6 +23,21 @@ with get_conn() as conn:
 
 theme_options = themes[["id", "name"]].to_dict("records")
 
+st.subheader("Rules Engine")
+if st.button("Run deterministic rules engine"):
+    with get_conn() as conn:
+        summary = run_rules_engine(conn)
+    st.success(
+        f"Rules run complete: evaluated={summary['evaluated']}, created={summary['created']}, duplicates_skipped={summary['duplicates_skipped']}, invalid_or_skipped={summary['invalid_or_skipped']}"
+    )
+    if summary["rule_results"]:
+        st.caption("Rule-level outcomes")
+        st.dataframe(summary["rule_results"], width="stretch", hide_index=True)
+    if summary["errors"]:
+        st.warning("Some rule outputs were skipped:")
+        st.code("\n".join(summary["errors"]))
+    st.rerun()
+
 st.subheader("Create Suggestion")
 suggestion_type = st.selectbox(
     "Suggestion type",
@@ -31,6 +47,7 @@ suggestion_type = st.selectbox(
         "create_theme",
         "rename_theme",
         "move_ticker_between_themes",
+        "review_theme",
     ],
 )
 source = st.selectbox("Source", ["manual", "rules_engine", "ai_proposal", "imported"], index=0)
@@ -42,7 +59,7 @@ proposed_theme_name = None
 proposed_ticker = None
 current_members: list[str] = []
 
-if suggestion_type in {"add_ticker_to_theme", "remove_ticker_from_theme", "rename_theme", "move_ticker_between_themes"}:
+if suggestion_type in {"add_ticker_to_theme", "remove_ticker_from_theme", "rename_theme", "move_ticker_between_themes", "review_theme"}:
     selected_existing_theme = st.selectbox(
         "Existing theme",
         options=theme_options,
@@ -81,6 +98,8 @@ if suggestion_type == "move_ticker_between_themes":
 
 if suggestion_type in {"create_theme", "rename_theme"}:
     proposed_theme_name = st.text_input("Proposed theme name", value="")
+if suggestion_type == "review_theme":
+    proposed_ticker = st.text_input("Ticker context (optional)", value="")
 
 if st.button("Create suggestion"):
     try:
@@ -114,6 +133,7 @@ with fc2:
             "create_theme",
             "rename_theme",
             "move_ticker_between_themes",
+            "review_theme",
         ],
         index=0,
     )
@@ -148,6 +168,7 @@ else:
         "existing_theme_name",
         "target_theme_name",
         "proposed_theme_name",
+        "rationale",
         "created_at",
         "reviewed_at",
         "reviewer_notes",

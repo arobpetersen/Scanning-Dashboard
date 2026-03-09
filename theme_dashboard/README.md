@@ -153,6 +153,7 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
   - `create_theme`
   - `rename_theme`
   - `move_ticker_between_themes`
+  - `review_theme` (rules/manual review marker; no direct registry mutation)
 - Workflow is explicit and auditable:
   1. Create suggestion (status `pending`)
   2. Review suggestion (`approved` or `rejected`, with notes)
@@ -164,3 +165,14 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
 - Queue shows a computed `validation_status` indicator (`valid`, `stale`, `duplicate_pending`) to highlight actionability.
 - Suggestions page now uses database-backed selectors for existing membership actions (remove/move ticker) and shows current theme members to reduce manual-entry errors during creation.
 - Applied suggestions update the same DuckDB theme source-of-truth tables used by Theme Manager and refresh runs.
+
+
+## Deterministic rules engine
+- The Suggestions page includes a manual trigger to run a deterministic rules engine.
+- Rules engine outputs are inserted into the same suggestions queue with `source = rules_engine`.
+- It never auto-applies changes and always uses the existing review/approve/apply governance flow.
+- First-wave rules:
+  - `low_constituent_count_review`: flags thin themes under a configured member threshold.
+  - `duplicate_membership_review`: flags tickers that appear in multiple themes.
+  - `inactive_or_empty_theme_review`: flags inactive themes and/or themes with zero members.
+- Rule runs show a summary (evaluated, created, duplicates skipped, invalid/skipped) and proposals remain auditable in queue history.

@@ -13,6 +13,7 @@ VALID_TYPES = {
     "create_theme",
     "rename_theme",
     "move_ticker_between_themes",
+    "review_theme",
 }
 VALID_SOURCES = {"manual", "rules_engine", "ai_proposal", "imported"}
 
@@ -102,6 +103,9 @@ def validate_payload(conn, payload: SuggestionPayload) -> tuple[bool, str]:
             return False, "Ticker is not in the source theme."
         if _ticker_in_theme(conn, int(target_id), ticker):
             return False, "Ticker already exists in the target theme."
+    elif t == "review_theme":
+        if theme_id is None and not ticker and not theme_name:
+            return False, "Review suggestion needs theme and/or ticker context."
 
     return True, "valid"
 
@@ -308,6 +312,9 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
     elif suggestion_type == "move_ticker_between_themes":
         remove_ticker(conn, int(existing_theme_id), proposed_ticker)
         add_ticker(conn, int(target_theme_id), proposed_ticker)
+    elif suggestion_type == "review_theme":
+        # review-only proposal; applying marks it handled without mutating registry
+        pass
     else:
         raise ValueError(f"Unsupported suggestion type: {suggestion_type}")
 

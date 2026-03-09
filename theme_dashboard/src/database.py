@@ -101,7 +101,8 @@ CREATE TABLE IF NOT EXISTS theme_suggestions (
         'remove_ticker_from_theme',
         'create_theme',
         'rename_theme',
-        'move_ticker_between_themes'
+        'move_ticker_between_themes',
+        'review_theme'
     )),
     CHECK (source IN ('manual','rules_engine','ai_proposal','imported'))
 );
@@ -140,3 +141,52 @@ def init_db() -> None:
         conn.execute(SCHEMA_SQL)
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_type VARCHAR")
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_theme_name VARCHAR")
+        # Migrate suggestions table to ensure latest suggestion types/checks are supported.
+        ddl = conn.execute("SELECT sql FROM duckdb_tables() WHERE table_name='theme_suggestions' LIMIT 1").fetchone()
+        ddl_text = ddl[0].lower() if ddl and ddl[0] else ""
+        if "review_theme" not in ddl_text:
+            conn.execute(
+                """
+                CREATE TABLE theme_suggestions_migrated (
+                    suggestion_id BIGINT PRIMARY KEY DEFAULT nextval('suggestion_id_seq'),
+                    suggestion_type VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    reviewed_at TIMESTAMP,
+                    source VARCHAR NOT NULL,
+                    rationale VARCHAR,
+                    proposed_theme_name VARCHAR,
+                    proposed_ticker VARCHAR,
+                    existing_theme_id BIGINT,
+                    proposed_target_theme_id BIGINT,
+                    reviewer_notes VARCHAR,
+                    CHECK (status IN ('pending','approved','rejected','applied')),
+                    CHECK (suggestion_type IN (
+                        'add_ticker_to_theme',
+                        'remove_ticker_from_theme',
+                        'create_theme',
+                        'rename_theme',
+                        'move_ticker_between_themes',
+                        'review_theme'
+                    )),
+                    CHECK (source IN ('manual','rules_engine','ai_proposal','imported'))
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO theme_suggestions_migrated(
+                    suggestion_id, suggestion_type, status, created_at, reviewed_at, source,
+                    rationale, proposed_theme_name, proposed_ticker, existing_theme_id,
+                    proposed_target_theme_id, reviewer_notes
+                )
+                SELECT suggestion_id, suggestion_type, status, created_at, reviewed_at, source,
+                       rationale, proposed_theme_name, proposed_ticker, existing_theme_id,
+                       proposed_target_theme_id, reviewer_notes
+                FROM theme_suggestions
+                """
+            )
+            conn.execute("DROP TABLE theme_suggestions")
+            conn.execute("ALTER TABLE theme_suggestions_migrated RENAME TO theme_suggestions")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_theme_suggestions_status ON theme_suggestions(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_theme_suggestions_type ON theme_suggestions(suggestion_type)")
