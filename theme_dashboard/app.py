@@ -18,6 +18,7 @@ if seeded:
     st.success("Theme registry imported from themes_seed_structured.json (one-time). DuckDB is now source of truth.")
 
 provider_name = st.sidebar.selectbox("Data provider", ["mock", "live"], index=0 if DEFAULT_PROVIDER == "mock" else 1)
+show_trends = st.sidebar.checkbox("Show trend deltas vs prior snapshot", value=True)
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -53,6 +54,22 @@ search = st.text_input("Filter themes")
 if search:
     rankings = rankings[rankings["theme"].str.contains(search, case=False, na=False)]
 
+base_cols = [
+    "theme",
+    "category",
+    "ticker_count",
+    "avg_1w",
+    "avg_1m",
+    "avg_3m",
+    "positive_1m_breadth_pct",
+    "composite_score",
+    "is_active",
+]
+
+trend_cols = ["delta_avg_1m", "delta_positive_1m_breadth_pct", "delta_composite_score"]
+selected_cols = base_cols + trend_cols if show_trends else base_cols
+
+view = rankings[selected_cols].rename(
 view = rankings[
     [
         "theme",
@@ -72,10 +89,14 @@ view = rankings[
         "avg_3m": "avg 3M %",
         "positive_1m_breadth_pct": "positive 1M breadth %",
         "composite_score": "composite score",
+        "delta_avg_1m": "Δ avg 1M",
+        "delta_positive_1m_breadth_pct": "Δ positive 1M breadth",
+        "delta_composite_score": "Δ composite score",
     }
 )
 st.dataframe(view, width="stretch")
 
+with st.expander("Ranking and trend formulas (auditable)"):
 with st.expander("Ranking formulas (auditable)"):
     st.code(
         """
@@ -86,5 +107,9 @@ positive_1w_breadth_pct = percent(perf_1w > 0)
 positive_1m_breadth_pct = percent(perf_1m > 0)
 positive_3m_breadth_pct = percent(perf_3m > 0)
 composite_score = 0.25 * avg_1w + 0.50 * avg_1m + 0.25 * avg_3m
+
+delta_avg_1m = latest.avg_1m - previous.avg_1m
+delta_positive_1m_breadth_pct = latest.positive_1m_breadth_pct - previous.positive_1m_breadth_pct
+delta_composite_score = latest.composite_score - previous.composite_score
         """.strip()
     )

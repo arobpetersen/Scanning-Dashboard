@@ -58,6 +58,21 @@ CREATE TABLE IF NOT EXISTS ticker_snapshots (
     CHECK (length(trim(ticker)) > 0)
 );
 
+CREATE TABLE IF NOT EXISTS theme_snapshots (
+    run_id BIGINT NOT NULL,
+    snapshot_time TIMESTAMP NOT NULL,
+    theme_id BIGINT NOT NULL,
+    ticker_count BIGINT NOT NULL,
+    avg_1w DOUBLE,
+    avg_1m DOUBLE,
+    avg_3m DOUBLE,
+    positive_1w_breadth_pct DOUBLE,
+    positive_1m_breadth_pct DOUBLE,
+    positive_3m_breadth_pct DOUBLE,
+    composite_score DOUBLE,
+    PRIMARY KEY (run_id, theme_id)
+);
+
 CREATE TABLE IF NOT EXISTS refresh_failures (
     run_id BIGINT NOT NULL,
     ticker VARCHAR,
@@ -69,6 +84,8 @@ CREATE INDEX IF NOT EXISTS idx_theme_membership_theme_id ON theme_membership(the
 CREATE INDEX IF NOT EXISTS idx_theme_membership_ticker ON theme_membership(ticker);
 CREATE INDEX IF NOT EXISTS idx_snapshots_run_id ON ticker_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_ticker ON ticker_snapshots(ticker);
+CREATE INDEX IF NOT EXISTS idx_theme_snapshots_run_id ON theme_snapshots(run_id);
+CREATE INDEX IF NOT EXISTS idx_theme_snapshots_theme_id ON theme_snapshots(theme_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_failures_run_id ON refresh_failures(run_id);
 """
 

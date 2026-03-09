@@ -4,6 +4,7 @@ from datetime import datetime
 
 from .provider_live import LiveProvider
 from .provider_mock import MockProvider
+from .rankings import persist_theme_snapshot_for_run
 from .theme_service import active_ticker_universe
 
 
@@ -72,6 +73,8 @@ def run_refresh(conn, provider_name: str) -> int:
             """,
             ["success" if not failures else "partial", len(df), len(failures), run_id],
         )
+
+        persist_theme_snapshot_for_run(conn, run_id)
     except Exception as exc:
         conn.execute(
             """
