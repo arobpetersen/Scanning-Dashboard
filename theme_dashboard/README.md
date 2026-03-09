@@ -143,3 +143,19 @@ During refresh, progress is persisted incrementally (`success_count`, `failure_c
 Scope observability: each run records scope metadata (`scope_type`, `scope_theme_name`) and the resolved ticker universe in `refresh_run_tickers`, which is visible in Diagnostics.
 
 Live safeguard: the run stops early if repeated rate-limit errors are detected (configured by `LIVE_RATE_LIMIT_STOP_THRESHOLD` in `src/config.py`) and is finalized cleanly with a summary error message.
+
+
+## Suggestions and review workflow
+- Suggestions are stored in DuckDB (`theme_suggestions`) and are **separate** from direct theme registry edits.
+- Supported suggestion types:
+  - `add_ticker_to_theme`
+  - `remove_ticker_from_theme`
+  - `create_theme`
+  - `rename_theme`
+  - `move_ticker_between_themes`
+- Workflow is explicit and auditable:
+  1. Create suggestion (status `pending`)
+  2. Review suggestion (`approved` or `rejected`, with notes)
+  3. Apply approved suggestion (status becomes `applied`)
+- Suggestions include source metadata (`manual`, `rules_engine`, `ai_proposal`, `imported`) so future automation engines can plug in cleanly.
+- Applied suggestions update the same DuckDB theme source-of-truth tables used by Theme Manager and refresh runs.

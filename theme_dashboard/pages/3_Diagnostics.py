@@ -15,6 +15,7 @@ from src.database import get_conn, init_db
 from src.fetch_data import mark_stale_running_runs
 from src.provider_live import LiveProvider
 from src.queries import last_refresh_run, refresh_history, row_counts, snapshot_counts
+from src.suggestions_service import suggestion_status_counts
 from src.theme_service import seed_if_needed
 
 st.set_page_config(page_title="Diagnostics", layout="wide")
@@ -28,6 +29,7 @@ with get_conn() as conn:
     history = refresh_history(conn, limit=30)
     counts = row_counts(conn)
     snaps = snapshot_counts(conn)
+    sugg_counts = suggestion_status_counts(conn)
 
 st.write(f"Default provider setting: `{DEFAULT_PROVIDER}`")
 key_present = bool(massive_api_key())
@@ -44,6 +46,12 @@ sc1, sc2, sc3 = st.columns(3)
 sc1.metric("Ticker snapshot rows", int(snaps.iloc[0]["ticker_snapshot_rows"]))
 sc2.metric("Theme snapshot rows", int(snaps.iloc[0]["theme_snapshot_rows"]))
 sc3.metric("Runs with theme snapshots", int(snaps.iloc[0]["runs_with_theme_snapshots"]))
+
+sc4, sc5, sc6, sc7 = st.columns(4)
+sc4.metric("Suggestions pending", int(sugg_counts[sugg_counts["status"] == "pending"]["cnt"].sum()) if not sugg_counts.empty else 0)
+sc5.metric("Suggestions approved", int(sugg_counts[sugg_counts["status"] == "approved"]["cnt"].sum()) if not sugg_counts.empty else 0)
+sc6.metric("Suggestions rejected", int(sugg_counts[sugg_counts["status"] == "rejected"]["cnt"].sum()) if not sugg_counts.empty else 0)
+sc7.metric("Suggestions applied", int(sugg_counts[sugg_counts["status"] == "applied"]["cnt"].sum()) if not sugg_counts.empty else 0)
 
 if not history.empty:
     status_counts = history["status"].value_counts().to_dict()

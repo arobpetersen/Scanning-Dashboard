@@ -10,6 +10,7 @@ SCHEMA_SQL = """
 CREATE SEQUENCE IF NOT EXISTS themes_id_seq;
 CREATE SEQUENCE IF NOT EXISTS snapshots_id_seq;
 CREATE SEQUENCE IF NOT EXISTS refresh_run_id_seq;
+CREATE SEQUENCE IF NOT EXISTS suggestion_id_seq;
 
 CREATE TABLE IF NOT EXISTS themes (
     id BIGINT PRIMARY KEY DEFAULT nextval('themes_id_seq'),
@@ -81,6 +82,30 @@ CREATE TABLE IF NOT EXISTS theme_snapshots (
     PRIMARY KEY (run_id, theme_id)
 );
 
+CREATE TABLE IF NOT EXISTS theme_suggestions (
+    suggestion_id BIGINT PRIMARY KEY DEFAULT nextval('suggestion_id_seq'),
+    suggestion_type VARCHAR NOT NULL,
+    status VARCHAR NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TIMESTAMP,
+    source VARCHAR NOT NULL,
+    rationale VARCHAR,
+    proposed_theme_name VARCHAR,
+    proposed_ticker VARCHAR,
+    existing_theme_id BIGINT,
+    proposed_target_theme_id BIGINT,
+    reviewer_notes VARCHAR,
+    CHECK (status IN ('pending','approved','rejected','applied')),
+    CHECK (suggestion_type IN (
+        'add_ticker_to_theme',
+        'remove_ticker_from_theme',
+        'create_theme',
+        'rename_theme',
+        'move_ticker_between_themes'
+    )),
+    CHECK (source IN ('manual','rules_engine','ai_proposal','imported'))
+);
+
 CREATE TABLE IF NOT EXISTS refresh_failures (
     run_id BIGINT NOT NULL,
     ticker VARCHAR,
@@ -96,6 +121,8 @@ CREATE INDEX IF NOT EXISTS idx_theme_snapshots_run_id ON theme_snapshots(run_id)
 CREATE INDEX IF NOT EXISTS idx_theme_snapshots_theme_id ON theme_snapshots(theme_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_failures_run_id ON refresh_failures(run_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_run_tickers_run_id ON refresh_run_tickers(run_id);
+CREATE INDEX IF NOT EXISTS idx_theme_suggestions_status ON theme_suggestions(status);
+CREATE INDEX IF NOT EXISTS idx_theme_suggestions_type ON theme_suggestions(suggestion_type);
 """
 
 
@@ -113,13 +140,3 @@ def init_db() -> None:
         conn.execute(SCHEMA_SQL)
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_type VARCHAR")
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_theme_name VARCHAR")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS refresh_run_tickers (
-                run_id BIGINT NOT NULL,
-                ticker VARCHAR NOT NULL,
-                PRIMARY KEY(run_id, ticker)
-            )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_refresh_run_tickers_run_id ON refresh_run_tickers(run_id)")
