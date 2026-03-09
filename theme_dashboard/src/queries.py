@@ -69,6 +69,58 @@ def theme_snapshot_history(conn, theme_id: int, limit: int = 20) -> pd.DataFrame
     ).df()
 
 
+def theme_health_overview(conn, low_constituent_threshold: int, failure_window_days: int = 14) -> pd.DataFrame:
+    return conn.execute(
+        """
+        WITH member_counts AS (
+            SELECT t.id AS theme_id, COUNT(m.ticker) AS constituent_count
+            FROM themes t
+            LEFT JOIN theme_membership m ON t.id = m.theme_id
+            GROUP BY t.id
+        ),
+        latest_snap AS (
+            SELECT theme_id, MAX(snapshot_time) AS latest_snapshot_time
+            FROM theme_snapshots
+            GROUP BY theme_id
+        ),
+        live_failures_by_theme AS (
+            SELECT m.theme_id, COUNT(*) AS live_failure_count_recent
+            FROM refresh_failures f
+            JOIN refresh_runs r ON r.run_id = f.run_id
+            JOIN theme_membership m ON m.ticker = f.ticker
+            WHERE r.provider = 'live'
+              AND f.created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+            GROUP BY m.theme_id
+        )
+        SELECT
+            t.id AS theme_id,
+            t.name AS theme_name,
+            t.category,
+            t.is_active,
+            mc.constituent_count,
+            (mc.constituent_count > 0 AND mc.constituent_count < ?) AS low_count_flag,
+            (mc.constituent_count = 0) AS empty_theme_flag,
+            COALESCE(lf.live_failure_count_recent, 0) AS live_failure_count_recent,
+            ls.latest_snapshot_time,
+            CASE
+              WHEN mc.constituent_count = 0 THEN 'needs_attention'
+              WHEN t.is_active = FALSE AND mc.constituent_count > 0 THEN 'needs_attention'
+              WHEN COALESCE(lf.live_failure_count_recent, 0) >= 3 THEN 'watch'
+              WHEN mc.constituent_count > 0 AND mc.constituent_count < ? THEN 'watch'
+              ELSE 'healthy'
+            END AS health_status
+        FROM themes t
+        JOIN member_counts mc ON mc.theme_id = t.id
+        LEFT JOIN latest_snap ls ON ls.theme_id = t.id
+        LEFT JOIN live_failures_by_theme lf ON lf.theme_id = t.id
+        ORDER BY
+          CASE health_status WHEN 'needs_attention' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END,
+          theme_name
+        """,
+        [failure_window_days, low_constituent_threshold, low_constituent_threshold],
+    ).df()
+
+
 def snapshot_counts(conn) -> pd.DataFrame:
     return conn.execute(
         """

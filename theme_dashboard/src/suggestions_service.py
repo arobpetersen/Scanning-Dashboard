@@ -6,7 +6,6 @@ import pandas as pd
 
 from .theme_service import add_ticker, create_theme, remove_ticker, update_theme
 
-
 VALID_TYPES = {
     "add_ticker_to_theme",
     "remove_ticker_from_theme",
@@ -16,6 +15,7 @@ VALID_TYPES = {
     "review_theme",
 }
 VALID_SOURCES = {"manual", "rules_engine", "ai_proposal", "imported"}
+VALID_PRIORITIES = {"low", "medium", "high"}
 
 
 @dataclass
@@ -27,6 +27,7 @@ class SuggestionPayload:
     proposed_ticker: str | None = None
     existing_theme_id: int | None = None
     proposed_target_theme_id: int | None = None
+    priority: str = "medium"
 
 
 def _norm_source(source: str) -> str:
@@ -40,6 +41,13 @@ def _norm_type(suggestion_type: str) -> str:
     value = suggestion_type.strip()
     if value not in VALID_TYPES:
         raise ValueError(f"Invalid suggestion type: {suggestion_type}")
+    return value
+
+
+def _norm_priority(priority: str | None) -> str:
+    value = (priority or "medium").strip().lower()
+    if value not in VALID_PRIORITIES:
+        raise ValueError(f"Invalid priority: {priority}")
     return value
 
 
@@ -136,6 +144,7 @@ def _is_duplicate_pending(conn, payload: SuggestionPayload) -> bool:
 def create_suggestion(conn, payload: SuggestionPayload) -> int:
     suggestion_type = _norm_type(payload.suggestion_type)
     source = _norm_source(payload.source)
+    priority = _norm_priority(payload.priority)
 
     ok, message = validate_payload(conn, payload)
     if not ok:
@@ -147,16 +156,17 @@ def create_suggestion(conn, payload: SuggestionPayload) -> int:
     suggestion_id = conn.execute(
         """
         INSERT INTO theme_suggestions(
-            suggestion_type, status, source, rationale,
+            suggestion_type, status, source, rationale, priority,
             proposed_theme_name, proposed_ticker, existing_theme_id, proposed_target_theme_id
         )
-        VALUES (?, 'pending', ?, ?, ?, ?, ?, ?)
+        VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?)
         RETURNING suggestion_id
         """,
         [
             suggestion_type,
             source,
             (payload.rationale or "").strip(),
+            priority,
             payload.proposed_theme_name.strip() if payload.proposed_theme_name else None,
             payload.proposed_ticker.strip().upper() if payload.proposed_ticker else None,
             payload.existing_theme_id,
@@ -175,6 +185,7 @@ def _compute_validation_status(conn, row: pd.Series) -> str:
         proposed_ticker=row.get("proposed_ticker"),
         existing_theme_id=int(row["existing_theme_id"]) if pd.notna(row.get("existing_theme_id")) else None,
         proposed_target_theme_id=int(row["proposed_target_theme_id"]) if pd.notna(row.get("proposed_target_theme_id")) else None,
+        priority=str(row.get("priority") or "medium"),
     )
 
     if str(row["status"]) == "pending" and _is_duplicate_pending(conn, payload):
@@ -272,7 +283,7 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
     row = conn.execute(
         """
         SELECT suggestion_id, suggestion_type, status, source, proposed_theme_name, proposed_ticker,
-               existing_theme_id, proposed_target_theme_id
+               existing_theme_id, proposed_target_theme_id, priority
         FROM theme_suggestions
         WHERE suggestion_id = ?
         """,
@@ -281,7 +292,7 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
     if row is None:
         raise ValueError("Suggestion not found")
 
-    _, suggestion_type, status, source, proposed_theme_name, proposed_ticker, existing_theme_id, target_theme_id = row
+    _, suggestion_type, status, source, proposed_theme_name, proposed_ticker, existing_theme_id, target_theme_id, priority = row
     if status != "approved":
         raise ValueError("Only approved suggestions can be applied")
 
@@ -292,6 +303,7 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
         proposed_ticker=proposed_ticker,
         existing_theme_id=existing_theme_id,
         proposed_target_theme_id=target_theme_id,
+        priority=priority,
     )
     ok, reason = validate_payload(conn, payload)
     if not ok:
@@ -313,7 +325,6 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
         remove_ticker(conn, int(existing_theme_id), proposed_ticker)
         add_ticker(conn, int(target_theme_id), proposed_ticker)
     elif suggestion_type == "review_theme":
-        # review-only proposal; applying marks it handled without mutating registry
         pass
     else:
         raise ValueError(f"Unsupported suggestion type: {suggestion_type}")
@@ -344,7 +355,7 @@ def suggestion_status_counts(conn) -> pd.DataFrame:
 def recent_applied_suggestions(conn, limit: int = 10) -> pd.DataFrame:
     return conn.execute(
         """
-        SELECT s.suggestion_id, s.suggestion_type, s.source, s.proposed_ticker, s.proposed_theme_name,
+        SELECT s.suggestion_id, s.suggestion_type, s.source, s.priority, s.proposed_ticker, s.proposed_theme_name,
                t.name AS existing_theme_name, tt.name AS target_theme_name,
                s.reviewer_notes, s.reviewed_at
         FROM theme_suggestions s

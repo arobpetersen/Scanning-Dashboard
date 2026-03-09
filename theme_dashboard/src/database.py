@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS theme_suggestions (
     existing_theme_id BIGINT,
     proposed_target_theme_id BIGINT,
     reviewer_notes VARCHAR,
+    priority VARCHAR NOT NULL DEFAULT 'medium',
     CHECK (status IN ('pending','approved','rejected','applied')),
     CHECK (suggestion_type IN (
         'add_ticker_to_theme',
@@ -141,6 +142,8 @@ def init_db() -> None:
         conn.execute(SCHEMA_SQL)
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_type VARCHAR")
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_theme_name VARCHAR")
+        conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
+        conn.execute("UPDATE theme_suggestions SET priority='medium' WHERE priority IS NULL OR trim(priority)=''")
         # Migrate suggestions table to ensure latest suggestion types/checks are supported.
         ddl = conn.execute("SELECT sql FROM duckdb_tables() WHERE table_name='theme_suggestions' LIMIT 1").fetchone()
         ddl_text = ddl[0].lower() if ddl and ddl[0] else ""
@@ -160,6 +163,7 @@ def init_db() -> None:
                     existing_theme_id BIGINT,
                     proposed_target_theme_id BIGINT,
                     reviewer_notes VARCHAR,
+                    priority VARCHAR NOT NULL DEFAULT 'medium',
                     CHECK (status IN ('pending','approved','rejected','applied')),
                     CHECK (suggestion_type IN (
                         'add_ticker_to_theme',
@@ -178,11 +182,11 @@ def init_db() -> None:
                 INSERT INTO theme_suggestions_migrated(
                     suggestion_id, suggestion_type, status, created_at, reviewed_at, source,
                     rationale, proposed_theme_name, proposed_ticker, existing_theme_id,
-                    proposed_target_theme_id, reviewer_notes
+                    proposed_target_theme_id, reviewer_notes, priority
                 )
                 SELECT suggestion_id, suggestion_type, status, created_at, reviewed_at, source,
                        rationale, proposed_theme_name, proposed_ticker, existing_theme_id,
-                       proposed_target_theme_id, reviewer_notes
+                       proposed_target_theme_id, reviewer_notes, COALESCE(priority, 'medium')
                 FROM theme_suggestions
                 """
             )

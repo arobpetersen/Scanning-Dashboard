@@ -28,10 +28,9 @@ if st.button("Run deterministic rules engine"):
     with get_conn() as conn:
         summary = run_rules_engine(conn)
     st.success(
-        f"Rules run complete: evaluated={summary['evaluated']}, created={summary['created']}, duplicates_skipped={summary['duplicates_skipped']}, invalid_or_skipped={summary['invalid_or_skipped']}"
+        f"Rules run complete: created={summary['created']} / evaluated={summary['evaluated']} | duplicates_skipped={summary['duplicates_skipped']} | invalid_or_skipped={summary['invalid_or_skipped']}"
     )
     if summary["rule_results"]:
-        st.caption("Rule-level outcomes")
         st.dataframe(summary["rule_results"], width="stretch", hide_index=True)
     if summary["errors"]:
         st.warning("Some rule outputs were skipped:")
@@ -51,6 +50,7 @@ suggestion_type = st.selectbox(
     ],
 )
 source = st.selectbox("Source", ["manual", "rules_engine", "ai_proposal", "imported"], index=0)
+priority = st.selectbox("Priority", ["low", "medium", "high"], index=1)
 rationale = st.text_area("Rationale", value="")
 
 selected_existing_theme = None
@@ -106,6 +106,7 @@ if st.button("Create suggestion"):
         payload = SuggestionPayload(
             suggestion_type=suggestion_type,
             source=source,
+            priority=priority,
             rationale=rationale,
             proposed_theme_name=proposed_theme_name,
             proposed_ticker=proposed_ticker,
@@ -161,6 +162,7 @@ else:
     view_cols = [
         "suggestion_id",
         "status",
+        "priority",
         "validation_status",
         "suggestion_type",
         "source",
@@ -182,11 +184,11 @@ else:
     if pending.empty:
         st.info("No pending suggestions in current filter.")
     else:
-        pending_options = pending[["suggestion_id", "suggestion_type", "source", "validation_status"]].to_dict("records")
+        pending_options = pending[["suggestion_id", "priority", "suggestion_type", "source", "validation_status"]].to_dict("records")
         selected_pending = st.selectbox(
             "Pending suggestion",
             options=pending_options,
-            format_func=lambda r: f"#{r['suggestion_id']} | {r['suggestion_type']} | {r['source']} | {r['validation_status']}",
+            format_func=lambda r: f"#{r['suggestion_id']} | {r['priority']} | {r['suggestion_type']} | {r['source']} | {r['validation_status']}",
         )
         notes = st.text_area("Reviewer notes", value="", key="review_notes")
         rc1, rc2 = st.columns(2)
@@ -207,11 +209,11 @@ else:
     if approved.empty:
         st.info("No approved suggestions available to apply.")
     else:
-        approved_options = approved[["suggestion_id", "suggestion_type", "validation_status"]].to_dict("records")
+        approved_options = approved[["suggestion_id", "priority", "suggestion_type", "validation_status"]].to_dict("records")
         selected_approved = st.selectbox(
             "Approved suggestion",
             options=approved_options,
-            format_func=lambda r: f"#{r['suggestion_id']} | {r['suggestion_type']} | {r['validation_status']}",
+            format_func=lambda r: f"#{r['suggestion_id']} | {r['priority']} | {r['suggestion_type']} | {r['validation_status']}",
         )
         apply_notes = st.text_area("Application notes (optional)", value="", key="apply_notes")
         if st.button("Apply approved suggestion"):

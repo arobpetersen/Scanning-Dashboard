@@ -171,8 +171,23 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
 - The Suggestions page includes a manual trigger to run a deterministic rules engine.
 - Rules engine outputs are inserted into the same suggestions queue with `source = rules_engine`.
 - It never auto-applies changes and always uses the existing review/approve/apply governance flow.
-- First-wave rules:
-  - `low_constituent_count_review`: flags thin themes under a configured member threshold.
-  - `duplicate_membership_review`: flags tickers that appear in multiple themes.
-  - `inactive_or_empty_theme_review`: flags inactive themes and/or themes with zero members.
-- Rule runs show a summary (evaluated, created, duplicates skipped, invalid/skipped) and proposals remain auditable in queue history.
+- Suggestions now include a triage priority (`low` / `medium` / `high`) so reviewers can focus on the most actionable items first.
+- First-wave low-noise rules:
+  - `low_constituent_count_review` (`medium`): flags non-empty themes under the configurable member threshold (`RULE_LOW_CONSTITUENT_THRESHOLD`).
+  - `empty_theme_review` (`high`): flags themes with zero members.
+  - `inactive_theme_cleanup_review` (`medium`): flags inactive themes that still contain members.
+  - `repeated_live_failure_review` (`high`): optionally flags tickers with repeated live-refresh failures over a configurable lookback window.
+- Overlap across themes is generally acceptable in this taxonomy, so duplicate-membership overlap is **not** treated as a default problem and no longer generates suggestions by default.
+- Rule runs show concise output by rule (`severity`, `evaluated`, `created`, `duplicates_skipped`, per-rule cap), and proposals remain auditable in queue history.
+- Noise guardrails are configurable in `src/config.py` (including `RULE_MAX_SUGGESTIONS_PER_RULE`).
+
+## Theme Health / Maintenance view
+- A dedicated **Theme Health / Maintenance** page provides an operational quality view without flooding the suggestions queue.
+- For each theme, it surfaces:
+  - name, category, active/inactive status,
+  - constituent count,
+  - low-count and empty flags,
+  - recent live refresh failure count across member tickers,
+  - latest theme snapshot timestamp,
+  - simple health status (`healthy`, `watch`, `needs_attention`).
+- The page supports lightweight filtering for active/inactive, low-count, and empty-theme flags.
