@@ -230,3 +230,29 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
 - Pandas/Datetime values (including `Timestamp`) are converted to ISO-8601 strings to avoid `Object of type Timestamp is not JSON serializable`.
 - AI key messaging reflects real key presence: warning is shown only when `OPENAI_API_KEY` is missing.
 - AI remains queue-only: proposals are inserted as `source = ai_proposal` and must follow normal review/approve/apply governance.
+
+
+## Theme Momentum Engine
+- `src/momentum_engine.py` computes deterministic momentum/leadership analytics from historical `theme_snapshots`.
+- Core tracked inputs include: `composite_score`, `avg_1w`, `avg_1m`, `avg_3m`, `positive_1m_breadth_pct`, and `ticker_count`.
+- Derived outputs include:
+  - strongest momentum themes,
+  - biggest risers / fallers,
+  - breadth improvers,
+  - weakening themes,
+  - top-N leadership entrants and dropouts,
+  - rank and composite deltas over the selected window.
+- Momentum score (auditable formula):
+  - `0.45*delta_composite + 0.25*delta_avg_1m + 0.20*delta_breadth + 0.10*rank_change`.
+
+## Historical momentum views
+- Historical Performance now combines single-theme history and cross-theme rotation analysis.
+- Supported lookback windows: 1 week, 1 month, 3 months, and custom days.
+- Includes momentum summary sections:
+  - Top Momentum Themes
+  - Biggest Risers
+  - Biggest Fallers
+  - New Leaders
+  - Breadth Improvers
+  - Weakening Themes
+- Top-N movement analysis makes it easy to track leadership rotation and emerging strength.
