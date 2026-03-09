@@ -7,6 +7,14 @@ from .queries import latest_completed_runs
 
 
 METRIC_COLUMNS = [
+from .queries import latest_completed_run_id
+
+
+RANKING_COLUMNS = [
+    "theme_id",
+    "theme",
+    "category",
+    "is_active",
     "ticker_count",
     "avg_1w",
     "avg_1m",
@@ -19,6 +27,26 @@ METRIC_COLUMNS = [
 
 
 def _compute_theme_metrics(raw: pd.DataFrame) -> pd.DataFrame:
+def compute_theme_rankings(conn) -> pd.DataFrame:
+    run_id = latest_completed_run_id(conn)
+    if run_id is None:
+        return pd.DataFrame(columns=RANKING_COLUMNS)
+
+    raw = conn.execute(
+        """
+        SELECT t.id AS theme_id, t.name AS theme, t.category, t.is_active,
+               m.ticker, s.perf_1w, s.perf_1m, s.perf_3m
+        FROM themes t
+        LEFT JOIN theme_membership m ON t.id = m.theme_id
+        LEFT JOIN ticker_snapshots s
+          ON m.ticker = s.ticker AND s.run_id = ?
+        """,
+        [run_id],
+    ).df()
+
+    if raw.empty:
+        return pd.DataFrame(columns=RANKING_COLUMNS)
+
     grouped = raw.groupby(["theme_id", "theme", "category", "is_active"], dropna=False)
     out = grouped.agg(
         ticker_count=("ticker", "count"),
@@ -144,3 +172,14 @@ def compute_theme_rankings(conn) -> pd.DataFrame:
     latest["delta_composite_score"] = (latest["composite_score"] - latest["prev_composite_score"]).round(2)
 
     return latest.sort_values("composite_score", ascending=False)
+    numeric_cols = [
+        "avg_1w",
+        "avg_1m",
+        "avg_3m",
+        "positive_1w_breadth_pct",
+        "positive_1m_breadth_pct",
+        "positive_3m_breadth_pct",
+        "composite_score",
+    ]
+    out[numeric_cols] = out[numeric_cols].round(2)
+    return out[RANKING_COLUMNS].sort_values("composite_score", ascending=False)
