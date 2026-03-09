@@ -3,7 +3,7 @@ import streamlit as st
 from src.config import DEFAULT_PROVIDER, MASSIVE_API_KEY_ENV, massive_api_key
 from src.database import get_conn, init_db
 from src.fetch_data import RefreshBlockedError, run_refresh
-from src.queries import last_refresh_run
+from src.queries import last_refresh_run, synthetic_data_active
 from src.rankings import compute_theme_rankings
 from src.suggestions_service import suggestion_status_counts
 from src.theme_service import active_ticker_universe, get_theme_members, list_themes, seed_if_needed
@@ -43,9 +43,13 @@ with get_conn() as conn:
     last_run = last_refresh_run(conn)
     rankings = compute_theme_rankings(conn)
     sugg_counts = suggestion_status_counts(conn)
+    synthetic_active = synthetic_data_active(conn)
 
 if provider_name == "live" and not massive_api_key():
     st.warning(f"Live selected but {MASSIVE_API_KEY_ENV} is missing. Refresh will fall back to mock provider behavior.")
+
+if synthetic_active:
+    st.info("Synthetic historical data active")
 
 if rankings.empty:
     st.warning("No ranking data yet. Run a refresh to generate snapshots.")

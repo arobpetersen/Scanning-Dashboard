@@ -142,12 +142,13 @@ def run_refresh(
                     """
                     INSERT INTO ticker_snapshots(
                         run_id, ticker, price, perf_1w, perf_1m, perf_3m,
-                        market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated
+                        market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated, snapshot_source
                     )
                     SELECT run_id, ticker, price, perf_1w, perf_1m, perf_3m,
-                           market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated
+                           market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated, ?
                     FROM incoming_snapshots
-                    """
+                    """,
+                    [provider.name],
                 )
                 conn.unregister("incoming_snapshots")
                 success_count += int(len(df))

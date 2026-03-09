@@ -62,9 +62,12 @@ def persist_theme_snapshot_for_run(conn, run_id: int) -> None:
         return
 
     metrics = metrics.copy()
-    snapshot_time = conn.execute("SELECT finished_at FROM refresh_runs WHERE run_id = ?", [run_id]).fetchone()[0]
+    run_meta = conn.execute("SELECT finished_at, provider FROM refresh_runs WHERE run_id = ?", [run_id]).fetchone()
+    snapshot_time = run_meta[0] if run_meta else None
+    source = (run_meta[1] if run_meta and run_meta[1] in {"live", "mock", "synthetic_backfill"} else "live")
     metrics["run_id"] = run_id
     metrics["snapshot_time"] = snapshot_time
+    metrics["snapshot_source"] = source
 
     conn.register("theme_snapshot_incoming", metrics)
     conn.execute(
@@ -73,12 +76,12 @@ def persist_theme_snapshot_for_run(conn, run_id: int) -> None:
             run_id, snapshot_time, theme_id, ticker_count,
             avg_1w, avg_1m, avg_3m,
             positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
-            composite_score
+            composite_score, snapshot_source
         )
         SELECT run_id, snapshot_time, theme_id, ticker_count,
                avg_1w, avg_1m, avg_3m,
                positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
-               composite_score
+               composite_score, snapshot_source
         FROM theme_snapshot_incoming
         """
     )

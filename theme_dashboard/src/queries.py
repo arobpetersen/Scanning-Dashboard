@@ -253,3 +253,14 @@ def row_counts(conn) -> pd.DataFrame:
         SELECT 'theme_suggestions', COUNT(*) FROM theme_suggestions
         """
     ).df()
+
+
+def synthetic_data_active(conn) -> bool:
+    row = conn.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM theme_snapshots WHERE snapshot_source='synthetic_backfill') +
+          (SELECT COUNT(*) FROM ticker_snapshots WHERE snapshot_source='synthetic_backfill')
+        """
+    ).fetchone()
+    return bool(row and row[0] and int(row[0]) > 0)

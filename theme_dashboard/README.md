@@ -256,3 +256,31 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
   - Breadth Improvers
   - Weakening Themes
 - Top-N movement analysis makes it easy to track leadership rotation and emerging strength.
+
+
+## Synthetic historical backfill generator
+To test momentum and historical leadership views without live API calls, use:
+
+```bash
+python tools/generate_mock_history.py --days 120 --frequency weekly --seed 42 --volatility medium --reset
+```
+
+Options:
+- `--days` lookback window to synthesize (default `120`)
+- `--frequency` `daily|weekly|monthly` (default `weekly`)
+- `--seed` deterministic reproducibility seed
+- `--volatility` `low|medium|high` movement amplitude
+- `--reset` clear prior snapshots/runs before backfill
+- `--shocks` optional comma-separated shock events:
+  - `ai_boom`
+  - `energy_crash`
+  - `defense_rally`
+
+Generated data includes archetypes (`persistent_leader`, `emerging_theme`, `weakening_theme`, `choppy_theme`, `dead_theme`) and rotation phases so charts show non-flat leadership movement.
+
+Snapshot provenance tagging:
+- `live`
+- `mock`
+- `synthetic_backfill`
+
+The dashboard shows a "Synthetic historical data active" indicator when synthetic snapshots are present.

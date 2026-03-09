@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS ticker_snapshots (
     float_shares DOUBLE,
     adr_pct DOUBLE,
     last_updated TIMESTAMP,
+    snapshot_source VARCHAR NOT NULL DEFAULT 'live',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK (length(trim(ticker)) > 0)
 );
@@ -79,6 +80,7 @@ CREATE TABLE IF NOT EXISTS theme_snapshots (
     positive_1m_breadth_pct DOUBLE,
     positive_3m_breadth_pct DOUBLE,
     composite_score DOUBLE,
+    snapshot_source VARCHAR NOT NULL DEFAULT 'live',
     PRIMARY KEY (run_id, theme_id)
 );
 
@@ -192,6 +194,10 @@ def init_db() -> None:
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_type VARCHAR")
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_theme_name VARCHAR")
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
+        conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
+        conn.execute("ALTER TABLE theme_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
+        conn.execute("UPDATE ticker_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''")
+        conn.execute("UPDATE theme_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''")
         conn.execute("UPDATE theme_suggestions SET priority='medium' WHERE priority IS NULL OR trim(priority)=''")
 
         ddl = conn.execute("SELECT sql FROM duckdb_tables() WHERE table_name='theme_suggestions' LIMIT 1").fetchone()
