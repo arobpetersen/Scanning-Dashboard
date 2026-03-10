@@ -108,7 +108,8 @@ with rc2:
         api_calls = int(run.get('api_call_count') or 0)
         st.info(
             f"Last run #{int(run['run_id'])} | provider={run['provider']} | status={run['status']} "
-            f"| success={int(run['success_count'])} | failures={int(run['failure_count'])} | api_calls={api_calls}"
+            f"| success={int(run['success_count'])} | failures={int(run['failure_count'])} | api_calls={api_calls} "
+            f"| flagged={int(run.get('flagged_symbol_count') or 0)} | suppressed={int(run.get('suppressed_symbol_count') or 0)}"
         )
         with st.expander("Refresh accounting (last run)"):
             endpoint_counts = {}
@@ -120,6 +121,7 @@ with rc2:
                     endpoint_counts = {"raw": str(raw)}
             st.write("**Endpoint counts**", endpoint_counts if endpoint_counts else "None")
             st.write("**Skipped/failed tickers**", run.get('skipped_tickers') or "None")
+            st.write("**Failure categories**", run.get('failure_category_counts') or "{}")
     else:
         st.info("No runs yet.")
     with st.expander("Resolved ticker universe"):

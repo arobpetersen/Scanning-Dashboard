@@ -166,6 +166,22 @@ Scope observability: each run records scope metadata (`scope_type`, `scope_theme
 Live safeguard: the run stops early if repeated rate-limit errors are detected (configured by `LIVE_RATE_LIMIT_STOP_THRESHOLD` in `src/config.py`) and is finalized cleanly with a summary error message.
 
 
+
+## Symbol hygiene and suppression workflow
+- A `symbol_refresh_status` table tracks per-ticker refresh hygiene state and history:
+  - `status`: `active`, `watch`, `inactive_candidate`, `refresh_suppressed`
+  - `last_failure_category`, `consecutive_failure_count`, `rolling_failure_count`, `last_success_at`, `last_run_id`
+- Deterministic NO_CANDLES policy:
+  - At **3 consecutive `NO_CANDLES`** failures, ticker is flagged `inactive_candidate` and suggested for suppression (manual review).
+  - At **5 consecutive `NO_CANDLES`** failures, ticker is auto-moved to `refresh_suppressed` (conservative hard stop).
+  - Any successful refresh for a ticker resets it back to `active` and clears consecutive failure streaks.
+- Suppressed symbols are skipped during subsequent refresh runs (still kept in theme membership; no auto-delete).
+- Health page includes an inline per-symbol review queue where context and actions are together:
+  - context: ticker, category, consecutive/rolling failures, last success, current/suggested status
+  - actions: **Approve suppression**, **Reject/keep active**, **Return to watch**, **Reset history**
+- Refresh run reporting now stores run-level failure rollups in `refresh_runs`:
+  - `failure_category_counts` (JSON), `flagged_symbol_count`, `suppressed_symbol_count`, plus skipped symbols list.
+
 ## Suggestions and review workflow
 - Suggestions are stored in DuckDB (`theme_suggestions`) and are **separate** from direct theme registry edits.
 - Supported suggestion types:
@@ -204,7 +220,7 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
   - `repeated_live_failure_review` (`high`): flags tickers only when repeated **ticker-specific** live failures are dominant/actionable (`ticker_data_missing`, `ticker_symbol_issue`, `no_candles`). Provider-wide failures are suppressed from ticker proposal generation.
 - Overlap across themes is generally acceptable in this taxonomy, so duplicate-membership overlap is **not** treated as a default problem and no longer generates suggestions by default.
 - Rule runs show concise output by rule (`severity`, `evaluated`, `created`, `duplicates_skipped`, per-rule cap), and proposals remain auditable in queue history.
-- Live failures are categorized into: `provider_limit`, `provider_auth`, `provider_outage`, `ticker_data_missing`, `ticker_symbol_issue`, `no_candles`, `unknown`.
+- Live failures are categorized into deterministic refresh categories: `NO_CANDLES`, `SYMBOL_NOT_FOUND`, `RATE_LIMIT`, `TIMEOUT`, `AUTH`, `OTHER`.
 - Provider-level failure patterns remain visible in Diagnostics and in rules-run provider signal summaries, but do not flood ticker-level review suggestions.
 - Noise guardrails are configurable in `src/config.py` (including `RULE_MAX_SUGGESTIONS_PER_RULE`).
 

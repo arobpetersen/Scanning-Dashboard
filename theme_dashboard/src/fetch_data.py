@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Callable, Iterable
 
 from .config import LIVE_FETCH_REFERENCE_ON_REFRESH, LIVE_RATE_LIMIT_STOP_THRESHOLD, REFRESH_STALE_TIMEOUT_MINUTES
+from .failure_classification import categorize_failure_message
 from .provider_live import LiveProvider
 from .provider_mock import MockProvider
 from .rankings import persist_theme_snapshot_for_run
+from .symbol_hygiene import apply_refresh_failure, apply_refresh_success, refresh_eligible_tickers
 from .theme_service import active_ticker_universe
 
 
@@ -59,8 +62,7 @@ def _current_running_run(conn):
 
 
 def _is_rate_limit_error(message: str) -> bool:
-    text = (message or "").lower()
-    return "rate_limit" in text or "429" in text or "rate limit" in text
+    return categorize_failure_message(message) == "RATE_LIMIT"
 
 
 def run_refresh(
@@ -88,6 +90,7 @@ def run_refresh(
     provider = get_provider(provider_name)
     universe = list(tickers) if tickers is not None else active_ticker_universe(conn)
     clean_tickers = sorted({(t or "").strip().upper() for t in universe if (t or "").strip()})
+    eligible_tickers, suppressed_tickers = refresh_eligible_tickers(conn, clean_tickers)
 
     run_id = conn.execute(
         """
@@ -107,16 +110,28 @@ def run_refresh(
     consecutive_rate_limit_failures = 0
     early_stop_reason: str | None = None
     failed_tickers: set[str] = set()
+    failure_categories: dict[str, int] = defaultdict(int)
+    flagged_count = 0
+    auto_suppressed_count = 0
 
     try:
-        if not clean_tickers:
+        if not eligible_tickers:
             conn.execute(
                 """
                 UPDATE refresh_runs
-                SET finished_at = CURRENT_TIMESTAMP, status = 'success', success_count = 0, failure_count = 0, api_call_count = 0, api_endpoint_counts = '{}', skipped_tickers = NULL
+                SET finished_at = CURRENT_TIMESTAMP,
+                    status = 'success',
+                    success_count = 0,
+                    failure_count = 0,
+                    api_call_count = 0,
+                    api_endpoint_counts = '{}',
+                    skipped_tickers = ?,
+                    failure_category_counts = '{}',
+                    flagged_symbol_count = 0,
+                    suppressed_symbol_count = ?
                 WHERE run_id = ?
                 """,
-                [run_id],
+                [",".join(sorted(suppressed_tickers)) if suppressed_tickers else None, len(suppressed_tickers), run_id],
             )
             persist_theme_snapshot_for_run(conn, run_id)
             if progress_callback:
@@ -133,12 +148,11 @@ def run_refresh(
                 )
             return run_id
 
-        for idx, ticker in enumerate(clean_tickers, start=1):
+        for idx, ticker in enumerate(eligible_tickers, start=1):
             df, failures = provider.fetch_ticker_data([ticker])
 
             if not df.empty:
                 payload = df.copy()
-                # Reuse last known market_cap to avoid re-fetching static reference metadata every manual refresh.
                 if "market_cap" in payload.columns and payload["market_cap"].isna().any():
                     prior_caps = conn.execute(
                         """
@@ -168,24 +182,35 @@ def run_refresh(
                 conn.unregister("incoming_snapshots")
                 success_count += int(len(df))
                 consecutive_rate_limit_failures = 0
+                for row in df.itertuples(index=False):
+                    hygiene = apply_refresh_success(conn, str(row.ticker).upper(), int(run_id))
+                    if hygiene.get("auto_suppressed"):
+                        auto_suppressed_count += 1
 
             for failure in failures:
                 error_message = failure.get("error_message", "Unknown error")
                 failed_symbol = str(failure.get("ticker", ticker) or ticker).strip().upper()
+                failure_category = categorize_failure_message(error_message)
                 conn.execute(
-                    "INSERT INTO refresh_failures(run_id, ticker, error_message) VALUES (?, ?, ?)",
-                    [run_id, failed_symbol, error_message],
+                    "INSERT INTO refresh_failures(run_id, ticker, error_message, failure_category) VALUES (?, ?, ?, ?)",
+                    [run_id, failed_symbol, error_message, failure_category],
                 )
                 failed_tickers.add(failed_symbol)
                 failure_count += 1
+                failure_categories[failure_category] += 1
+
+                hygiene = apply_refresh_failure(conn, failed_symbol, int(run_id), error_message)
+                if hygiene.get("flagged"):
+                    flagged_count += 1
+                if hygiene.get("auto_suppressed"):
+                    auto_suppressed_count += 1
+
                 if provider.name == "live" and _is_rate_limit_error(error_message):
                     consecutive_rate_limit_failures += 1
                 else:
                     consecutive_rate_limit_failures = 0
 
-            progress_note = (
-                f"Progress {idx}/{len(clean_tickers)} | success={success_count} | failures={failure_count}"
-            )
+            progress_note = f"Progress {idx}/{len(eligible_tickers)} | success={success_count} | failures={failure_count}"
             conn.execute(
                 """
                 UPDATE refresh_runs
@@ -200,7 +225,7 @@ def run_refresh(
                     {
                         "run_id": run_id,
                         "provider": provider.name,
-                        "total": len(clean_tickers),
+                        "total": len(eligible_tickers),
                         "completed": idx,
                         "success": success_count,
                         "failure": failure_count,
@@ -216,13 +241,23 @@ def run_refresh(
                 break
 
         final_status = "success" if failure_count == 0 else "partial"
-        summary_message = early_stop_reason
         if early_stop_reason and success_count == 0:
             final_status = "failed"
 
         accounting = provider.get_call_accounting() if hasattr(provider, "get_call_accounting") else {"api_call_count": 0, "endpoint_counts": {}}
         endpoint_json = json.dumps(accounting.get("endpoint_counts", {}), sort_keys=True)
-        skipped_csv = ",".join(sorted(failed_tickers)) if failed_tickers else None
+        skipped_symbols = sorted(set(suppressed_tickers) | failed_tickers)
+        skipped_csv = ",".join(skipped_symbols) if skipped_symbols else None
+
+        summary_bits = [
+            early_stop_reason or "",
+            f"failures={failure_count}",
+            f"flagged={flagged_count}",
+            f"suppressed={len(suppressed_tickers) + auto_suppressed_count}",
+        ]
+        if failure_categories:
+            summary_bits.append(f"by_category={json.dumps(dict(sorted(failure_categories.items())), sort_keys=True)}")
+        summary_message = " | ".join([b for b in summary_bits if b])
 
         conn.execute(
             """
@@ -234,7 +269,10 @@ def run_refresh(
                 error_message = ?,
                 api_call_count = ?,
                 api_endpoint_counts = ?,
-                skipped_tickers = ?
+                skipped_tickers = ?,
+                failure_category_counts = ?,
+                flagged_symbol_count = ?,
+                suppressed_symbol_count = ?
             WHERE run_id = ?
             """,
             [
@@ -245,6 +283,9 @@ def run_refresh(
                 int(accounting.get("api_call_count", 0)),
                 endpoint_json,
                 skipped_csv,
+                json.dumps(dict(sorted(failure_categories.items())), sort_keys=True),
+                int(flagged_count),
+                int(len(suppressed_tickers) + auto_suppressed_count),
                 run_id,
             ],
         )
@@ -262,15 +303,21 @@ def run_refresh(
                 error_message = ?,
                 api_call_count = ?,
                 api_endpoint_counts = ?,
-                skipped_tickers = ?
+                skipped_tickers = ?,
+                failure_category_counts = ?,
+                flagged_symbol_count = ?,
+                suppressed_symbol_count = ?
             WHERE run_id = ?
             """,
             [
-                max(1, len(clean_tickers) - success_count),
+                max(1, len(eligible_tickers) - success_count),
                 str(exc),
                 int(accounting.get("api_call_count", 0)),
                 json.dumps(accounting.get("endpoint_counts", {}), sort_keys=True),
-                ",".join(sorted(failed_tickers)) if failed_tickers else None,
+                ",".join(sorted(set(suppressed_tickers) | failed_tickers)) if (suppressed_tickers or failed_tickers) else None,
+                json.dumps(dict(sorted(failure_categories.items())), sort_keys=True),
+                int(flagged_count),
+                int(len(suppressed_tickers) + auto_suppressed_count),
                 run_id,
             ],
         )

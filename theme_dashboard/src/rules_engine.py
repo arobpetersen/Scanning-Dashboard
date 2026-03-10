@@ -20,8 +20,8 @@ RULE_SEVERITY = {
     "inactive_theme_cleanup_review": "medium",
     "repeated_live_failure_review": "high",
 }
-PROVIDER_LEVEL_FAILURE_CATEGORIES = {"provider_limit", "provider_auth", "provider_outage"}
-TICKER_ACTIONABLE_FAILURE_CATEGORIES = {"ticker_data_missing", "ticker_symbol_issue", "no_candles"}
+PROVIDER_LEVEL_FAILURE_CATEGORIES = {"RATE_LIMIT", "AUTH", "TIMEOUT"}
+TICKER_ACTIONABLE_FAILURE_CATEGORIES = {"NO_CANDLES", "SYMBOL_NOT_FOUND"}
 
 
 def _try_create(conn, payload: SuggestionPayload, stats: dict, rule_name: str) -> None:

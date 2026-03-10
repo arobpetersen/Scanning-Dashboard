@@ -4,9 +4,11 @@ from unittest.mock import patch
 import duckdb
 import pandas as pd
 
+from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
 from src.leaderboard_utils import build_window_leaderboard
 from src.queries import theme_history_window
+from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success
 
 
 class TestLeaderboardUtils(unittest.TestCase):
@@ -125,6 +127,53 @@ class TestInflectionEngine(unittest.TestCase):
         self.assertEqual(len(out["signals"]["theme"].unique()), len(out["signals"]))
         self.assertIn("window_start", out["meta"])
         self.assertIn("window_end", out["meta"])
+
+
+class TestFailureClassificationAndHygiene(unittest.TestCase):
+    def test_no_candles_classification_is_deterministic(self):
+        self.assertEqual(categorize_failure_message("Massive fetch failed: NO_CANDLES: Massive returned no daily aggregates"), "NO_CANDLES")
+
+    def test_symbol_hygiene_flags_then_auto_suppresses_on_repeated_no_candles(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp default current_timestamp
+            )
+            """
+        )
+
+        for i in range(1, 4):
+            apply_refresh_failure(conn, "BAD1", i, "NO_CANDLES: Massive returned no daily aggregates")
+        flagged = conn.execute("select status, suggested_status, consecutive_failure_count from symbol_refresh_status where ticker='BAD1'").fetchone()
+        self.assertEqual(flagged[0], "inactive_candidate")
+        self.assertEqual(flagged[1], "refresh_suppressed")
+        self.assertEqual(int(flagged[2]), 3)
+
+        for i in range(4, 6):
+            apply_refresh_failure(conn, "BAD1", i, "NO_CANDLES: Massive returned no daily aggregates")
+        suppressed = conn.execute("select status, suggested_status, consecutive_failure_count from symbol_refresh_status where ticker='BAD1'").fetchone()
+        self.assertEqual(suppressed[0], "refresh_suppressed")
+        self.assertIsNone(suppressed[1])
+        self.assertEqual(int(suppressed[2]), 5)
+
+        apply_refresh_success(conn, "BAD1", 6)
+        recovered = conn.execute("select status, consecutive_failure_count, last_failure_category from symbol_refresh_status where ticker='BAD1'").fetchone()
+        self.assertEqual(recovered[0], "active")
+        self.assertEqual(int(recovered[1]), 0)
+        self.assertIsNone(recovered[2])
+        conn.close()
 
 
 if __name__ == "__main__":

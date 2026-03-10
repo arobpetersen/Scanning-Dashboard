@@ -43,7 +43,10 @@ CREATE TABLE IF NOT EXISTS refresh_runs (
     error_message VARCHAR,
     api_call_count BIGINT NOT NULL DEFAULT 0,
     api_endpoint_counts VARCHAR,
-    skipped_tickers VARCHAR
+    skipped_tickers VARCHAR,
+    failure_category_counts VARCHAR,
+    flagged_symbol_count BIGINT NOT NULL DEFAULT 0,
+    suppressed_symbol_count BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS refresh_run_tickers (
@@ -113,10 +116,27 @@ CREATE TABLE IF NOT EXISTS theme_suggestions (
     CHECK (source IN ('manual','rules_engine','ai_proposal','imported'))
 );
 
+CREATE TABLE IF NOT EXISTS symbol_refresh_status (
+    ticker VARCHAR PRIMARY KEY,
+    status VARCHAR NOT NULL DEFAULT 'active',
+    suggested_status VARCHAR,
+    suggested_reason VARCHAR,
+    suppression_reason VARCHAR,
+    last_failure_category VARCHAR,
+    consecutive_failure_count BIGINT NOT NULL DEFAULT 0,
+    rolling_failure_count BIGINT NOT NULL DEFAULT 0,
+    last_failure_at TIMESTAMP,
+    last_success_at TIMESTAMP,
+    last_run_id BIGINT,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (status IN ('active','watch','refresh_suppressed','inactive_candidate'))
+);
+
 CREATE TABLE IF NOT EXISTS refresh_failures (
     run_id BIGINT NOT NULL,
     ticker VARCHAR,
     error_message VARCHAR NOT NULL,
+    failure_category VARCHAR,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -127,7 +147,9 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_ticker ON ticker_snapshots(ticker);
 CREATE INDEX IF NOT EXISTS idx_theme_snapshots_run_id ON theme_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_theme_snapshots_theme_id ON theme_snapshots(theme_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_failures_run_id ON refresh_failures(run_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_failures_category ON refresh_failures(failure_category);
 CREATE INDEX IF NOT EXISTS idx_refresh_run_tickers_run_id ON refresh_run_tickers(run_id);
+CREATE INDEX IF NOT EXISTS idx_symbol_refresh_status_status ON symbol_refresh_status(status);
 CREATE INDEX IF NOT EXISTS idx_theme_suggestions_status ON theme_suggestions(status);
 CREATE INDEX IF NOT EXISTS idx_theme_suggestions_type ON theme_suggestions(suggestion_type);
 """
@@ -199,6 +221,21 @@ def init_db() -> None:
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS api_call_count BIGINT DEFAULT 0")
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS api_endpoint_counts VARCHAR")
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS skipped_tickers VARCHAR")
+        conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS failure_category_counts VARCHAR")
+        conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS flagged_symbol_count BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS suppressed_symbol_count BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE refresh_failures ADD COLUMN IF NOT EXISTS failure_category VARCHAR")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS suggested_status VARCHAR")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS suggested_reason VARCHAR")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS suppression_reason VARCHAR")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS last_failure_category VARCHAR")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS consecutive_failure_count BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS rolling_failure_count BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS last_failure_at TIMESTAMP")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMP")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS last_run_id BIGINT")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
+        conn.execute("UPDATE symbol_refresh_status SET updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)")
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
         conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
         conn.execute("ALTER TABLE theme_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")

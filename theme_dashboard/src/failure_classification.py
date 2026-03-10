@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+FAILURE_CATEGORIES = {
+    "NO_CANDLES",
+    "SYMBOL_NOT_FOUND",
+    "RATE_LIMIT",
+    "TIMEOUT",
+    "AUTH",
+    "OTHER",
+}
+
 
 def categorize_failure_message(message: str | None) -> str:
+    """Normalize provider/raw error text to deterministic refresh failure categories."""
     msg = (message or "").strip().lower()
     if not msg:
-        return "unknown"
+        return "OTHER"
 
+    if "no_candles" in msg or "no candles" in msg or "no daily aggregates" in msg:
+        return "NO_CANDLES"
+    if "not found" in msg or "unknown symbol" in msg or "invalid symbol" in msg or "does not exist" in msg:
+        return "SYMBOL_NOT_FOUND"
     if "rate_limit" in msg or "429" in msg or "too many requests" in msg:
-        return "provider_limit"
-    if "auth" in msg or "forbidden" in msg or "permission" in msg or "unauthorized" in msg or "api key" in msg:
-        return "provider_auth"
-    if "timeout" in msg or "service unavailable" in msg or "bad gateway" in msg or "gateway" in msg or "connection" in msg:
-        return "provider_outage"
-    if "no_candles" in msg or "no candles" in msg:
-        return "no_candles"
-    if "not found" in msg or "unknown symbol" in msg or "invalid symbol" in msg:
-        return "ticker_symbol_issue"
-    if "no data" in msg or "missing" in msg or "empty" in msg:
-        return "ticker_data_missing"
-    return "unknown"
+        return "RATE_LIMIT"
+    if "timeout" in msg or "timed out" in msg or "connection aborted" in msg:
+        return "TIMEOUT"
+    if "auth" in msg or "forbidden" in msg or "unauthorized" in msg or "permission" in msg or "api key" in msg or "403" in msg:
+        return "AUTH"
+    return "OTHER"

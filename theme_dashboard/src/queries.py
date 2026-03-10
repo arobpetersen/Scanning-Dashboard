@@ -294,6 +294,8 @@ def row_counts(conn) -> pd.DataFrame:
         UNION ALL
         SELECT 'refresh_run_tickers', COUNT(*) FROM refresh_run_tickers
         UNION ALL
+        SELECT 'symbol_refresh_status', COUNT(*) FROM symbol_refresh_status
+        UNION ALL
         SELECT 'theme_suggestions', COUNT(*) FROM theme_suggestions
         """
     ).df()
