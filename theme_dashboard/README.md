@@ -168,6 +168,17 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
 
 
 
+
+## Database recovery when `theme_dashboard.duckdb` is deleted
+- On app load, `init_db()` recreates tables and `seed_if_needed()` reloads `themes_seed_structured.json` when `themes` is empty.
+- Snapshot tables remain empty until a refresh run is executed (same architecture as normal operation).
+- Safe rebuild CLI (avoids relative-import pitfalls from running `src/*.py` directly):
+  - From repo root: `python -m theme_dashboard.rebuild_pipeline --provider mock --scope active_themes`
+  - Optional scoped rebuilds:
+    - `python -m theme_dashboard.rebuild_pipeline --provider live --scope selected_theme --theme-name "Semiconductors"`
+    - `python -m theme_dashboard.rebuild_pipeline --provider mock --scope custom_tickers --tickers "AAPL,MSFT,NVDA"`
+- This deterministic path runs: schema init -> seed themes -> refresh pipeline -> rebuild `ticker_snapshots` + `theme_snapshots` so pages repopulate.
+
 ## Theme metrics readability (display layer)
 - Theme ticker table formatting is applied in the UI display layer (DuckDB raw values remain unchanged).
 - `market_cap` and `avg_volume` are shown in compact units (`K`/`M`/`B`/`T`) for faster scanning (e.g., `125900000000 -> 125.9B`, `55825862 -> 55.8M`).
