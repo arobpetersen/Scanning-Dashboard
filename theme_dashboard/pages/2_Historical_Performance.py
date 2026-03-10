@@ -24,6 +24,10 @@ TABLE_HELP = {
     "delta_ticker_count": "Change in constituent count over the selected window.",
     "composite_score_start": "Composite score at the beginning of the selected window.",
     "composite_score_end": "Composite score at the end of the selected window.",
+    "avg_1w": "Average 1-week return snapshot value for this theme.",
+    "avg_1m": "Average 1-month return snapshot value for this theme.",
+    "avg_3m": "Average 3-month return snapshot value for this theme.",
+    "window_perf": "Primary return metric for this overview window.",
 }
 
 
@@ -53,6 +57,48 @@ def _signal_reason_text(row: pd.Series) -> str:
         f"delta_breadth {row.get('delta_breadth', 0):+.2f}"
     )
 
+
+def _build_overview_leaders(momentum: dict, perf_col: str, top_k: int = 10) -> tuple[pd.DataFrame, str | None]:
+    history = momentum["history"]
+    if history.empty:
+        return pd.DataFrame(), "No snapshots available for this window yet."
+
+    if int(history["snapshot_time"].nunique()) < 2:
+        return pd.DataFrame(), "Need at least two boundary snapshots to compare this window."
+
+    latest = history.sort_values("snapshot_time").groupby("theme", as_index=False).tail(1)
+    summary = momentum["window_summary"][["theme", "rank_change", "momentum_score", "delta_breadth"]]
+    ranked = (
+        latest[["theme", "composite_score", perf_col]]
+        .merge(summary, on="theme", how="left")
+        .sort_values(["composite_score", "momentum_score"], ascending=False)
+        .head(top_k)
+        .reset_index(drop=True)
+    )
+    ranked["rank"] = ranked.index + 1
+    return ranked[["rank", "theme", perf_col, "momentum_score", "rank_change"]], None
+
+
+def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, message: str | None, key_prefix: str):
+    st.markdown(f"**{title}**")
+    if message:
+        st.info(message)
+        return
+
+    display = leaders.rename(columns={perf_col: "window_perf"})
+    cols = ["rank", "theme", "window_perf", "momentum_score", "rank_change"]
+    st.dataframe(display[cols], hide_index=True, width="stretch", column_config=_config_for_columns(cols))
+
+    picked = st.selectbox(
+        "Jump to theme detail",
+        options=display["theme"].tolist(),
+        key=f"{key_prefix}_pick",
+        index=0,
+    )
+    if st.button("Open in Single Theme History", key=f"{key_prefix}_open", use_container_width=True):
+        st.session_state["historical_selected_theme_name"] = picked
+        st.rerun()
+
 st.set_page_config(page_title="Historical Performance", layout="wide")
 st.title("Historical Performance & Theme Momentum")
 st.caption("Track leadership, rotation, emerging strength, and weakening themes over configurable windows.")
@@ -61,6 +107,30 @@ init_db()
 with get_conn() as conn:
     seed_if_needed(conn)
     themes = list_themes(conn, active_only=False)
+
+# Fixed multi-window overview is intentionally independent of lower analysis controls.
+with get_conn() as conn:
+    overview_1w = compute_theme_momentum(conn, 7, top_n=10)
+    overview_1m = compute_theme_momentum(conn, 30, top_n=10)
+    overview_3m = compute_theme_momentum(conn, 90, top_n=10)
+
+st.subheader("Top Theme Overview (fixed cross-window)")
+st.caption("This section is a fixed snapshot for 1W, 1M, and 3M leadership scanning. Use the lower controls for focused analysis.")
+
+ov1, ov2, ov3 = st.columns(3)
+with ov1:
+    leaders_1w, msg_1w = _build_overview_leaders(overview_1w, "avg_1w")
+    _render_overview_panel("Top Themes — 1W", leaders_1w, "avg_1w", msg_1w, "ov_1w")
+with ov2:
+    leaders_1m, msg_1m = _build_overview_leaders(overview_1m, "avg_1m")
+    _render_overview_panel("Top Themes — 1M", leaders_1m, "avg_1m", msg_1m, "ov_1m")
+with ov3:
+    leaders_3m, msg_3m = _build_overview_leaders(overview_3m, "avg_3m")
+    _render_overview_panel("Top Themes — 3M", leaders_3m, "avg_3m", msg_3m, "ov_3m")
+
+st.divider()
+st.subheader("Analysis Workspace (reactive controls)")
+st.caption("All controls below affect this section only.")
 
 window_label = st.selectbox("Lookback window", ["1 week", "1 month", "3 months", "Custom"], index=1)
 lookback_days = {"1 week": 7, "1 month": 30, "3 months": 90}.get(window_label, 30)
@@ -109,7 +179,7 @@ m5.metric("Rotation intensity", f"{rotation['rotation_intensity']['rotation_inte
 
 st.subheader("Theme Momentum Leaderboard")
 leaders_tbl = summary.sort_values(["rank_end", "momentum_score"], ascending=[True, False]).head(10)
-st.caption("Quick view of current leaders and how strongly each theme is improving or weakening over this window.")
+st.caption("Reactive leaderboard for the selected analysis window and controls.")
 leaders_tbl = leaders_tbl[["rank_end", "theme", "momentum_score", "delta_composite", "rank_change"]].rename(columns={"rank_end": "rank"})
 st.dataframe(leaders_tbl, width="stretch", column_config=_config_for_columns(leaders_tbl.columns.tolist()))
 
@@ -349,7 +419,15 @@ if themes.empty:
     st.info("No themes found.")
 else:
     options = {f"{r['name']} ({r['category']})": int(r['id']) for _, r in themes.iterrows()}
-    sel = st.selectbox("Theme", list(options.keys()))
+    theme_name_default = st.session_state.get("historical_selected_theme_name")
+    labels = list(options.keys())
+    default_index = 0
+    if theme_name_default:
+        for i, label in enumerate(labels):
+            if label.startswith(f"{theme_name_default} ("):
+                default_index = i
+                break
+    sel = st.selectbox("Theme", labels, index=default_index)
     with get_conn() as conn:
         single = theme_snapshot_history(conn, options[sel], limit=250)
     if single.empty:
