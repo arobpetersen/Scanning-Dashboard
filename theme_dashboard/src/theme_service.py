@@ -39,12 +39,15 @@ def seed_if_needed(conn) -> bool:
             category = _normalize_category(theme.get("category", "Uncategorized"))
             tickers = sorted({_normalize_ticker(t) for t in theme.get("tickers", []) if t and t.strip()})
 
-            # Seed payload can contain duplicate theme names; upsert-like insert keeps seeding idempotent.
-            conn.execute(
-                "INSERT OR IGNORE INTO themes(name, category, is_active) VALUES (?, ?, TRUE)",
-                [name, category],
-            )
-            theme_id = conn.execute("SELECT id FROM themes WHERE name = ?", [name]).fetchone()[0]
+            # Seed payload can contain duplicate theme names; pre-check avoids unique-constraint churn.
+            existing = conn.execute("SELECT id FROM themes WHERE name = ?", [name]).fetchone()
+            if existing:
+                theme_id = int(existing[0])
+            else:
+                theme_id = conn.execute(
+                    "INSERT INTO themes(name, category, is_active) VALUES (?, ?, TRUE) RETURNING id",
+                    [name, category],
+                ).fetchone()[0]
 
             for ticker in tickers:
                 conn.execute(

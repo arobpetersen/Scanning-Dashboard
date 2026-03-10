@@ -28,6 +28,42 @@ if themes.empty:
     st.stop()
 
 
+SELECTED_THEME_ID_KEY = "selected_theme_id"
+SELECTED_THEME_LABEL_KEY = "explore_theme"
+
+
+def _extract_selected_row(event) -> int | None:
+    """Best-effort extraction of selected row index across Streamlit selection payload shapes."""
+    selection = {}
+    if isinstance(event, dict):
+        selection = event.get("selection", {}) or {}
+    elif hasattr(event, "selection"):
+        selection = event.selection
+
+    row_candidates = []
+
+    rows = selection.get("rows", []) if isinstance(selection, dict) else getattr(selection, "rows", [])
+    row_candidates.extend(rows or [])
+
+    cells = selection.get("cells", []) if isinstance(selection, dict) else getattr(selection, "cells", [])
+    for cell in cells or []:
+        if isinstance(cell, dict):
+            row_candidates.append(cell.get("row"))
+        elif isinstance(cell, (tuple, list)) and cell:
+            row_candidates.append(cell[0])
+        elif hasattr(cell, "row"):
+            row_candidates.append(getattr(cell, "row"))
+
+    for value in row_candidates:
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _build_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tuple[object, str | None]:
     ranked, msg = build_window_leaderboard(momentum, metric_col, top_k=10)
     if ranked.empty:
@@ -51,14 +87,9 @@ def _render_leaderboard(title: str, key_prefix: str, leaderboard_df):
         key=f"{key_prefix}_table",
     )
 
-    rows = []
-    if isinstance(event, dict):
-        cells = event.get("selection", {}).get("cells", [])
-        rows = [c.get("row") for c in cells if isinstance(c, dict) and c.get("row") is not None]
-    elif hasattr(event, "selection") and hasattr(event.selection, "cells"):
-        rows = [getattr(c, "row", None) for c in event.selection.cells]
-    if rows:
-        st.session_state["selected_theme_id"] = int(leaderboard_df.iloc[int(rows[0])]["theme_id"])
+    row_idx = _extract_selected_row(event)
+    if row_idx is not None and 0 <= row_idx < len(leaderboard_df):
+        st.session_state[SELECTED_THEME_ID_KEY] = int(leaderboard_df.iloc[row_idx]["theme_id"])
 
 
 explore_tab, manage_tab = st.tabs(["Explore", "Manage"])
@@ -88,19 +119,19 @@ with explore_tab:
     options = {f"{r['name']} ({r['category']})": int(r["id"]) for _, r in themes.iterrows()}
     label_by_id = {v: k for k, v in options.items()}
 
-    default_theme_id = st.session_state.get("selected_theme_id")
+    default_theme_id = st.session_state.get(SELECTED_THEME_ID_KEY)
     if default_theme_id not in label_by_id:
         default_theme_id = int(themes.iloc[0]["id"])
-        st.session_state["selected_theme_id"] = default_theme_id
+        st.session_state[SELECTED_THEME_ID_KEY] = default_theme_id
 
     labels = list(options.keys())
     default_label = label_by_id[default_theme_id]
     # Single source of truth: keep dropdown state synced with selected_theme_id (from table click or dropdown).
-    if st.session_state.get("explore_theme") != default_label:
-        st.session_state["explore_theme"] = default_label
-    selection = st.selectbox("Choose theme", labels, key="explore_theme")
+    if st.session_state.get(SELECTED_THEME_LABEL_KEY) != default_label:
+        st.session_state[SELECTED_THEME_LABEL_KEY] = default_label
+    selection = st.selectbox("Choose theme", labels, key=SELECTED_THEME_LABEL_KEY)
     theme_id = options[selection]
-    st.session_state["selected_theme_id"] = theme_id
+    st.session_state[SELECTED_THEME_ID_KEY] = theme_id
 
     with get_conn() as conn:
         ticker_df = theme_ticker_metrics(conn, theme_id)
