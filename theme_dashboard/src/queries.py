@@ -70,14 +70,40 @@ def theme_snapshot_history(conn, theme_id: int, limit: int = 20) -> pd.DataFrame
 
 
 def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
+    # Boundary-based windowing keeps short lookbacks (especially 1W) stable on sparse/weekly cadence.
+    # We anchor to the latest available snapshot and pick the nearest snapshot at or before start target.
     return conn.execute(
         """
+        WITH latest AS (
+            SELECT MAX(snapshot_time) AS latest_time
+            FROM theme_snapshots
+        ),
+        bounds AS (
+            SELECT
+                latest_time AS end_time,
+                latest_time - (? * INTERVAL '1 day') AS target_start
+            FROM latest
+            WHERE latest_time IS NOT NULL
+        ),
+        start_pick AS (
+            SELECT MAX(ts.snapshot_time) AS start_time
+            FROM theme_snapshots ts
+            JOIN bounds b ON TRUE
+            WHERE ts.snapshot_time <= b.target_start
+        ),
+        effective AS (
+            SELECT
+                COALESCE(sp.start_time, (SELECT MIN(snapshot_time) FROM theme_snapshots)) AS start_time,
+                b.end_time AS end_time
+            FROM bounds b
+            LEFT JOIN start_pick sp ON TRUE
+        )
         SELECT ts.run_id, ts.snapshot_time, ts.theme_id, t.name AS theme, t.category,
                ts.ticker_count, ts.avg_1w, ts.avg_1m, ts.avg_3m,
                ts.positive_1m_breadth_pct, ts.composite_score
         FROM theme_snapshots ts
         JOIN themes t ON t.id = ts.theme_id
-        WHERE ts.snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+        JOIN effective e ON ts.snapshot_time BETWEEN e.start_time AND e.end_time
         ORDER BY ts.snapshot_time ASC, ts.composite_score DESC
         """,
         [lookback_days],
@@ -135,15 +161,34 @@ def top_theme_movers(conn, lookback_days: int, top_n: int = 20) -> pd.DataFrame:
 def top_n_membership_changes(conn, lookback_days: int, top_n: int = 20) -> tuple[list[str], list[str]]:
     first_top = conn.execute(
         """
-        WITH bounds AS (
-            SELECT MIN(snapshot_time) AS start_time
+        WITH latest AS (
+            SELECT MAX(snapshot_time) AS latest_time
             FROM theme_snapshots
-            WHERE snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+        ),
+        bounds AS (
+            SELECT
+                latest_time AS end_time,
+                latest_time - (? * INTERVAL '1 day') AS target_start
+            FROM latest
+            WHERE latest_time IS NOT NULL
+        ),
+        start_pick AS (
+            SELECT MAX(ts.snapshot_time) AS start_time
+            FROM theme_snapshots ts
+            JOIN bounds b ON TRUE
+            WHERE ts.snapshot_time <= b.target_start
+        ),
+        effective AS (
+            SELECT
+                COALESCE(sp.start_time, (SELECT MIN(snapshot_time) FROM theme_snapshots)) AS start_time,
+                b.end_time AS end_time
+            FROM bounds b
+            LEFT JOIN start_pick sp ON TRUE
         )
         SELECT t.name
         FROM theme_snapshots ts
         JOIN themes t ON t.id = ts.theme_id
-        JOIN bounds b ON ts.snapshot_time = b.start_time
+        JOIN effective e ON ts.snapshot_time = e.start_time
         ORDER BY ts.composite_score DESC
         LIMIT ?
         """,
@@ -151,19 +196,18 @@ def top_n_membership_changes(conn, lookback_days: int, top_n: int = 20) -> tuple
     ).df()
     last_top = conn.execute(
         """
-        WITH bounds AS (
-            SELECT MAX(snapshot_time) AS end_time
+        WITH latest AS (
+            SELECT MAX(snapshot_time) AS latest_time
             FROM theme_snapshots
-            WHERE snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
         )
         SELECT t.name
         FROM theme_snapshots ts
         JOIN themes t ON t.id = ts.theme_id
-        JOIN bounds b ON ts.snapshot_time = b.end_time
+        JOIN latest l ON ts.snapshot_time = l.latest_time
         ORDER BY ts.composite_score DESC
         LIMIT ?
         """,
-        [lookback_days, top_n],
+        [top_n],
     ).df()
     start_set = set(first_top["name"].tolist()) if not first_top.empty else set()
     end_set = set(last_top["name"].tolist()) if not last_top.empty else set()

@@ -300,6 +300,7 @@ The dashboard shows a "Synthetic historical data active" indicator when syntheti
   - 5 period rolling.
 - Theme selection controls include category filter, theme search, and watchlist pinning so selected themes remain visible in charts.
 - If too few snapshots exist for a selected window, the page shows a data sufficiency warning instead of rendering broken visuals (1w: 2 snapshots, 1m: 3 snapshots, 3m: 4 snapshots minimum).
+- Short-window lookbacks use boundary snapshots anchored to the latest available snapshot (nearest snapshot at/before the window start) to avoid fragile 1W behavior on weekly or irregular cadence.
 - Themes with fewer than 2 data points in the selected window are automatically skipped with an informational message.
 - Historical analytics tables include concise section descriptions and header tooltips (column help) to explain metric meaning and interpretation.
 - The page includes a collapsible **Metric Guide** section summarizing momentum, breadth, rank change, and delta metrics.

@@ -34,7 +34,7 @@ def _build_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tu
 
     snapshot_count = int(history["snapshot_time"].nunique())
     if snapshot_count < 2:
-        return None, "Not enough snapshots in this window (need at least 2)."
+        return None, "Not enough data to form start/end boundary snapshots for this window (need at least 2 snapshots)."
 
     latest = history.sort_values("snapshot_time").groupby("theme_id", as_index=False).tail(1)
     ranked = latest.sort_values(metric_col, ascending=False).head(10).copy()
