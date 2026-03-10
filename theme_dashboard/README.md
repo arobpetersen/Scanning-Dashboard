@@ -288,7 +288,7 @@ The dashboard shows a "Synthetic historical data active" indicator when syntheti
 
 ## Historical Performance readability modes
 - Historical Performance is split into two clear sections:
-  - **Top Theme Overview (fixed cross-window)**: side-by-side 1W/1M/3M compact leaderboards for quick scanning.
+  - **Top Theme Overview (fixed cross-window)**: side-by-side 1W/1M/3M compact leaderboards ranked independently by each window return metric; clicking a row jumps to Single Theme History for that theme.
   - **Analysis Workspace (reactive controls)**: all lookback, top-N, comparison metric, filter, display mode, and smoothing controls apply only here.
 - Top-N analysis is separated from chart display:
   - **Top N analyzed** controls leadership/momentum universe.

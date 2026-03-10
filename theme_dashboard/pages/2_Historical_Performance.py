@@ -73,10 +73,13 @@ def _build_overview_leaders(momentum: dict, perf_col: str, top_k: int = 10) -> t
 
     latest = history.sort_values("snapshot_time").groupby("theme", as_index=False).tail(1)
     summary = momentum["window_summary"][["theme", "rank_change", "momentum_score", "delta_breadth"]]
+
+    # Important: each panel is ranked by its own window-specific return metric first
+    # (avg_1w / avg_1m / avg_3m), then momentum context as tie-breakers.
     ranked = (
-        latest[["theme", "composite_score", perf_col]]
+        latest[["theme", perf_col]]
         .merge(summary, on="theme", how="left")
-        .sort_values(["composite_score", "momentum_score"], ascending=False)
+        .sort_values([perf_col, "momentum_score", "rank_change"], ascending=False)
         .head(top_k)
         .reset_index(drop=True)
     )
@@ -92,17 +95,26 @@ def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, mes
 
     display = leaders.rename(columns={perf_col: "window_perf"})
     cols = ["rank", "theme", "window_perf", "momentum_score", "rank_change"]
-    st.dataframe(display[cols], hide_index=True, width="stretch", column_config=_config_for_columns(cols))
-
-    picked = st.selectbox(
-        "Jump to theme detail",
-        options=display["theme"].tolist(),
-        key=f"{key_prefix}_pick",
-        index=0,
+    # Row click acts as direct drill-down into Single Theme History.
+    event = st.dataframe(
+        display[cols],
+        hide_index=True,
+        width="stretch",
+        column_config=_config_for_columns(cols),
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"{key_prefix}_table",
     )
-    if st.button("Open in Single Theme History", key=f"{key_prefix}_open", use_container_width=True):
+
+    rows = []
+    if isinstance(event, dict):
+        rows = event.get("selection", {}).get("rows", [])
+    elif hasattr(event, "selection") and hasattr(event.selection, "rows"):
+        rows = event.selection.rows
+    if rows:
+        picked = display.iloc[int(rows[0])]["theme"]
         st.session_state["historical_selected_theme_name"] = picked
-        st.rerun()
+
 
 st.set_page_config(page_title="Historical Performance", layout="wide")
 st.title("Historical Performance & Theme Momentum")
@@ -120,7 +132,7 @@ with get_conn() as conn:
     overview_3m = compute_theme_momentum(conn, 90, top_n=10)
 
 st.subheader("Top Theme Overview (fixed cross-window)")
-st.caption("This section is a fixed snapshot for 1W, 1M, and 3M leadership scanning. Use the lower controls for focused analysis.")
+st.caption("Fixed cross-window snapshot. Each panel is independently ranked by its own window return metric (1W/1M/3M), with momentum shown as context.")
 
 ov1, ov2, ov3 = st.columns(3)
 with ov1:
