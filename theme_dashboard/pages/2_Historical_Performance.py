@@ -85,15 +85,16 @@ def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, mes
         width="stretch",
         column_config=_config_for_columns(cols),
         on_select="rerun",
-        selection_mode="single-row",
+        selection_mode="single-cell",
         key=f"{key_prefix}_table",
     )
 
     rows = []
     if isinstance(event, dict):
-        rows = event.get("selection", {}).get("rows", [])
-    elif hasattr(event, "selection") and hasattr(event.selection, "rows"):
-        rows = event.selection.rows
+        cells = event.get("selection", {}).get("cells", [])
+        rows = [c.get("row") for c in cells if isinstance(c, dict) and c.get("row") is not None]
+    elif hasattr(event, "selection") and hasattr(event.selection, "cells"):
+        rows = [getattr(c, "row", None) for c in event.selection.cells]
     if rows:
         picked = display.iloc[int(rows[0])]["theme"]
         st.session_state["historical_selected_theme_name"] = picked
@@ -172,9 +173,11 @@ m4.metric("Avg momentum score", f"{summary['momentum_score'].mean():.2f}")
 m5.metric("Rotation intensity", f"{rotation['rotation_intensity']['rotation_intensity_score']:.1f}")
 
 st.subheader("Theme Momentum Leaderboard")
-leaders_tbl = summary.sort_values(["rank_end", "momentum_score"], ascending=[True, False]).head(10)
-st.caption("Reactive leaderboard for the selected analysis window and controls.")
-leaders_tbl = leaders_tbl[["rank_end", "theme", "momentum_score", "delta_composite", "rank_change"]].rename(columns={"rank_end": "rank"})
+# Explicit reactive sort: strongest momentum first, then composite delta and rank improvement.
+leaders_tbl = summary.sort_values(["momentum_score", "delta_composite", "rank_change"], ascending=[False, False, False]).head(10).copy()
+leaders_tbl["rank"] = leaders_tbl.index + 1
+st.caption("Reactive leaderboard for the selected analysis window and controls (sorted by momentum score).")
+leaders_tbl = leaders_tbl[["rank", "theme", "momentum_score", "delta_composite", "rank_change"]]
 st.dataframe(leaders_tbl, width="stretch", column_config=_config_for_columns(leaders_tbl.columns.tolist()))
 
 st.subheader("Top-N Theme Movement")

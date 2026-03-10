@@ -47,15 +47,16 @@ def _render_leaderboard(title: str, key_prefix: str, leaderboard_df):
         width="stretch",
         hide_index=True,
         on_select="rerun",
-        selection_mode="single-row",
+        selection_mode="single-cell",
         key=f"{key_prefix}_table",
     )
 
     rows = []
     if isinstance(event, dict):
-        rows = event.get("selection", {}).get("rows", [])
-    elif hasattr(event, "selection") and hasattr(event.selection, "rows"):
-        rows = event.selection.rows
+        cells = event.get("selection", {}).get("cells", [])
+        rows = [c.get("row") for c in cells if isinstance(c, dict) and c.get("row") is not None]
+    elif hasattr(event, "selection") and hasattr(event.selection, "cells"):
+        rows = [getattr(c, "row", None) for c in event.selection.cells]
     if rows:
         st.session_state["selected_theme_id"] = int(leaderboard_df.iloc[int(rows[0])]["theme_id"])
 
@@ -94,7 +95,10 @@ with explore_tab:
 
     labels = list(options.keys())
     default_label = label_by_id[default_theme_id]
-    selection = st.selectbox("Choose theme", labels, index=labels.index(default_label), key="explore_theme")
+    # Single source of truth: keep dropdown state synced with selected_theme_id (from table click or dropdown).
+    if st.session_state.get("explore_theme") != default_label:
+        st.session_state["explore_theme"] = default_label
+    selection = st.selectbox("Choose theme", labels, key="explore_theme")
     theme_id = options[selection]
     st.session_state["selected_theme_id"] = theme_id
 

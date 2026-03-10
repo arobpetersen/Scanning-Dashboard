@@ -206,7 +206,7 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
 ## Simplified page structure
 - **Dashboard**: operations control center for refresh, high-level rankings, and key queue signals.
 - **Themes**: consolidated explore + manage experience (detail, members, create/edit/delete, ticker membership) plus Top 10 discovery leaderboards for 1W and 1M theme performance with direct row-click drill-down.
-- Themes leaderboards use direct row-click drill-down into the same detailed theme view (no extra button workflow).
+- Themes leaderboards use direct table click drill-down into the same detailed theme view (no extra button workflow, and no checkbox selection column).
 - **Historical Performance**: lookback-based trend and leadership rotation analysis.
 - **Suggestions**: consolidated manual creation, queue review/apply, bulk cleanup, rules trigger, and AI assistant.
 - **Health**: consolidated operations diagnostics + provider/failure visibility + theme health maintenance.
@@ -303,7 +303,7 @@ The dashboard shows a "Synthetic historical data active" indicator when syntheti
   - 3 period rolling,
   - 5 period rolling.
 - Theme selection controls include category filter, theme search, and watchlist pinning so selected themes remain visible in charts.
-- If too few snapshots exist for a selected window, the page shows a data sufficiency warning instead of rendering broken visuals (1w: 2 snapshots, 1m: 3 snapshots, 3m: 4 snapshots minimum).
+- If too few snapshots exist for a selected window, the page shows a data sufficiency warning instead of rendering broken visuals (minimum 2 boundary snapshots for valid comparison).
 - Short-window lookbacks use boundary snapshots anchored to the latest available snapshot (nearest snapshot at/before the window start) to avoid fragile 1W behavior on weekly or irregular cadence.
 - Themes with fewer than 2 data points in the selected window are automatically skipped with an informational message.
 - Overview and Themes leaderboards share a common window-specific ranking helper to keep sorting behavior consistent.
