@@ -8,6 +8,51 @@ from src.queries import theme_snapshot_history
 from src.rotation_engine import compute_theme_rotation
 from src.theme_service import list_themes, seed_if_needed
 
+
+TABLE_HELP = {
+    "theme": "Theme name.",
+    "rank": "Current rank in the selected snapshot (1 is strongest).",
+    "rank_start": "Theme rank at the start of the selected lookback window.",
+    "rank_end": "Theme rank at the end of the selected lookback window.",
+    "rank_change": "Start rank minus end rank. Positive values mean rank improved.",
+    "momentum_score": "Composite momentum metric combining performance, breadth, and rank change.",
+    "delta_composite": "Change in composite score from window start to end. Positive means strengthening.",
+    "delta_breadth": "Change in positive-breadth participation. Positive means more constituents are contributing.",
+    "delta_avg_1w": "Change in average 1-week return over the window.",
+    "delta_avg_1m": "Change in average 1-month return over the window.",
+    "delta_avg_3m": "Change in average 3-month return over the window.",
+    "delta_ticker_count": "Change in constituent count over the selected window.",
+    "composite_score_start": "Composite score at the beginning of the selected window.",
+    "composite_score_end": "Composite score at the end of the selected window.",
+}
+
+
+def _config_for_columns(columns: list[str]) -> dict:
+    return {
+        col: st.column_config.Column(
+            col.replace("_", " ").title(),
+            help=TABLE_HELP.get(col, "Computed analytics field for this section."),
+        )
+        for col in columns
+    }
+
+
+def _render_explained_table(title: str, description: str, df: pd.DataFrame, columns: list[str], *, limit: int | None = 10):
+    st.write(f"**{title}**")
+    st.caption(description)
+    shaped = df.reindex(columns=columns)
+    show_df = shaped if limit is None else shaped.head(limit)
+    st.dataframe(show_df, width="stretch", column_config=_config_for_columns(columns))
+
+
+def _signal_reason_text(row: pd.Series) -> str:
+    return (
+        f"rank_change {row.get('rank_change', 0):+.0f}, "
+        f"momentum_score {row.get('momentum_score', 0):+.2f}, "
+        f"delta_composite {row.get('delta_composite', 0):+.2f}, "
+        f"delta_breadth {row.get('delta_breadth', 0):+.2f}"
+    )
+
 st.set_page_config(page_title="Historical Performance", layout="wide")
 st.title("Historical Performance & Theme Momentum")
 st.caption("Track leadership, rotation, emerging strength, and weakening themes over configurable windows.")
@@ -64,7 +109,9 @@ m5.metric("Rotation intensity", f"{rotation['rotation_intensity']['rotation_inte
 
 st.subheader("Theme Momentum Leaderboard")
 leaders_tbl = summary.sort_values(["rank_end", "momentum_score"], ascending=[True, False]).head(10)
-st.dataframe(leaders_tbl[["rank_end", "theme", "momentum_score", "delta_composite", "rank_change"]].rename(columns={"rank_end": "rank"}), width="stretch")
+st.caption("Quick view of current leaders and how strongly each theme is improving or weakening over this window.")
+leaders_tbl = leaders_tbl[["rank_end", "theme", "momentum_score", "delta_composite", "rank_change"]].rename(columns={"rank_end": "rank"})
+st.dataframe(leaders_tbl, width="stretch", column_config=_config_for_columns(leaders_tbl.columns.tolist()))
 
 st.subheader("Top-N Theme Movement")
 fc1, fc2, fc3 = st.columns(3)
@@ -175,36 +222,96 @@ st.altair_chart(chart, width="stretch")
 st.caption(f"Analyzed top N={analysis_top_n}; displaying {trend['theme'].nunique()} theme lines.")
 
 st.subheader("Rotation Signals")
+st.caption("Leadership change buckets that explain which themes are entering strength, exiting, accelerating, or fading.")
 r1, r2 = st.columns(2)
 with r1:
-    st.write("**Rotating Into Leadership**")
-    st.dataframe(rotation["rotating_into"][["theme", "rank_start", "rank_end", "rank_change", "delta_composite", "momentum_score"]].head(10), width="stretch")
-    st.write("**Emerging Themes**")
-    st.dataframe(rotation["emerging"][["theme", "rank_change", "delta_composite", "delta_avg_1m", "delta_breadth", "momentum_score"]].head(10), width="stretch")
-    st.write("**Acceleration in Leadership**")
-    st.dataframe(rotation["acceleration"][["theme", "rank_end", "rank_change", "delta_composite", "momentum_score"]].head(10), width="stretch")
+    _render_explained_table(
+        "Rotating Into Leadership",
+        "Themes that moved into the analyzed top-N set during the selected window.",
+        rotation["rotating_into"],
+        ["theme", "rank_start", "rank_end", "rank_change", "delta_composite", "momentum_score"],
+    )
+    _render_explained_table(
+        "Emerging Themes",
+        "Themes with rapid rank improvement plus improving momentum and breadth.",
+        rotation["emerging"],
+        ["theme", "rank_change", "delta_composite", "delta_avg_1m", "delta_breadth", "momentum_score"],
+    )
+    if not rotation["emerging"].empty:
+        reasons = rotation["emerging"].head(5).copy()
+        reasons["trigger_reason"] = reasons.apply(_signal_reason_text, axis=1)
+        with st.expander("Why these themes are marked Emerging"):
+            st.dataframe(reasons[["theme", "trigger_reason"]], width="stretch")
+    _render_explained_table(
+        "Acceleration in Leadership",
+        "Themes already in leadership that are still gaining rank and momentum.",
+        rotation["acceleration"],
+        ["theme", "rank_end", "rank_change", "delta_composite", "momentum_score"],
+    )
 with r2:
-    st.write("**Rotating Out Of Leadership**")
-    st.dataframe(rotation["rotating_out"][["theme", "rank_start", "rank_end", "rank_change", "delta_composite", "momentum_score"]].head(10), width="stretch")
-    st.write("**Fading Themes**")
-    st.dataframe(rotation["fading"][["theme", "rank_change", "delta_composite", "delta_avg_1m", "delta_breadth", "momentum_score"]].head(10), width="stretch")
-    st.write("**Deterioration in Leadership**")
-    st.dataframe(rotation["deterioration"][["theme", "rank_end", "rank_change", "delta_composite", "momentum_score"]].head(10), width="stretch")
+    _render_explained_table(
+        "Rotating Out Of Leadership",
+        "Themes that fell out of the analyzed top-N set during the selected window.",
+        rotation["rotating_out"],
+        ["theme", "rank_start", "rank_end", "rank_change", "delta_composite", "momentum_score"],
+    )
+    _render_explained_table(
+        "Fading Themes",
+        "Themes with broad deterioration across rank, returns, and breadth participation.",
+        rotation["fading"],
+        ["theme", "rank_change", "delta_composite", "delta_avg_1m", "delta_breadth", "momentum_score"],
+    )
+    _render_explained_table(
+        "Deterioration in Leadership",
+        "Current leaders that are losing momentum and slipping in rank.",
+        rotation["deterioration"],
+        ["theme", "rank_end", "rank_change", "delta_composite", "momentum_score"],
+    )
 
 st.subheader("Momentum Summary Sections")
 sec1, sec2 = st.columns(2)
 with sec1:
-    st.write("**Top Momentum Themes**")
-    st.dataframe(momentum["top_momentum"][["theme", "momentum_score", "delta_composite", "rank_change", "delta_breadth"]], width="stretch")
-    st.write("**Biggest Risers**")
-    st.dataframe(momentum["biggest_risers"][["theme", "rank_change", "delta_composite", "momentum_score"]], width="stretch")
-    st.write("**Breadth Improvers**")
-    st.dataframe(momentum["breadth_improvers"][["theme", "delta_breadth", "delta_composite", "momentum_score"]], width="stretch")
+    _render_explained_table(
+        "Top Momentum Themes",
+        "Themes with the strongest overall momentum score based on performance, breadth, and rank movement.",
+        momentum["top_momentum"],
+        ["theme", "momentum_score", "delta_composite", "rank_change", "delta_breadth"],
+        limit=analysis_top_n,
+    )
+    _render_explained_table(
+        "Biggest Risers",
+        "Themes with the largest positive rank change over the selected lookback window.",
+        momentum["biggest_risers"],
+        ["theme", "rank_change", "delta_composite", "momentum_score"],
+        limit=analysis_top_n,
+    )
+    _render_explained_table(
+        "Breadth Improvers",
+        "Themes where a larger share of constituent tickers is contributing positively.",
+        momentum["breadth_improvers"],
+        ["theme", "delta_breadth", "delta_composite", "momentum_score"],
+        limit=analysis_top_n,
+    )
 with sec2:
-    st.write("**Biggest Fallers**")
-    st.dataframe(momentum["biggest_fallers"][["theme", "rank_change", "delta_composite", "momentum_score"]], width="stretch")
-    st.write("**Weakening Themes**")
-    st.dataframe(momentum["weakening_themes"][["theme", "delta_composite", "delta_breadth", "rank_change"]], width="stretch")
+    _render_explained_table(
+        "Biggest Fallers",
+        "Themes with the largest negative rank change over the selected lookback window.",
+        momentum["biggest_fallers"],
+        ["theme", "rank_change", "delta_composite", "momentum_score"],
+        limit=analysis_top_n,
+    )
+    _render_explained_table(
+        "Weakening Themes",
+        "Themes where momentum and breadth are deteriorating across the selected window.",
+        momentum["weakening_themes"],
+        ["theme", "delta_composite", "delta_breadth", "rank_change"],
+        limit=analysis_top_n,
+    )
+    if not momentum["weakening_themes"].empty:
+        weak_reasons = momentum["weakening_themes"].head(5).copy()
+        weak_reasons["trigger_reason"] = weak_reasons.apply(_signal_reason_text, axis=1)
+        with st.expander("Why these themes are marked Weakening"):
+            st.dataframe(weak_reasons[["theme", "trigger_reason"]], width="stretch")
 
 c1, c2 = st.columns(2)
 with c1:
@@ -215,25 +322,26 @@ with c2:
     st.write(", ".join(momentum["dropped_leaders"]) if momentum["dropped_leaders"] else "None")
 
 st.subheader("Cross-theme Detail Table")
+st.caption("Full start/end comparison across themes for the selected window. Use this table to audit every major movement component.")
+detail_cols = [
+    "theme",
+    "composite_score_start",
+    "composite_score_end",
+    "delta_composite",
+    "rank_start",
+    "rank_end",
+    "rank_change",
+    "delta_avg_1w",
+    "delta_avg_1m",
+    "delta_avg_3m",
+    "delta_breadth",
+    "delta_ticker_count",
+    "momentum_score",
+]
 st.dataframe(
-    summary[
-        [
-            "theme",
-            "composite_score_start",
-            "composite_score_end",
-            "delta_composite",
-            "rank_start",
-            "rank_end",
-            "rank_change",
-            "delta_avg_1w",
-            "delta_avg_1m",
-            "delta_avg_3m",
-            "delta_breadth",
-            "delta_ticker_count",
-            "momentum_score",
-        ]
-    ],
+    summary[detail_cols],
     width="stretch",
+    column_config=_config_for_columns(detail_cols),
 )
 
 st.subheader("Single Theme History")
@@ -263,4 +371,16 @@ momentum_score =
 rank_change = start_rank - end_rank  (positive means rank improved)
 rotation_intensity_score = ((entered_top_n + exited_top_n) / top_n) * 100
         """.strip()
+    )
+
+with st.expander("Metric Guide"):
+    st.markdown(
+        """
+- **Momentum Score**: Composite metric combining performance changes, breadth change, and rank movement.
+- **Breadth (positive_1m_breadth_pct)**: Percent of theme constituents with positive 1M contribution; higher means participation is broader.
+- **Rank / Rank Change**: Rank is cross-theme standing (1 is strongest). Rank change is start rank minus end rank.
+- **Delta Composite**: Change in composite score between start and end snapshots; positive implies improving momentum.
+- **Delta Breadth**: Change in participation breadth; positive implies more constituents are supporting the move.
+- **Delta Avg 1W / 1M / 3M**: Change in average return contribution over the selected window.
+        """
     )

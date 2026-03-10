@@ -205,7 +205,7 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
 
 ## Simplified page structure
 - **Dashboard**: operations control center for refresh, high-level rankings, and key queue signals.
-- **Themes**: consolidated explore + manage experience (detail, members, create/edit/delete, ticker membership).
+- **Themes**: consolidated explore + manage experience (detail, members, create/edit/delete, ticker membership) plus Top 10 discovery leaderboards for 1W and 1M theme performance with direct drill-down buttons.
 - **Historical Performance**: lookback-based trend and leadership rotation analysis.
 - **Suggestions**: consolidated manual creation, queue review/apply, bulk cleanup, rules trigger, and AI assistant.
 - **Health**: consolidated operations diagnostics + provider/failure visibility + theme health maintenance.
@@ -301,6 +301,8 @@ The dashboard shows a "Synthetic historical data active" indicator when syntheti
 - Theme selection controls include category filter, theme search, and watchlist pinning so selected themes remain visible in charts.
 - If too few snapshots exist for a selected window, the page shows a data sufficiency warning instead of rendering broken visuals (1w: 2 snapshots, 1m: 3 snapshots, 3m: 4 snapshots minimum).
 - Themes with fewer than 2 data points in the selected window are automatically skipped with an informational message.
+- Historical analytics tables include concise section descriptions and header tooltips (column help) to explain metric meaning and interpretation.
+- The page includes a collapsible **Metric Guide** section summarizing momentum, breadth, rank change, and delta metrics.
 
 ## Theme Rotation Engine
 - `src/rotation_engine.py` derives deterministic rotation signals from momentum outputs.

@@ -1,6 +1,7 @@
 import streamlit as st
 
 from src.database import get_conn, init_db
+from src.momentum_engine import compute_theme_momentum
 from src.queries import theme_snapshot_history, theme_ticker_metrics
 from src.theme_service import (
     add_ticker,
@@ -25,12 +26,90 @@ if themes.empty:
     st.info("No themes found.")
     st.stop()
 
+
+def _build_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tuple[object, str | None]:
+    history = momentum["history"]
+    if history.empty:
+        return None, "No snapshots available yet. Run refreshes first."
+
+    snapshot_count = int(history["snapshot_time"].nunique())
+    if snapshot_count < 2:
+        return None, "Not enough snapshots in this window (need at least 2)."
+
+    latest = history.sort_values("snapshot_time").groupby("theme_id", as_index=False).tail(1)
+    ranked = latest.sort_values(metric_col, ascending=False).head(10).copy()
+
+    summary_cols = ["theme", "momentum_score", "delta_breadth"]
+    summary = momentum["window_summary"][summary_cols].copy() if not momentum["window_summary"].empty else None
+    if summary is not None:
+        ranked = ranked.merge(summary, on="theme", how="left")
+    else:
+        ranked["momentum_score"] = None
+        ranked["delta_breadth"] = None
+
+    ranked = ranked.reset_index(drop=True)
+    ranked["rank"] = ranked.index + 1
+    ranked = ranked[["rank", "theme_id", "theme", "category", metric_col, "momentum_score", "positive_1m_breadth_pct"]].rename(
+        columns={metric_col: metric_label, "positive_1m_breadth_pct": "breadth_1m"}
+    )
+    return ranked, None
+
+
+def _render_leaderboard(title: str, key_prefix: str, leaderboard_df):
+    st.markdown(f"**{title}**")
+    st.dataframe(
+        leaderboard_df[["rank", "theme", "category", "performance", "momentum_score", "breadth_1m"]],
+        width="stretch",
+        hide_index=True,
+    )
+
+    for row in leaderboard_df.itertuples(index=False):
+        if st.button(
+            f"Open #{row.rank} — {row.theme} ({row.performance:.2f}%)",
+            key=f"{key_prefix}_{int(row.theme_id)}",
+            use_container_width=True,
+        ):
+            st.session_state["selected_theme_id"] = int(row.theme_id)
+            st.rerun()
+
+
 explore_tab, manage_tab = st.tabs(["Explore", "Manage"])
 
 with explore_tab:
+    with get_conn() as conn:
+        momentum_1w = compute_theme_momentum(conn, 7, top_n=20)
+        momentum_1m = compute_theme_momentum(conn, 30, top_n=20)
+
+    lb1, lb1_msg = _build_leaderboard(momentum_1w, "avg_1w", "performance")
+    lb2, lb2_msg = _build_leaderboard(momentum_1m, "avg_1m", "performance")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if lb1 is None:
+            st.warning(f"Top 10 Themes — 1W: {lb1_msg}")
+        else:
+            _render_leaderboard("Top 10 Themes — 1W", "open_1w", lb1)
+    with c2:
+        if lb2 is None:
+            st.warning(f"Top 10 Themes — 1M: {lb2_msg}")
+        else:
+            _render_leaderboard("Top 10 Themes — 1M", "open_1m", lb2)
+
+    st.divider()
+
     options = {f"{r['name']} ({r['category']})": int(r["id"]) for _, r in themes.iterrows()}
-    selection = st.selectbox("Choose theme", list(options.keys()), key="explore_theme")
+    label_by_id = {v: k for k, v in options.items()}
+
+    default_theme_id = st.session_state.get("selected_theme_id")
+    if default_theme_id not in label_by_id:
+        default_theme_id = int(themes.iloc[0]["id"])
+        st.session_state["selected_theme_id"] = default_theme_id
+
+    labels = list(options.keys())
+    default_label = label_by_id[default_theme_id]
+    selection = st.selectbox("Choose theme", labels, index=labels.index(default_label), key="explore_theme")
     theme_id = options[selection]
+    st.session_state["selected_theme_id"] = theme_id
 
     with get_conn() as conn:
         ticker_df = theme_ticker_metrics(conn, theme_id)
