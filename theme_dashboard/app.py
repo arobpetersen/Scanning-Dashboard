@@ -1,3 +1,5 @@
+import json
+
 import streamlit as st
 
 from src.config import DEFAULT_PROVIDER, MASSIVE_API_KEY_ENV, massive_api_key
@@ -103,7 +105,21 @@ with rc1:
 with rc2:
     if not last_run.empty:
         run = last_run.iloc[0]
-        st.info(f"Last run #{int(run['run_id'])} | provider={run['provider']} | status={run['status']} | success={int(run['success_count'])} | failures={int(run['failure_count'])}")
+        api_calls = int(run.get('api_call_count') or 0)
+        st.info(
+            f"Last run #{int(run['run_id'])} | provider={run['provider']} | status={run['status']} "
+            f"| success={int(run['success_count'])} | failures={int(run['failure_count'])} | api_calls={api_calls}"
+        )
+        with st.expander("Refresh accounting (last run)"):
+            endpoint_counts = {}
+            raw = run.get('api_endpoint_counts')
+            if raw:
+                try:
+                    endpoint_counts = json.loads(raw)
+                except Exception:
+                    endpoint_counts = {"raw": str(raw)}
+            st.write("**Endpoint counts**", endpoint_counts if endpoint_counts else "None")
+            st.write("**Skipped/failed tickers**", run.get('skipped_tickers') or "None")
     else:
         st.info("No runs yet.")
     with st.expander("Resolved ticker universe"):

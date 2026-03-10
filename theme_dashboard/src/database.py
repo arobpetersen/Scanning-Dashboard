@@ -40,7 +40,10 @@ CREATE TABLE IF NOT EXISTS refresh_runs (
     failure_count BIGINT NOT NULL DEFAULT 0,
     scope_type VARCHAR,
     scope_theme_name VARCHAR,
-    error_message VARCHAR
+    error_message VARCHAR,
+    api_call_count BIGINT NOT NULL DEFAULT 0,
+    api_endpoint_counts VARCHAR,
+    skipped_tickers VARCHAR
 );
 
 CREATE TABLE IF NOT EXISTS refresh_run_tickers (
@@ -193,6 +196,9 @@ def init_db() -> None:
         conn.execute(SCHEMA_SQL)
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_type VARCHAR")
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_theme_name VARCHAR")
+        conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS api_call_count BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS api_endpoint_counts VARCHAR")
+        conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS skipped_tickers VARCHAR")
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
         conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
         conn.execute("ALTER TABLE theme_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")

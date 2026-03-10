@@ -11,6 +11,9 @@ from .provider_base import ProviderBase
 class MockProvider(ProviderBase):
     name = "mock"
 
+    def get_call_accounting(self) -> dict:
+        return {"api_call_count": 0, "endpoint_counts": {}}
+
     def _rng_from_ticker(self, ticker: str) -> int:
         return int(hashlib.sha256(ticker.encode("utf-8")).hexdigest()[:8], 16)
 

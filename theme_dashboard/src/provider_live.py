@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 
@@ -19,11 +20,27 @@ class LiveProvider(ProviderBase):
     name = "live"
     base_url = "https://api.polygon.io"
 
-    def __init__(self, api_key: str | None = None, timeout_s: int = 20):
+    def __init__(self, api_key: str | None = None, timeout_s: int = 20, include_reference: bool = True):
         self.api_key = api_key or massive_api_key()
         self.timeout_s = timeout_s
+        self._include_reference = include_reference
         self.session = requests.Session()
         self._ref_cache: dict[str, dict] = {}
+        self._api_calls_total = 0
+        self._endpoint_counts: dict[str, int] = defaultdict(int)
+
+    def get_call_accounting(self) -> dict:
+        return {
+            "api_call_count": int(self._api_calls_total),
+            "endpoint_counts": dict(self._endpoint_counts),
+        }
+
+    def _categorize_endpoint(self, path: str) -> str:
+        if path.startswith("/v2/aggs/ticker/"):
+            return "aggs_daily"
+        if path.startswith("/v3/reference/tickers/"):
+            return "reference_ticker"
+        return "other"
 
     @property
     def is_configured(self) -> bool:
@@ -46,6 +63,8 @@ class LiveProvider(ProviderBase):
             raise RuntimeError("CONFIG: Massive API key not configured")
 
         params["apiKey"] = self.api_key
+        self._api_calls_total += 1
+        self._endpoint_counts[self._categorize_endpoint(path)] += 1
         response = self.session.get(f"{self.base_url}{path}", params=params, timeout=self.timeout_s)
 
         if response.status_code == 429:
@@ -143,12 +162,13 @@ class LiveProvider(ProviderBase):
                 price = closes[-1]
 
                 market_cap = None
-                try:
-                    ref = self._fetch_reference(ticker)
-                    market_cap_value = ref.get("market_cap")
-                    market_cap = float(market_cap_value) if market_cap_value is not None else None
-                except Exception:
-                    market_cap = None
+                if self._include_reference:
+                    try:
+                        ref = self._fetch_reference(ticker)
+                        market_cap_value = ref.get("market_cap")
+                        market_cap = float(market_cap_value) if market_cap_value is not None else None
+                    except Exception:
+                        market_cap = None
 
                 rows.append(
                     {

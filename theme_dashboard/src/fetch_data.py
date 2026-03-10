@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from typing import Callable, Iterable
 
-from .config import LIVE_RATE_LIMIT_STOP_THRESHOLD, REFRESH_STALE_TIMEOUT_MINUTES
+from .config import LIVE_FETCH_REFERENCE_ON_REFRESH, LIVE_RATE_LIMIT_STOP_THRESHOLD, REFRESH_STALE_TIMEOUT_MINUTES
 from .provider_live import LiveProvider
 from .provider_mock import MockProvider
 from .rankings import persist_theme_snapshot_for_run
@@ -18,7 +19,7 @@ class RefreshBlockedError(RuntimeError):
 
 def get_provider(provider_name: str):
     if provider_name == "live":
-        live = LiveProvider()
+        live = LiveProvider(include_reference=LIVE_FETCH_REFERENCE_ON_REFRESH)
         if live.is_configured:
             return live
         return MockProvider()
@@ -105,13 +106,14 @@ def run_refresh(
     started = datetime.utcnow()
     consecutive_rate_limit_failures = 0
     early_stop_reason: str | None = None
+    failed_tickers: set[str] = set()
 
     try:
         if not clean_tickers:
             conn.execute(
                 """
                 UPDATE refresh_runs
-                SET finished_at = CURRENT_TIMESTAMP, status = 'success', success_count = 0, failure_count = 0
+                SET finished_at = CURRENT_TIMESTAMP, status = 'success', success_count = 0, failure_count = 0, api_call_count = 0, api_endpoint_counts = '{}', skipped_tickers = NULL
                 WHERE run_id = ?
                 """,
                 [run_id],
@@ -136,6 +138,19 @@ def run_refresh(
 
             if not df.empty:
                 payload = df.copy()
+                # Reuse last known market_cap to avoid re-fetching static reference metadata every manual refresh.
+                if "market_cap" in payload.columns and payload["market_cap"].isna().any():
+                    prior_caps = conn.execute(
+                        """
+                        SELECT ticker, market_cap
+                        FROM ticker_snapshots
+                        QUALIFY ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY run_id DESC) = 1
+                        """
+                    ).df()
+                    if not prior_caps.empty:
+                        payload = payload.merge(prior_caps, on="ticker", how="left", suffixes=("", "_prev"))
+                        payload["market_cap"] = payload["market_cap"].fillna(payload["market_cap_prev"])
+                        payload = payload.drop(columns=["market_cap_prev"], errors="ignore")
                 payload["run_id"] = run_id
                 conn.register("incoming_snapshots", payload)
                 conn.execute(
@@ -156,10 +171,12 @@ def run_refresh(
 
             for failure in failures:
                 error_message = failure.get("error_message", "Unknown error")
+                failed_symbol = str(failure.get("ticker", ticker) or ticker).strip().upper()
                 conn.execute(
                     "INSERT INTO refresh_failures(run_id, ticker, error_message) VALUES (?, ?, ?)",
-                    [run_id, failure.get("ticker", ticker), error_message],
+                    [run_id, failed_symbol, error_message],
                 )
+                failed_tickers.add(failed_symbol)
                 failure_count += 1
                 if provider.name == "live" and _is_rate_limit_error(error_message):
                     consecutive_rate_limit_failures += 1
@@ -203,6 +220,10 @@ def run_refresh(
         if early_stop_reason and success_count == 0:
             final_status = "failed"
 
+        accounting = provider.get_call_accounting() if hasattr(provider, "get_call_accounting") else {"api_call_count": 0, "endpoint_counts": {}}
+        endpoint_json = json.dumps(accounting.get("endpoint_counts", {}), sort_keys=True)
+        skipped_csv = ",".join(sorted(failed_tickers)) if failed_tickers else None
+
         conn.execute(
             """
             UPDATE refresh_runs
@@ -210,25 +231,48 @@ def run_refresh(
                 status = ?,
                 success_count = ?,
                 failure_count = ?,
-                error_message = ?
+                error_message = ?,
+                api_call_count = ?,
+                api_endpoint_counts = ?,
+                skipped_tickers = ?
             WHERE run_id = ?
             """,
-            [final_status, success_count, failure_count, summary_message, run_id],
+            [
+                final_status,
+                success_count,
+                failure_count,
+                summary_message,
+                int(accounting.get("api_call_count", 0)),
+                endpoint_json,
+                skipped_csv,
+                run_id,
+            ],
         )
 
         if success_count > 0:
             persist_theme_snapshot_for_run(conn, run_id)
     except Exception as exc:
+        accounting = provider.get_call_accounting() if hasattr(provider, "get_call_accounting") else {"api_call_count": 0, "endpoint_counts": {}}
         conn.execute(
             """
             UPDATE refresh_runs
             SET finished_at = CURRENT_TIMESTAMP,
                 status = 'failed',
                 failure_count = GREATEST(failure_count, ?),
-                error_message = ?
+                error_message = ?,
+                api_call_count = ?,
+                api_endpoint_counts = ?,
+                skipped_tickers = ?
             WHERE run_id = ?
             """,
-            [max(1, len(clean_tickers) - success_count), str(exc), run_id],
+            [
+                max(1, len(clean_tickers) - success_count),
+                str(exc),
+                int(accounting.get("api_call_count", 0)),
+                json.dumps(accounting.get("endpoint_counts", {}), sort_keys=True),
+                ",".join(sorted(failed_tickers)) if failed_tickers else None,
+                run_id,
+            ],
         )
         raise
 

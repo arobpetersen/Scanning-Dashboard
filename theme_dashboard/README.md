@@ -146,6 +146,23 @@ During refresh, progress is persisted incrementally (`success_count`, `failure_c
 
 Scope observability: each run records scope metadata (`scope_type`, `scope_theme_name`) and the resolved ticker universe in `refresh_run_tickers`, which is visible in Diagnostics.
 
+
+## Manual refresh efficiency model (live + mock)
+- External API calls happen only in explicit **manual refresh** actions from the dashboard control center.
+- All pages (Themes, Historical Performance, Suggestions, Health) read from DuckDB snapshots; navigation/filtering/chart changes do not trigger provider fetches.
+- Refresh write path:
+  1) fetch provider data,
+  2) persist `ticker_snapshots`,
+  3) persist derived `theme_snapshots`,
+  4) render UI from DuckDB.
+- Live refresh now defaults to daily aggregate endpoints for returns and avoids per-refresh reference endpoint fetches by default; missing `market_cap` is backfilled from the latest persisted ticker snapshot when available.
+- Lightweight refresh accounting is stored per run in `refresh_runs`:
+  - `api_call_count`,
+  - `api_endpoint_counts` (JSON map),
+  - `skipped_tickers` (failed/errored symbols).
+- Homepage last-run card surfaces API call accounting in an expander for operational visibility.
+
+
 Live safeguard: the run stops early if repeated rate-limit errors are detected (configured by `LIVE_RATE_LIMIT_STOP_THRESHOLD` in `src/config.py`) and is finalized cleanly with a summary error message.
 
 
