@@ -307,6 +307,7 @@ The dashboard shows a "Synthetic historical data active" indicator when syntheti
 - Themes with fewer than 2 data points in the selected window are automatically skipped with an informational message.
 - Historical analytics tables include concise section descriptions and header tooltips (column help) to explain metric meaning and interpretation.
 - The page includes a collapsible **Metric Guide** section summarizing momentum, breadth, rank change, and delta metrics.
+- A deterministic **Theme Signals (Inflection Feed)** block highlights emerging, accelerating, rotating-in, weakening, and rotating-out themes with trigger reasons and detection timestamps.
 
 ## Theme Rotation Engine
 - `src/rotation_engine.py` derives deterministic rotation signals from momentum outputs.
@@ -322,3 +323,14 @@ The dashboard shows a "Synthetic historical data active" indicator when syntheti
   - themes exiting Top N,
   - `rotation_intensity_score = ((entered + exited) / top_n) * 100`.
 - Historical page also includes a Theme Momentum Leaderboard for selected windows.
+
+## Theme Inflection Engine
+- `src/inflection_engine.py` computes deterministic inflection signals from existing momentum + rotation outputs (no duplicate snapshot model).
+- Signals emitted: `emerging`, `accelerating`, `rotating_into`, `weakening`, `leadership_deterioration`, and `rotating_out`.
+- Each signal includes:
+  - `detected_at` snapshot timestamp,
+  - signal label/type,
+  - trigger reason text,
+  - supporting deltas (`rank_change`, `momentum_score`, `delta_composite`, `delta_avg_1m`, `delta_breadth`).
+- Noise control keeps only the highest-priority signal per theme in a run to avoid repetitive overlap.
+- If history is sparse (fewer than 2 boundary snapshots), the feed is suppressed with a clear insufficiency message.

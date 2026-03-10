@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 
 from src.database import get_conn, init_db
+from src.inflection_engine import compute_theme_inflections
 from src.momentum_engine import compute_theme_momentum
 from src.queries import theme_snapshot_history
 from src.rotation_engine import compute_theme_rotation
@@ -28,6 +29,10 @@ TABLE_HELP = {
     "avg_1m": "Average 1-month return snapshot value for this theme.",
     "avg_3m": "Average 3-month return snapshot value for this theme.",
     "window_perf": "Primary return metric for this overview window.",
+    "signal_label": "Detected inflection category for this theme.",
+    "reason": "Why the signal was triggered.",
+    "detected_at": "Snapshot timestamp when signal was detected.",
+    "priority": "Internal confidence/priority score (higher = stronger).",
 }
 
 
@@ -169,6 +174,8 @@ if snapshot_count < min_snapshots:
 
 summary = momentum["window_summary"]
 rotation = compute_theme_rotation(summary, analysis_top_n, momentum["new_leaders"], momentum["dropped_leaders"])
+with get_conn() as conn:
+    inflections = compute_theme_inflections(conn, int(lookback_days), top_n=analysis_top_n)
 
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Themes in window", int(summary.shape[0]))
@@ -290,6 +297,27 @@ chart = (
 st.altair_chart(chart, width="stretch")
 
 st.caption(f"Analyzed top N={analysis_top_n}; displaying {trend['theme'].nunique()} theme lines.")
+
+st.subheader("Theme Signals (Inflection Feed)")
+st.caption("Deterministic high-confidence events derived from momentum + rotation metrics for the selected analysis window.")
+if inflections["meta"]["insufficient"]:
+    st.info(inflections["meta"]["message"])
+elif inflections["signals"].empty:
+    st.info("No high-confidence inflection signals for this analysis window.")
+else:
+    signal_cols = [
+        "detected_at",
+        "theme",
+        "signal_label",
+        "reason",
+        "rank_change",
+        "momentum_score",
+        "delta_composite",
+        "delta_avg_1m",
+        "delta_breadth",
+    ]
+    st.dataframe(inflections["signals"][signal_cols].head(30), width="stretch", hide_index=True, column_config=_config_for_columns(signal_cols))
+    st.caption(f"Showing top {min(30, len(inflections['signals']))} signals by priority and momentum.")
 
 st.subheader("Rotation Signals")
 st.caption("Leadership change buckets that explain which themes are entering strength, exiting, accelerating, or fading.")
