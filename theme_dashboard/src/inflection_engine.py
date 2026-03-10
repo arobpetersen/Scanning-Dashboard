@@ -15,6 +15,10 @@ SIGNAL_PRIORITY = {
     "weakening": 1,
 }
 
+MIN_SIGNAL_MOMENTUM = 1.5
+MIN_SIGNAL_COMPOSITE = 0.5
+MIN_SIGNAL_AVG1M = 0.25
+
 
 def _empty() -> dict:
     return {
@@ -105,6 +109,7 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
 
     rank_thr = max(5, int(top_n * 0.25))
     detected_at = pd.to_datetime(history["snapshot_time"]).max()
+    window_start = pd.to_datetime(history["snapshot_time"]).min()
 
     signals: list[dict] = []
     for row in summary.to_dict(orient="records"):
@@ -117,7 +122,7 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
         accel_up = bool(row.get("accel_trend_up", False))
         avg1m_up = bool(row.get("avg1m_trend_up", False))
 
-        if theme in rotate_out and rc <= -rank_thr:
+        if theme in rotate_out and rc <= -rank_thr and (ms < 0 or dc < 0):
             signals.append(
                 {
                     "detected_at": detected_at,
@@ -133,7 +138,7 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
                     "priority": SIGNAL_PRIORITY["rotating_out"],
                 }
             )
-        if theme in deterioration and ms < 0 and db < 0:
+        if theme in deterioration and rc < 0 and ms <= -MIN_SIGNAL_MOMENTUM and db < 0:
             signals.append(
                 {
                     "detected_at": detected_at,
@@ -149,7 +154,7 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
                     "priority": SIGNAL_PRIORITY["leadership_deterioration"],
                 }
             )
-        if theme in rotate_in and rc >= rank_thr:
+        if theme in rotate_in and rc >= rank_thr and (ms >= MIN_SIGNAL_MOMENTUM or dc >= MIN_SIGNAL_COMPOSITE):
             signals.append(
                 {
                     "detected_at": detected_at,
@@ -165,7 +170,7 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
                     "priority": SIGNAL_PRIORITY["rotating_into"],
                 }
             )
-        if rc >= rank_thr and ms > 0 and db > 0:
+        if rc >= rank_thr and ms >= MIN_SIGNAL_MOMENTUM and db > 0 and da1m >= MIN_SIGNAL_AVG1M:
             signals.append(
                 {
                     "detected_at": detected_at,
@@ -181,7 +186,7 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
                     "priority": SIGNAL_PRIORITY["emerging"],
                 }
             )
-        if accel_up and avg1m_up and dc > 0 and ms > 0:
+        if accel_up and avg1m_up and dc >= MIN_SIGNAL_COMPOSITE and da1m >= MIN_SIGNAL_AVG1M and ms >= MIN_SIGNAL_MOMENTUM:
             signals.append(
                 {
                     "detected_at": detected_at,
@@ -197,7 +202,7 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
                     "priority": SIGNAL_PRIORITY["accelerating"],
                 }
             )
-        if ms < 0 and dc < 0 and db < 0:
+        if ms <= -MIN_SIGNAL_MOMENTUM and dc < 0 and da1m < 0 and db < 0:
             signals.append(
                 {
                     "detected_at": detected_at,
@@ -236,5 +241,7 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
             "insufficient": False,
             "message": "ok",
             "detected_at": detected_at,
+            "window_start": window_start,
+            "window_end": detected_at,
         },
     }

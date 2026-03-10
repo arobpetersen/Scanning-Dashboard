@@ -4,6 +4,7 @@ import streamlit as st
 
 from src.database import get_conn, init_db
 from src.inflection_engine import compute_theme_inflections
+from src.leaderboard_utils import build_window_leaderboard
 from src.momentum_engine import compute_theme_momentum
 from src.queries import theme_snapshot_history
 from src.rotation_engine import compute_theme_rotation
@@ -64,27 +65,9 @@ def _signal_reason_text(row: pd.Series) -> str:
 
 
 def _build_overview_leaders(momentum: dict, perf_col: str, top_k: int = 10) -> tuple[pd.DataFrame, str | None]:
-    history = momentum["history"]
-    if history.empty:
-        return pd.DataFrame(), "No snapshots available for this window yet."
+    # Centralized helper keeps window ranking rules consistent across Themes and Historical pages.
+    return build_window_leaderboard(momentum, perf_col, top_k=top_k)
 
-    if int(history["snapshot_time"].nunique()) < 2:
-        return pd.DataFrame(), "Need at least two boundary snapshots to compare this window."
-
-    latest = history.sort_values("snapshot_time").groupby("theme", as_index=False).tail(1)
-    summary = momentum["window_summary"][["theme", "rank_change", "momentum_score", "delta_breadth"]]
-
-    # Important: each panel is ranked by its own window-specific return metric first
-    # (avg_1w / avg_1m / avg_3m), then momentum context as tie-breakers.
-    ranked = (
-        latest[["theme", perf_col]]
-        .merge(summary, on="theme", how="left")
-        .sort_values([perf_col, "momentum_score", "rank_change"], ascending=False)
-        .head(top_k)
-        .reset_index(drop=True)
-    )
-    ranked["rank"] = ranked.index + 1
-    return ranked[["rank", "theme", perf_col, "momentum_score", "rank_change"]], None
 
 
 def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, message: str | None, key_prefix: str):
@@ -170,17 +153,9 @@ if history.empty:
     st.stop()
 
 snapshot_count = int(history["snapshot_time"].nunique())
-min_snapshots = 2
-if window_label == "1 week":
-    min_snapshots = 2
-elif window_label == "1 month":
-    min_snapshots = 3
-elif window_label == "3 months":
-    min_snapshots = 4
-
-if snapshot_count < min_snapshots:
+if snapshot_count < 2:
     st.warning(
-        f"Not enough historical snapshots for this lookback window (have {snapshot_count}, need at least {min_snapshots})."
+        f"Not enough historical snapshots for this lookback window (have {snapshot_count}, need at least 2 boundary snapshots)."
     )
     st.stop()
 
