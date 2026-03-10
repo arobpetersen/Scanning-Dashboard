@@ -2,6 +2,7 @@ import streamlit as st
 
 from src.database import get_conn, init_db
 from src.leaderboard_utils import build_window_leaderboard
+from src.metric_formatting import format_theme_ticker_table
 from src.momentum_engine import compute_theme_momentum
 from src.queries import theme_snapshot_history, theme_ticker_metrics
 from src.theme_service import (
@@ -147,7 +148,9 @@ with explore_tab:
             c3.metric("Avg 1M", f"{ticker_df['perf_1m'].mean():.2f}%")
             c4.metric("Avg 3M", f"{ticker_df['perf_3m'].mean():.2f}%")
 
-        st.dataframe(ticker_df, width="stretch")
+        display_ticker_df = format_theme_ticker_table(ticker_df)
+        cols = [c for c in ["ticker", "price", "perf_1w", "perf_1m", "perf_3m", "market_cap", "avg_volume", "dollar_volume", "short_interest_pct", "float_shares", "adr_pct", "last_updated"] if c in display_ticker_df.columns]
+        st.dataframe(display_ticker_df[cols] if cols else display_ticker_df, width="stretch")
         if not history_df.empty:
             hist = history_df.sort_values("snapshot_time")
             st.line_chart(hist.set_index("snapshot_time")[["composite_score", "avg_1m", "positive_1m_breadth_pct"]])

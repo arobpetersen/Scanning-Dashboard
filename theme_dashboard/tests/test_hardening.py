@@ -7,8 +7,10 @@ import pandas as pd
 from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
 from src.leaderboard_utils import build_window_leaderboard
+from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
 from src.queries import theme_history_window
 from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success
+from src.provider_live import LiveProvider
 
 
 class TestLeaderboardUtils(unittest.TestCase):
@@ -174,6 +176,36 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
         self.assertEqual(int(recovered[1]), 0)
         self.assertIsNone(recovered[2])
         conn.close()
+
+
+class TestMetricFormattingAndReturnSafety(unittest.TestCase):
+    def test_human_readable_number(self):
+        self.assertEqual(human_readable_number(125900000000), "125.9B")
+        self.assertEqual(human_readable_number(50000000), "50.0M")
+        self.assertEqual(human_readable_number(55825862), "55.8M")
+
+    def test_theme_ticker_table_adds_dollar_volume_and_formats_time(self):
+        df = pd.DataFrame([
+            {
+                "ticker": "ABC",
+                "price": 10.1234,
+                "avg_volume": 55825862,
+                "market_cap": 125900000000,
+                "perf_1w": 1.2345,
+                "perf_1m": 2.3456,
+                "perf_3m": 3.4567,
+                "last_updated": "2026-03-09T21:00:00Z",
+            }
+        ])
+        out = format_theme_ticker_table(df)
+        self.assertEqual(out.iloc[0]["market_cap"], "125.9B")
+        self.assertEqual(out.iloc[0]["avg_volume"], "55.8M")
+        self.assertEqual(out.iloc[0]["dollar_volume"], "565.0M")
+        self.assertEqual(float(out.iloc[0]["perf_1w"]), 1.23)
+        self.assertTrue(str(out.iloc[0]["last_updated"]).startswith("Mar"))
+
+    def test_live_calc_return_returns_none_when_history_insufficient(self):
+        self.assertIsNone(LiveProvider._calc_return([1, 2, 3], 5))
 
 
 if __name__ == "__main__":

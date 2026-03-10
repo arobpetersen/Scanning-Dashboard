@@ -167,6 +167,14 @@ Live safeguard: the run stops early if repeated rate-limit errors are detected (
 
 
 
+
+## Theme metrics readability (display layer)
+- Theme ticker table formatting is applied in the UI display layer (DuckDB raw values remain unchanged).
+- `market_cap` and `avg_volume` are shown in compact units (`K`/`M`/`B`/`T`) for faster scanning (e.g., `125900000000 -> 125.9B`, `55825862 -> 55.8M`).
+- `dollar_volume` is shown as `price * avg_volume` to highlight liquidity-weighted activity.
+- `perf_1w`, `perf_1m`, `perf_3m` are rounded to 2 decimals for readability.
+- `last_updated` timestamps are rendered in short form (e.g., `Mar 9 21:00`).
+
 ## Symbol hygiene and suppression workflow
 - A `symbol_refresh_status` table tracks per-ticker refresh hygiene state and history:
   - `status`: `active`, `watch`, `inactive_candidate`, `refresh_suppressed`
