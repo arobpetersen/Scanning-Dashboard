@@ -284,3 +284,35 @@ Snapshot provenance tagging:
 - `synthetic_backfill`
 
 The dashboard shows a "Synthetic historical data active" indicator when synthetic snapshots are present.
+
+
+## Historical Performance readability modes
+- Top-N analysis is separated from chart display:
+  - **Top N analyzed** controls leadership/momentum universe.
+  - **Themes shown in chart** controls how many lines are plotted for readability.
+- Chart display modes:
+  - **raw metric**,
+  - **indexed (100=start)**,
+  - **rank movement**.
+- Optional smoothing is available:
+  - none,
+  - 3 period rolling,
+  - 5 period rolling.
+- Theme selection controls include category filter, theme search, and watchlist pinning so selected themes remain visible in charts.
+- If too few snapshots exist for a selected window, the page shows a data sufficiency warning instead of rendering broken visuals (1w: 2 snapshots, 1m: 3 snapshots, 3m: 4 snapshots minimum).
+- Themes with fewer than 2 data points in the selected window are automatically skipped with an informational message.
+
+## Theme Rotation Engine
+- `src/rotation_engine.py` derives deterministic rotation signals from momentum outputs.
+- Rotation sections include:
+  - Rotating Into Leadership,
+  - Rotating Out Of Leadership,
+  - Emerging Themes,
+  - Fading Themes,
+  - Acceleration in Leadership,
+  - Deterioration in Leadership.
+- Rotation intensity metrics:
+  - themes entering Top N,
+  - themes exiting Top N,
+  - `rotation_intensity_score = ((entered + exited) / top_n) * 100`.
+- Historical page also includes a Theme Momentum Leaderboard for selected windows.
