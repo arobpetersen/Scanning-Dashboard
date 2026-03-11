@@ -158,6 +158,7 @@ def run_refresh(
                         """
                         SELECT ticker, market_cap
                         FROM ticker_snapshots
+                        WHERE market_cap IS NOT NULL
                         QUALIFY ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY run_id DESC) = 1
                         """
                     ).df()

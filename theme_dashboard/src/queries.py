@@ -53,6 +53,16 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
             FROM ticker_snapshots s
             JOIN refresh_runs r ON r.run_id = s.run_id
             WHERE r.status IN ('success', 'partial')
+        ),
+        latest_nonnull_market_caps AS (
+            SELECT
+                s.ticker,
+                s.market_cap,
+                ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) AS rn
+            FROM ticker_snapshots s
+            JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE r.status IN ('success', 'partial')
+              AND s.market_cap IS NOT NULL
         )
         SELECT
             m.ticker,
@@ -60,7 +70,7 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
             cs.perf_1w,
             cs.perf_1m,
             cs.perf_3m,
-            cs.market_cap,
+            COALESCE(cs.market_cap, lmc.market_cap) AS market_cap,
             cs.avg_volume,
             cs.short_interest_pct,
             cs.float_shares,
@@ -71,6 +81,8 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
         FROM theme_membership m
         LEFT JOIN completed_snapshots cs
           ON m.ticker = cs.ticker AND cs.rn = 1
+        LEFT JOIN latest_nonnull_market_caps lmc
+          ON m.ticker = lmc.ticker AND lmc.rn = 1
         WHERE m.theme_id = ?
         ORDER BY m.ticker
         """,

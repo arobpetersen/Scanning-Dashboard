@@ -7,6 +7,7 @@ from unittest.mock import patch
 import duckdb
 import pandas as pd
 
+from src.fetch_data import run_refresh
 from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
 from src.leaderboard_utils import build_window_leaderboard
@@ -334,11 +335,89 @@ class TestBootstrapAndHistoryFramework(unittest.TestCase):
         conn.execute("insert into refresh_runs values (1, 'success', '2026-03-10 22:00:00')")
         conn.execute("insert into refresh_runs values (2, 'partial', '2026-03-11 22:00:00')")
         conn.execute("insert into ticker_snapshots values (1, 'ABC', 10, 1, 2, 3, 125900000000, 50000000, null, null, null, '2026-03-10 21:00:00')")
+        conn.execute("insert into ticker_snapshots values (2, 'ABC', 11, 1.5, 2.5, 3.5, null, 51000000, null, null, null, '2026-03-11 21:00:00')")
 
         out = theme_ticker_metrics(conn, 1)
         self.assertEqual(float(out.iloc[0]["market_cap"]), 125900000000)
+        formatted = format_theme_ticker_table(out)
+        self.assertEqual(formatted.iloc[0]["market_cap"], "125.9B")
         self.assertEqual(str(out.iloc[0]["latest_refresh_time"]), "2026-03-11 22:00:00")
         conn.close()
+
+    def test_run_refresh_backfills_market_cap_from_latest_nonnull_snapshot(self):
+        class NullCapProvider:
+            name = "live"
+
+            def fetch_ticker_data(self, tickers):
+                return (
+                    pd.DataFrame(
+                        [
+                            {
+                                "ticker": "ABC",
+                                "price": 11.0,
+                                "perf_1w": 1.5,
+                                "perf_1m": 2.5,
+                                "perf_3m": 3.5,
+                                "market_cap": None,
+                                "avg_volume": 51000000.0,
+                                "short_interest_pct": None,
+                                "float_shares": None,
+                                "adr_pct": None,
+                                "last_updated": "2026-03-11 21:00:00",
+                            }
+                        ]
+                    ),
+                    [],
+                )
+
+            def get_call_accounting(self):
+                return {"api_call_count": 1, "endpoint_counts": {"aggs_daily": 1}}
+
+        db_path = Path(__file__).resolve().parent / "test_market_cap_refresh.duckdb"
+        if db_path.exists():
+            db_path.unlink()
+        try:
+            with patch("src.database.DB_PATH", db_path), patch("src.config.DB_PATH", db_path):
+                from src.database import get_conn, init_db
+
+                init_db()
+                with get_conn() as conn:
+                    conn.execute("delete from themes")
+                    conn.execute("delete from theme_membership")
+                    conn.execute("insert into themes(id, name, category, is_active) values (1, 'Test Theme', 'Tech', true)")
+                    conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'ABC')")
+                    prior_run_id = conn.execute(
+                        """
+                        insert into refresh_runs(provider, started_at, finished_at, status, ticker_count, success_count, failure_count)
+                        values ('live', '2026-03-10 20:00:00', '2026-03-10 22:00:00', 'success', 1, 1, 0)
+                        returning run_id
+                        """
+                    ).fetchone()[0]
+                    conn.execute(
+                        """
+                        insert into ticker_snapshots(
+                            run_id, ticker, price, perf_1w, perf_1m, perf_3m,
+                            market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated, snapshot_source
+                        )
+                        values (?, 'ABC', 10, 1, 2, 3, 125900000000, 50000000, null, null, null, '2026-03-10 21:00:00', 'live')
+                        """,
+                        [prior_run_id],
+                    )
+
+                    with patch("src.fetch_data.get_provider", return_value=NullCapProvider()), patch(
+                        "src.fetch_data.persist_theme_snapshot_for_run", return_value=None
+                    ):
+                        run_id = run_refresh(conn, provider_name="live", tickers=["ABC"])
+
+                    stored = conn.execute(
+                        "select market_cap from ticker_snapshots where run_id = ? and ticker = 'ABC'",
+                        [run_id],
+                    ).fetchone()
+                    self.assertIsNotNone(stored)
+                    self.assertEqual(float(stored[0]), 125900000000)
+        finally:
+            if db_path.exists():
+                db_path.unlink()
 
 
 class TestEODRefreshFramework(unittest.TestCase):
