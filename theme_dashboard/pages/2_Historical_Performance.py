@@ -147,16 +147,21 @@ metric = st.selectbox(
 
 with get_conn() as conn:
     momentum = compute_theme_momentum(conn, int(lookback_days), top_n=analysis_top_n)
+    total_theme_snapshot_sets = int(conn.execute("SELECT COUNT(DISTINCT snapshot_time) FROM theme_snapshots").fetchone()[0] or 0)
 
 history = momentum["history"]
 if history.empty:
-    st.info("No snapshots available in selected window. Run refreshes first.")
+    st.info(
+        f"No snapshots available in the selected window. Theme snapshot sets currently available: {total_theme_snapshot_sets}. "
+        "At least 2 boundary snapshots are required for comparisons. Run another refresh if history is still being seeded."
+    )
     st.stop()
 
 snapshot_count = int(history["snapshot_time"].nunique())
 if snapshot_count < 2:
     st.warning(
-        f"Not enough historical snapshots for this lookback window (have {snapshot_count}, need at least 2 boundary snapshots)."
+        f"Not enough historical snapshots for this lookback window (have {snapshot_count}, need at least 2 boundary snapshots). "
+        f"Total theme snapshot sets currently stored: {total_theme_snapshot_sets}. Run another refresh if appropriate."
     )
     st.stop()
 
@@ -452,6 +457,12 @@ else:
         st.info("No history for selected theme.")
     else:
         single = single.sort_values("snapshot_time")
+        single_points = int(single["snapshot_time"].nunique())
+        if single_points < 2:
+            st.caption(
+                f"Selected theme currently has {single_points} snapshot point(s). "
+                "At least 2 are needed for meaningful before/after comparison."
+            )
         st.line_chart(single.set_index("snapshot_time")[["composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct"]])
         st.dataframe(single, width="stretch")
 

@@ -17,7 +17,7 @@ from src.database import get_conn, init_db
 from src.failure_classification import categorize_failure_message
 from src.fetch_data import mark_stale_running_runs
 from src.metric_formatting import short_timestamp
-from src.queries import last_refresh_run, refresh_history, row_counts, snapshot_counts, theme_health_overview
+from src.queries import baseline_status, last_refresh_run, refresh_history, row_counts, snapshot_counts, theme_health_overview
 from src.suggestions_service import suggestion_status_counts
 from src.symbol_hygiene import approve_suppression, reject_keep_active, reset_failure_history, symbol_hygiene_queue
 from src.theme_service import seed_if_needed
@@ -33,6 +33,7 @@ with get_conn() as conn:
     history = refresh_history(conn, limit=30)
     counts = row_counts(conn)
     snaps = snapshot_counts(conn)
+    baseline = baseline_status(conn)
     sugg_counts = suggestion_status_counts(conn)
 
 ops_tab, themes_tab = st.tabs(["Operations", "Theme Health"])
@@ -50,6 +51,30 @@ with ops_tab:
     c2.metric("Theme snapshots", int(snaps.iloc[0]["theme_snapshot_rows"]))
     c3.metric("Runs w/theme snapshots", int(snaps.iloc[0]["runs_with_theme_snapshots"]))
     c4.metric("Pending suggestions", int(sugg_counts[sugg_counts["status"] == "pending"]["cnt"].sum()) if not sugg_counts.empty else 0)
+
+    if not baseline.empty:
+        state = baseline.iloc[0]
+        st.subheader("Current data state")
+        st.caption(
+            f"Latest refresh #{int(state['latest_run_id']) if state['latest_run_id'] is not None else 'n/a'} | "
+            f"status=`{state.get('latest_run_status') or 'n/a'}` | provider=`{state.get('latest_run_provider') or 'n/a'}` | "
+            f"finished_at=`{state.get('latest_run_finished_at') or 'n/a'}`"
+        )
+        d1, d2 = st.columns(2)
+        with d1:
+            st.write(f"Latest theme snapshot: `{short_timestamp(state.get('latest_theme_snapshot_time')) or 'â€”'}`")
+            st.write(f"Recent theme sources: `{state.get('recent_theme_sources') or 'none'}`")
+        with d2:
+            st.write(f"Latest ticker snapshot: `{short_timestamp(state.get('latest_ticker_snapshot_time')) or 'â€”'}`")
+            st.write(f"Recent ticker sources: `{state.get('recent_ticker_sources') or 'none'}`")
+
+        theme_sets = int(state.get("theme_snapshot_sets") or 0)
+        ticker_sets = int(state.get("ticker_snapshot_sets") or 0)
+        if theme_sets <= 1 or ticker_sets <= 1:
+            st.warning(
+                f"History is still shallow: theme snapshot sets={theme_sets}, ticker snapshot sets={ticker_sets}. "
+                "At least 2 boundary snapshots are needed for reliable comparisons."
+            )
 
     if not last_run.empty:
         run = last_run.iloc[0]
