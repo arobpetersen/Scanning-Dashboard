@@ -16,6 +16,7 @@ from src.config import (
 from src.database import get_conn, init_db
 from src.failure_classification import categorize_failure_message
 from src.fetch_data import mark_stale_running_runs
+from src.metric_formatting import short_timestamp
 from src.queries import last_refresh_run, refresh_history, row_counts, snapshot_counts, theme_health_overview
 from src.suggestions_service import suggestion_status_counts
 from src.symbol_hygiene import approve_suppression, reject_keep_active, reset_failure_history, symbol_hygiene_queue
@@ -176,17 +177,18 @@ with themes_tab:
         m3.metric("Watch", int((view["health_status"] == "watch").sum()))
         m4.metric("Healthy", int((view["health_status"] == "healthy").sum()))
 
-        st.dataframe(
-            view[[
-                "theme_name",
-                "category",
-                "is_active",
-                "constituent_count",
-                "low_count_flag",
-                "empty_theme_flag",
-                "live_failure_count_recent",
-                "latest_snapshot_time",
-                "health_status",
-            ]],
-            width="stretch",
+        health_view = view[[
+            "theme_name",
+            "category",
+            "is_active",
+            "constituent_count",
+            "low_count_flag",
+            "empty_theme_flag",
+            "live_failure_count_recent",
+            "latest_snapshot_time",
+            "health_status",
+        ]].copy()
+        health_view["latest_snapshot_time"] = health_view["latest_snapshot_time"].apply(
+            lambda v: short_timestamp(v) or "—"
         )
+        st.dataframe(health_view, width="stretch")
