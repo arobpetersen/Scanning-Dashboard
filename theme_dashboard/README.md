@@ -103,6 +103,10 @@ export MASSIVE_API_KEY="your_api_key_here"
 
 If `MASSIVE_API_KEY` is not set and you choose `live`, the app shows a warning and gracefully falls back to `mock` for refresh so the app remains usable.
 
+Operational default:
+- `live` is the intended day-to-day operating mode in the 2.1 branch.
+- `mock` remains available for explicit development/testing and recovery scenarios.
+
 > Keep secrets local: do **not** hardcode API keys in source files and do **not** commit `.env` or shell files containing secrets.
 
 ## First run behavior
@@ -402,8 +406,27 @@ What the runner does:
   - runner handles weekday/time/duplicate protections idempotently
 
 ## Providers
-- `mock`: deterministic sample data for all tickers so the app is usable immediately.
-- `live`: Massive-backed provider in `src/provider_live.py`.
+- `live`: Massive-backed provider in `src/provider_live.py` and the default operational mode.
+- `mock`: deterministic sample data kept for explicit development/testing and recovery use.
+
+## Source purity / contamination audit
+- Current live-facing views now use live-preferred snapshot selection when live data exists.
+- This reduces user-facing contamination if older/newer `mock` or `synthetic_backfill` rows remain in DuckDB.
+- Use the baseline check to inspect source purity:
+
+```powershell
+.\.venv\Scripts\python.exe run_baseline_check.py
+```
+
+```bash
+.venv/bin/python run_baseline_check.py
+```
+
+The output now reports:
+- preferred current theme/ticker source
+- current latest-view sources
+- recent history sources
+- whether mixed sources are only historical residue or are actively affecting current views
 
 ## Ranking formulas (auditable)
 - `avg_1w = mean(perf_1w)`

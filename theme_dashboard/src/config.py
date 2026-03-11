@@ -5,7 +5,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "theme_dashboard.duckdb"
 SEED_PATH = BASE_DIR / "themes_seed_structured.json"
 
-DEFAULT_PROVIDER = "mock"
+DEFAULT_PROVIDER = "live"
 STALE_DATA_HOURS = 24
 REFRESH_STALE_TIMEOUT_MINUTES = 30
 LIVE_RATE_LIMIT_STOP_THRESHOLD = 5

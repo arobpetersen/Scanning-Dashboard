@@ -17,7 +17,7 @@ from src.database import get_conn, init_db
 from src.failure_classification import categorize_failure_message
 from src.fetch_data import mark_stale_running_runs
 from src.metric_formatting import short_timestamp
-from src.queries import baseline_status, last_refresh_run, refresh_history, row_counts, snapshot_counts, theme_health_overview
+from src.queries import baseline_status, last_refresh_run, refresh_history, row_counts, snapshot_counts, source_audit_status, theme_health_overview
 from src.suggestions_service import suggestion_status_counts
 from src.symbol_hygiene import approve_suppression, reject_keep_active, reset_failure_history, symbol_hygiene_queue
 from src.theme_service import seed_if_needed
@@ -34,6 +34,7 @@ with get_conn() as conn:
     counts = row_counts(conn)
     snaps = snapshot_counts(conn)
     baseline = baseline_status(conn)
+    source_audit = source_audit_status(conn)
     sugg_counts = suggestion_status_counts(conn)
 
 ops_tab, themes_tab = st.tabs(["Operations", "Theme Health"])
@@ -75,6 +76,26 @@ with ops_tab:
                 f"History is still shallow: theme snapshot sets={theme_sets}, ticker snapshot sets={ticker_sets}. "
                 "At least 2 boundary snapshots are needed for reliable comparisons."
             )
+    if not source_audit.empty:
+        audit = source_audit.iloc[0]
+        st.subheader("Source audit")
+        st.caption(
+            f"Preferred current sources: theme=`{audit.get('preferred_theme_source') or 'none'}` | "
+            f"ticker=`{audit.get('preferred_ticker_source') or 'none'}`"
+        )
+        a1, a2 = st.columns(2)
+        with a1:
+            st.write(f"Current theme view sources: `{audit.get('latest_theme_view_sources') or 'none'}`")
+            st.write(f"Recent theme history sources: `{audit.get('recent_theme_sources') or 'none'}`")
+        with a2:
+            st.write(f"Current ticker view sources: `{audit.get('latest_ticker_view_sources') or 'none'}`")
+            st.write(f"Recent ticker history sources: `{audit.get('recent_ticker_sources') or 'none'}`")
+        if bool(audit.get("active_contamination")):
+            st.error("Active source contamination detected: current live-facing views are mixed.")
+        elif bool(audit.get("historical_residue_only")):
+            st.info("Mixed source history exists as residue, but current live-facing views are using live-preferred data.")
+        else:
+            st.success("Current live-facing views are source-pure under live-preferred selection.")
 
     if not last_run.empty:
         run = last_run.iloc[0]

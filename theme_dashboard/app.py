@@ -22,7 +22,7 @@ with get_conn() as conn:
 if seeded:
     st.success("Theme registry imported from themes_seed_structured.json. DuckDB is source of truth.")
 
-provider_name = st.sidebar.selectbox("Provider", ["mock", "live"], index=0 if DEFAULT_PROVIDER == "mock" else 1)
+provider_name = st.sidebar.selectbox("Provider", ["live", "mock"], index=0 if DEFAULT_PROVIDER == "live" else 1)
 scope_mode = st.sidebar.radio("Refresh scope", ["Active themes", "Selected theme", "Custom ticker list"], index=1 if provider_name == "live" else 0)
 
 selected_theme_name: str | None = None
@@ -48,7 +48,7 @@ with get_conn() as conn:
     synthetic_active = synthetic_data_active(conn)
 
 if provider_name == "live" and not massive_api_key():
-    st.warning(f"Live selected but {MASSIVE_API_KEY_ENV} is missing. Refresh will fall back to mock provider behavior.")
+    st.warning(f"Live selected but {MASSIVE_API_KEY_ENV} is missing. Refresh will fall back to mock provider behavior, which is intended mainly for development/testing.")
 
 if synthetic_active:
     st.info("Synthetic historical data active")

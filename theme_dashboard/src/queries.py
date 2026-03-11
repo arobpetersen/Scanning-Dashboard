@@ -16,6 +16,19 @@ CORE_TABLES = [
 ]
 
 
+def _table_has_column(conn, table_name: str, column_name: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM duckdb_columns()
+        WHERE table_name = ?
+          AND column_name = ?
+        """,
+        [table_name, column_name],
+    ).fetchone()
+    return bool(row and int(row[0]) > 0)
+
+
 def last_refresh_run(conn) -> pd.DataFrame:
     return conn.execute("SELECT * FROM refresh_runs ORDER BY run_id DESC LIMIT 1").df()
 
@@ -37,17 +50,94 @@ def latest_completed_runs(conn, limit: int = 2) -> pd.DataFrame:
     ).df()
 
 
+def preferred_theme_snapshot_source(conn) -> str | None:
+    if _table_has_column(conn, "theme_snapshots", "snapshot_source"):
+        row = conn.execute(
+            """
+            SELECT snapshot_source
+            FROM theme_snapshots
+            ORDER BY CASE WHEN snapshot_source = 'live' THEN 0 ELSE 1 END,
+                     snapshot_time DESC,
+                     run_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    else:
+        if _table_has_column(conn, "refresh_runs", "provider"):
+            row = conn.execute(
+                """
+                SELECT COALESCE(r.provider, 'live')
+                FROM theme_snapshots ts
+                LEFT JOIN refresh_runs r ON r.run_id = ts.run_id
+                ORDER BY CASE WHEN COALESCE(r.provider, 'live') = 'live' THEN 0 ELSE 1 END,
+                         ts.snapshot_time DESC,
+                         ts.run_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        else:
+            row = ("live",)
+    return str(row[0]) if row and row[0] else None
+
+
+def preferred_ticker_snapshot_source(conn) -> str | None:
+    if _table_has_column(conn, "ticker_snapshots", "snapshot_source"):
+        row = conn.execute(
+            """
+            SELECT s.snapshot_source
+            FROM ticker_snapshots s
+            JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE r.status IN ('success', 'partial')
+            ORDER BY CASE WHEN s.snapshot_source = 'live' THEN 0 ELSE 1 END,
+                     s.run_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    else:
+        if _table_has_column(conn, "refresh_runs", "provider"):
+            row = conn.execute(
+                """
+                SELECT COALESCE(r.provider, 'live')
+                FROM ticker_snapshots s
+                JOIN refresh_runs r ON r.run_id = s.run_id
+                WHERE r.status IN ('success', 'partial')
+                ORDER BY CASE WHEN COALESCE(r.provider, 'live') = 'live' THEN 0 ELSE 1 END,
+                         s.run_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        else:
+            row = ("live",)
+    return str(row[0]) if row and row[0] else None
+
+
 def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
-    latest_run = latest_completed_runs(conn, limit=1)
-    if latest_run.empty:
+    preferred_source = preferred_ticker_snapshot_source(conn)
+    if not preferred_source:
         return conn.execute(
             "SELECT ticker FROM theme_membership WHERE theme_id = ? ORDER BY ticker", [theme_id]
         ).df()
 
-    latest_refresh_time = latest_run.iloc[0]["finished_at"]
+    if _table_has_column(conn, "ticker_snapshots", "snapshot_source"):
+        ticker_source_expr = "s.snapshot_source"
+    elif _table_has_column(conn, "refresh_runs", "provider"):
+        ticker_source_expr = "COALESCE(r.provider, 'live')"
+    else:
+        ticker_source_expr = "'live'"
+
+    latest_refresh_time = conn.execute(
+        f"""
+        SELECT MAX(r.finished_at)
+        FROM ticker_snapshots s
+        JOIN refresh_runs r ON r.run_id = s.run_id
+        WHERE r.status IN ('success', 'partial')
+          AND {ticker_source_expr} = ?
+        """,
+        [preferred_source],
+    ).fetchone()[0]
 
     return conn.execute(
-        """
+        f"""
         WITH completed_snapshots AS (
             SELECT
                 s.ticker,
@@ -66,6 +156,7 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
             FROM ticker_snapshots s
             JOIN refresh_runs r ON r.run_id = s.run_id
             WHERE r.status IN ('success', 'partial')
+              AND {ticker_source_expr} = ?
         ),
         latest_nonnull_market_caps AS (
             SELECT
@@ -75,6 +166,7 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
             FROM ticker_snapshots s
             JOIN refresh_runs r ON r.run_id = s.run_id
             WHERE r.status IN ('success', 'partial')
+              AND {ticker_source_expr} = ?
               AND s.market_cap IS NOT NULL
         )
         SELECT
@@ -99,11 +191,14 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
         WHERE m.theme_id = ?
         ORDER BY m.ticker
         """,
-        [latest_refresh_time, theme_id],
+        [preferred_source, preferred_source, latest_refresh_time, theme_id],
     ).df()
 
 
 def theme_snapshot_history(conn, theme_id: int, limit: int = 20) -> pd.DataFrame:
+    preferred_source = preferred_theme_snapshot_source(conn)
+    if not preferred_source:
+        return pd.DataFrame()
     return conn.execute(
         """
         SELECT ts.run_id, ts.snapshot_time, ts.ticker_count,
@@ -112,14 +207,18 @@ def theme_snapshot_history(conn, theme_id: int, limit: int = 20) -> pd.DataFrame
                ts.composite_score
         FROM theme_snapshots ts
         WHERE ts.theme_id = ?
+          AND ts.snapshot_source = ?
         ORDER BY ts.run_id DESC
         LIMIT ?
         """,
-        [theme_id, limit],
+        [theme_id, preferred_source, limit],
     ).df()
 
 
 def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
+    preferred_source = preferred_theme_snapshot_source(conn)
+    if not preferred_source:
+        return pd.DataFrame()
     # Boundary-based windowing keeps short lookbacks (especially 1W) stable on sparse/weekly cadence.
     # We anchor to the latest available snapshot and pick the nearest snapshot at or before start target.
     return conn.execute(
@@ -127,6 +226,7 @@ def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
         WITH latest AS (
             SELECT MAX(snapshot_time) AS latest_time
             FROM theme_snapshots
+            WHERE snapshot_source = ?
         ),
         bounds AS (
             SELECT
@@ -140,10 +240,11 @@ def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
             FROM theme_snapshots ts
             JOIN bounds b ON TRUE
             WHERE ts.snapshot_time <= b.target_start
+              AND ts.snapshot_source = ?
         ),
         effective AS (
             SELECT
-                COALESCE(sp.start_time, (SELECT MIN(snapshot_time) FROM theme_snapshots)) AS start_time,
+                COALESCE(sp.start_time, (SELECT MIN(snapshot_time) FROM theme_snapshots WHERE snapshot_source = ?)) AS start_time,
                 b.end_time AS end_time
             FROM bounds b
             LEFT JOIN start_pick sp ON TRUE
@@ -154,9 +255,10 @@ def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
         FROM theme_snapshots ts
         JOIN themes t ON t.id = ts.theme_id
         JOIN effective e ON ts.snapshot_time BETWEEN e.start_time AND e.end_time
+        WHERE ts.snapshot_source = ?
         ORDER BY ts.snapshot_time ASC, ts.composite_score DESC
         """,
-        [lookback_days],
+        [preferred_source, lookback_days, preferred_source, preferred_source, preferred_source],
     ).df()
 
 
@@ -209,11 +311,15 @@ def top_theme_movers(conn, lookback_days: int, top_n: int = 20) -> pd.DataFrame:
 
 
 def top_n_membership_changes(conn, lookback_days: int, top_n: int = 20) -> tuple[list[str], list[str]]:
+    preferred_source = preferred_theme_snapshot_source(conn)
+    if not preferred_source:
+        return [], []
     first_top = conn.execute(
         """
         WITH latest AS (
             SELECT MAX(snapshot_time) AS latest_time
             FROM theme_snapshots
+            WHERE snapshot_source = ?
         ),
         bounds AS (
             SELECT
@@ -227,10 +333,11 @@ def top_n_membership_changes(conn, lookback_days: int, top_n: int = 20) -> tuple
             FROM theme_snapshots ts
             JOIN bounds b ON TRUE
             WHERE ts.snapshot_time <= b.target_start
+              AND ts.snapshot_source = ?
         ),
         effective AS (
             SELECT
-                COALESCE(sp.start_time, (SELECT MIN(snapshot_time) FROM theme_snapshots)) AS start_time,
+                COALESCE(sp.start_time, (SELECT MIN(snapshot_time) FROM theme_snapshots WHERE snapshot_source = ?)) AS start_time,
                 b.end_time AS end_time
             FROM bounds b
             LEFT JOIN start_pick sp ON TRUE
@@ -239,25 +346,28 @@ def top_n_membership_changes(conn, lookback_days: int, top_n: int = 20) -> tuple
         FROM theme_snapshots ts
         JOIN themes t ON t.id = ts.theme_id
         JOIN effective e ON ts.snapshot_time = e.start_time
+        WHERE ts.snapshot_source = ?
         ORDER BY ts.composite_score DESC
         LIMIT ?
         """,
-        [lookback_days, top_n],
+        [preferred_source, lookback_days, preferred_source, preferred_source, preferred_source, top_n],
     ).df()
     last_top = conn.execute(
         """
         WITH latest AS (
             SELECT MAX(snapshot_time) AS latest_time
             FROM theme_snapshots
+            WHERE snapshot_source = ?
         )
         SELECT t.name
         FROM theme_snapshots ts
         JOIN themes t ON t.id = ts.theme_id
         JOIN latest l ON ts.snapshot_time = l.latest_time
+        WHERE ts.snapshot_source = ?
         ORDER BY ts.composite_score DESC
         LIMIT ?
         """,
-        [top_n],
+        [preferred_source, preferred_source, top_n],
     ).df()
     start_set = set(first_top["name"].tolist()) if not first_top.empty else set()
     end_set = set(last_top["name"].tolist()) if not last_top.empty else set()
@@ -363,6 +473,9 @@ def synthetic_data_active(conn) -> bool:
 
 
 def theme_history_last_n_snapshots(conn, theme_id: int, snapshot_limit: int = 14) -> pd.DataFrame:
+    preferred_source = preferred_theme_snapshot_source(conn)
+    if not preferred_source:
+        return pd.DataFrame()
     return conn.execute(
         """
         SELECT ts.run_id, ts.snapshot_time, ts.theme_id,
@@ -371,14 +484,18 @@ def theme_history_last_n_snapshots(conn, theme_id: int, snapshot_limit: int = 14
                ts.composite_score, ts.snapshot_source
         FROM theme_snapshots ts
         WHERE ts.theme_id = ?
+          AND ts.snapshot_source = ?
         ORDER BY ts.snapshot_time DESC
         LIMIT ?
         """,
-        [theme_id, snapshot_limit],
+        [theme_id, preferred_source, snapshot_limit],
     ).df()
 
 
 def ticker_history_last_n_snapshots(conn, ticker: str, snapshot_limit: int = 14) -> pd.DataFrame:
+    preferred_source = preferred_ticker_snapshot_source(conn)
+    if not preferred_source:
+        return pd.DataFrame()
     return conn.execute(
         """
         SELECT s.run_id, s.ticker, s.price, s.perf_1w, s.perf_1m, s.perf_3m,
@@ -388,32 +505,43 @@ def ticker_history_last_n_snapshots(conn, ticker: str, snapshot_limit: int = 14)
         JOIN refresh_runs r ON r.run_id = s.run_id
         WHERE s.ticker = ?
           AND r.status IN ('success', 'partial')
+          AND s.snapshot_source = ?
         ORDER BY s.run_id DESC
         LIMIT ?
         """,
-        [ticker.strip().upper(), snapshot_limit],
+        [ticker.strip().upper(), preferred_source, snapshot_limit],
     ).df()
 
 
 def latest_theme_snapshots(conn) -> pd.DataFrame:
+    preferred_source = preferred_theme_snapshot_source(conn)
+    if not preferred_source:
+        return pd.DataFrame()
     return conn.execute(
         """
         SELECT *
         FROM theme_snapshots
+        WHERE snapshot_source = ?
         QUALIFY ROW_NUMBER() OVER (PARTITION BY theme_id ORDER BY snapshot_time DESC, run_id DESC) = 1
-        """
+        """,
+        [preferred_source],
     ).df()
 
 
 def latest_ticker_snapshots(conn) -> pd.DataFrame:
+    preferred_source = preferred_ticker_snapshot_source(conn)
+    if not preferred_source:
+        return pd.DataFrame()
     return conn.execute(
         """
         SELECT s.*, r.finished_at AS snapshot_time
         FROM ticker_snapshots s
         JOIN refresh_runs r ON r.run_id = s.run_id
         WHERE r.status IN ('success', 'partial')
+          AND s.snapshot_source = ?
         QUALIFY ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) = 1
-        """
+        """,
+        [preferred_source],
     ).df()
 
 
@@ -610,3 +738,79 @@ def baseline_status(conn, recent_limit: int = 50) -> pd.DataFrame:
         ,
         [recent_limit, recent_limit],
     ).df()
+
+
+def source_audit_status(conn, recent_limit: int = 50) -> pd.DataFrame:
+    preferred_theme = preferred_theme_snapshot_source(conn)
+    preferred_ticker = preferred_ticker_snapshot_source(conn)
+
+    recent_theme_sources = conn.execute(
+        """
+        SELECT COALESCE(STRING_AGG(snapshot_source, ', ' ORDER BY snapshot_source), '')
+        FROM (
+            SELECT DISTINCT snapshot_source
+            FROM (
+                SELECT snapshot_source
+                FROM theme_snapshots
+                ORDER BY snapshot_time DESC, run_id DESC
+                LIMIT ?
+            )
+        )
+        """,
+        [recent_limit],
+    ).fetchone()[0]
+    recent_ticker_sources = conn.execute(
+        """
+        SELECT COALESCE(STRING_AGG(snapshot_source, ', ' ORDER BY snapshot_source), '')
+        FROM (
+            SELECT DISTINCT snapshot_source
+            FROM (
+                SELECT s.snapshot_source
+                FROM ticker_snapshots s
+                JOIN refresh_runs r ON r.run_id = s.run_id
+                WHERE r.status IN ('success', 'partial')
+                ORDER BY s.run_id DESC
+                LIMIT ?
+            )
+        )
+        """,
+        [recent_limit],
+    ).fetchone()[0]
+
+    latest_theme_view = latest_theme_snapshots(conn)
+    latest_ticker_view = latest_ticker_snapshots(conn)
+    latest_theme_view_sources = ", ".join(sorted(set(latest_theme_view["snapshot_source"].dropna().astype(str).tolist()))) if not latest_theme_view.empty and "snapshot_source" in latest_theme_view.columns else ""
+    latest_ticker_view_sources = ", ".join(sorted(set(latest_ticker_view["snapshot_source"].dropna().astype(str).tolist()))) if not latest_ticker_view.empty and "snapshot_source" in latest_ticker_view.columns else ""
+
+    def _mixed(text: str) -> bool:
+        return bool(text and "," in text)
+
+    theme_view_live_only = bool(preferred_theme == "live" and latest_theme_view_sources == "live")
+    ticker_view_live_only = bool(preferred_ticker == "live" and latest_ticker_view_sources == "live")
+    active_contamination = bool(
+        (preferred_theme == "live" and latest_theme_view_sources and latest_theme_view_sources != "live")
+        or (preferred_ticker == "live" and latest_ticker_view_sources and latest_ticker_view_sources != "live")
+    )
+    historical_residue_only = bool(
+        not active_contamination
+        and ((_mixed(recent_theme_sources) and preferred_theme == "live") or (_mixed(recent_ticker_sources) and preferred_ticker == "live"))
+    )
+
+    return pd.DataFrame(
+        [
+            {
+                "preferred_theme_source": preferred_theme,
+                "preferred_ticker_source": preferred_ticker,
+                "recent_theme_sources": recent_theme_sources or "",
+                "recent_ticker_sources": recent_ticker_sources or "",
+                "latest_theme_view_sources": latest_theme_view_sources or "",
+                "latest_ticker_view_sources": latest_ticker_view_sources or "",
+                "theme_history_mixed": _mixed(recent_theme_sources or ""),
+                "ticker_history_mixed": _mixed(recent_ticker_sources or ""),
+                "theme_current_live_only": theme_view_live_only,
+                "ticker_current_live_only": ticker_view_live_only,
+                "active_contamination": active_contamination,
+                "historical_residue_only": historical_residue_only,
+            }
+        ]
+    )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from .config import COMPOSITE_WEIGHTS
+from .queries import preferred_theme_snapshot_source
 
 
 METRIC_COLUMNS = [
@@ -89,6 +90,9 @@ def persist_theme_snapshot_for_run(conn, run_id: int) -> None:
 
 
 def compute_theme_rankings(conn) -> pd.DataFrame:
+    preferred_source = preferred_theme_snapshot_source(conn)
+    if not preferred_source:
+        return pd.DataFrame()
     rankings = conn.execute(
         """
         WITH ranked AS (
@@ -111,6 +115,7 @@ def compute_theme_rankings(conn) -> pd.DataFrame:
                 LAG(ts.composite_score) OVER (PARTITION BY ts.theme_id ORDER BY ts.run_id) AS prev_composite_score,
                 ROW_NUMBER() OVER (PARTITION BY ts.theme_id ORDER BY ts.run_id DESC) AS rn
             FROM theme_snapshots ts
+            WHERE ts.snapshot_source = ?
         )
         SELECT
             r.theme_id,
@@ -136,6 +141,7 @@ def compute_theme_rankings(conn) -> pd.DataFrame:
         JOIN themes t ON t.id = r.theme_id
         WHERE r.rn = 1
         ORDER BY composite_score DESC
-        """
+        """,
+        [preferred_source],
     ).df()
     return rankings
