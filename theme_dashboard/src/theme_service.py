@@ -26,10 +26,20 @@ def _normalize_ticker(ticker: str) -> str:
 
 
 def seed_if_needed(conn) -> bool:
-    if conn.execute("SELECT COUNT(*) FROM themes").fetchone()[0] > 0:
+    """Idempotent seed/backfill.
+
+    Seeds themes and membership when DB is empty, and also backfills membership if themes
+    exist but `theme_membership` is empty or partially missing.
+    """
+    themes_count = int(conn.execute("SELECT COUNT(*) FROM themes").fetchone()[0])
+    membership_count = int(conn.execute("SELECT COUNT(*) FROM theme_membership").fetchone()[0])
+
+    # Fast-path: DB already seeded with membership.
+    if themes_count > 0 and membership_count > 0:
         return False
 
     seed_themes = load_seed_file(SEED_PATH)
+    changed = False
     conn.execute("BEGIN TRANSACTION")
     try:
         for theme in seed_themes:
@@ -39,26 +49,37 @@ def seed_if_needed(conn) -> bool:
             category = _normalize_category(theme.get("category", "Uncategorized"))
             tickers = sorted({_normalize_ticker(t) for t in theme.get("tickers", []) if t and t.strip()})
 
-            # Seed payload can contain duplicate theme names; pre-check avoids unique-constraint churn.
-            existing = conn.execute("SELECT id FROM themes WHERE name = ?", [name]).fetchone()
+            # Build stable theme_name -> theme_id mapping via upsert-like logic.
+            existing = conn.execute("SELECT id, category FROM themes WHERE name = ?", [name]).fetchone()
             if existing:
                 theme_id = int(existing[0])
+                # Keep existing activation state; align category if seed differs.
+                if str(existing[1] or "") != category:
+                    conn.execute("UPDATE themes SET category = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [category, theme_id])
+                    changed = True
             else:
                 theme_id = conn.execute(
                     "INSERT INTO themes(name, category, is_active) VALUES (?, ?, TRUE) RETURNING id",
                     [name, category],
                 ).fetchone()[0]
+                changed = True
 
             for ticker in tickers:
+                before = conn.execute(
+                    "SELECT 1 FROM theme_membership WHERE theme_id = ? AND ticker = ? LIMIT 1",
+                    [theme_id, ticker],
+                ).fetchone()
                 conn.execute(
                     "INSERT OR IGNORE INTO theme_membership(theme_id, ticker) VALUES (?, ?)",
                     [theme_id, ticker],
                 )
+                if before is None:
+                    changed = True
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
-    return True
+    return changed
 
 
 def list_themes(conn, active_only: bool = False) -> pd.DataFrame:

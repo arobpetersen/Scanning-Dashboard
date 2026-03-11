@@ -10,6 +10,7 @@ from src.leaderboard_utils import build_window_leaderboard
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
 from src.queries import theme_history_window
 from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success
+from src.theme_service import seed_if_needed
 from src.provider_live import LiveProvider
 
 
@@ -206,6 +207,33 @@ class TestMetricFormattingAndReturnSafety(unittest.TestCase):
 
     def test_live_calc_return_returns_none_when_history_insufficient(self):
         self.assertIsNone(LiveProvider._calc_return([1, 2, 3], 5))
+
+
+class TestThemeSeedBackfill(unittest.TestCase):
+    @patch("src.theme_service.load_seed_file")
+    def test_seed_backfills_membership_when_themes_exist(self, mock_load_seed):
+        mock_load_seed.return_value = [
+            {"name": "AI", "category": "Tech", "tickers": ["NVDA", "MSFT"]},
+            {"name": "Energy", "category": "Macro", "tickers": ["XOM"]},
+        ]
+
+        conn = duckdb.connect(":memory:")
+        conn.execute("create sequence if not exists themes_id_seq")
+        conn.execute("create table themes(id bigint primary key default nextval('themes_id_seq'), name varchar unique, category varchar, is_active boolean default true, created_at timestamp default current_timestamp, updated_at timestamp default current_timestamp)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+
+        conn.execute("insert into themes(name, category, is_active) values ('AI','Tech', true)")
+        changed = seed_if_needed(conn)
+
+        self.assertTrue(changed)
+        members = conn.execute("select t.name, m.ticker from theme_membership m join themes t on t.id=m.theme_id order by t.name, m.ticker").fetchall()
+        self.assertEqual(members, [("AI", "MSFT"), ("AI", "NVDA"), ("Energy", "XOM")])
+
+        changed_again = seed_if_needed(conn)
+        self.assertFalse(changed_again)
+        members_again = conn.execute("select t.name, m.ticker from theme_membership m join themes t on t.id=m.theme_id order by t.name, m.ticker").fetchall()
+        self.assertEqual(members_again, members)
+        conn.close()
 
 
 if __name__ == "__main__":
