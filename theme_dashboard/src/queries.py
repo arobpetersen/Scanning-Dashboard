@@ -3,6 +3,19 @@ from __future__ import annotations
 import pandas as pd
 
 
+CORE_TABLES = [
+    "themes",
+    "theme_membership",
+    "refresh_runs",
+    "ticker_snapshots",
+    "theme_snapshots",
+    "refresh_failures",
+    "refresh_run_tickers",
+    "symbol_refresh_status",
+    "theme_suggestions",
+]
+
+
 def last_refresh_run(conn) -> pd.DataFrame:
     return conn.execute("SELECT * FROM refresh_runs ORDER BY run_id DESC LIMIT 1").df()
 
@@ -24,32 +37,69 @@ def latest_completed_runs(conn, limit: int = 2) -> pd.DataFrame:
     ).df()
 
 
-def latest_completed_run_id(conn) -> int | None:
-    runs = latest_completed_runs(conn, limit=1)
-    if runs.empty:
-        return None
-    return int(runs.iloc[0]["run_id"])
-
-
 def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
-    run_id = latest_completed_run_id(conn)
-    if run_id is None:
+    latest_run = latest_completed_runs(conn, limit=1)
+    if latest_run.empty:
         return conn.execute(
             "SELECT ticker FROM theme_membership WHERE theme_id = ? ORDER BY ticker", [theme_id]
         ).df()
 
+    latest_refresh_time = latest_run.iloc[0]["finished_at"]
+
     return conn.execute(
         """
-        SELECT m.ticker, s.price, s.perf_1w, s.perf_1m, s.perf_3m,
-               s.market_cap, s.avg_volume, s.short_interest_pct, s.float_shares,
-               s.adr_pct, s.last_updated
+        WITH completed_snapshots AS (
+            SELECT
+                s.ticker,
+                s.price,
+                s.perf_1w,
+                s.perf_1m,
+                s.perf_3m,
+                s.market_cap,
+                s.avg_volume,
+                s.short_interest_pct,
+                s.float_shares,
+                s.adr_pct,
+                s.last_updated,
+                r.finished_at AS snapshot_time,
+                ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) AS rn
+            FROM ticker_snapshots s
+            JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE r.status IN ('success', 'partial')
+        ),
+        latest_nonnull_market_caps AS (
+            SELECT
+                s.ticker,
+                s.market_cap,
+                ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) AS rn
+            FROM ticker_snapshots s
+            JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE r.status IN ('success', 'partial')
+              AND s.market_cap IS NOT NULL
+        )
+        SELECT
+            m.ticker,
+            cs.price,
+            cs.perf_1w,
+            cs.perf_1m,
+            cs.perf_3m,
+            COALESCE(cs.market_cap, lmc.market_cap) AS market_cap,
+            cs.avg_volume,
+            cs.short_interest_pct,
+            cs.float_shares,
+            cs.adr_pct,
+            cs.last_updated,
+            cs.snapshot_time,
+            ? AS latest_refresh_time
         FROM theme_membership m
-        LEFT JOIN ticker_snapshots s
-          ON m.ticker = s.ticker AND s.run_id = ?
+        LEFT JOIN completed_snapshots cs
+          ON m.ticker = cs.ticker AND cs.rn = 1
+        LEFT JOIN latest_nonnull_market_caps lmc
+          ON m.ticker = lmc.ticker AND lmc.rn = 1
         WHERE m.theme_id = ?
         ORDER BY m.ticker
         """,
-        [run_id, theme_id],
+        [latest_refresh_time, theme_id],
     ).df()
 
 
@@ -310,3 +360,253 @@ def synthetic_data_active(conn) -> bool:
         """
     ).fetchone()
     return bool(row and row[0] and int(row[0]) > 0)
+
+
+def theme_history_last_n_snapshots(conn, theme_id: int, snapshot_limit: int = 14) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT ts.run_id, ts.snapshot_time, ts.theme_id,
+               ts.ticker_count, ts.avg_1w, ts.avg_1m, ts.avg_3m,
+               ts.positive_1w_breadth_pct, ts.positive_1m_breadth_pct, ts.positive_3m_breadth_pct,
+               ts.composite_score, ts.snapshot_source
+        FROM theme_snapshots ts
+        WHERE ts.theme_id = ?
+        ORDER BY ts.snapshot_time DESC
+        LIMIT ?
+        """,
+        [theme_id, snapshot_limit],
+    ).df()
+
+
+def ticker_history_last_n_snapshots(conn, ticker: str, snapshot_limit: int = 14) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT s.run_id, s.ticker, s.price, s.perf_1w, s.perf_1m, s.perf_3m,
+               s.market_cap, s.avg_volume, s.last_updated,
+               r.finished_at AS snapshot_time, s.snapshot_source
+        FROM ticker_snapshots s
+        JOIN refresh_runs r ON r.run_id = s.run_id
+        WHERE s.ticker = ?
+          AND r.status IN ('success', 'partial')
+        ORDER BY s.run_id DESC
+        LIMIT ?
+        """,
+        [ticker.strip().upper(), snapshot_limit],
+    ).df()
+
+
+def latest_theme_snapshots(conn) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT *
+        FROM theme_snapshots
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY theme_id ORDER BY snapshot_time DESC, run_id DESC) = 1
+        """
+    ).df()
+
+
+def latest_ticker_snapshots(conn) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT s.*, r.finished_at AS snapshot_time
+        FROM ticker_snapshots s
+        JOIN refresh_runs r ON r.run_id = s.run_id
+        WHERE r.status IN ('success', 'partial')
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) = 1
+        """
+    ).df()
+
+
+def themes_dimension(conn) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT
+            id AS theme_id,
+            name AS theme_name,
+            category,
+            is_active
+        FROM themes
+        ORDER BY name
+        """
+    ).df()
+
+
+def theme_snapshot_history_recent(conn, snapshot_limit: int = 14) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT
+            ts.theme_id,
+            ts.snapshot_time,
+            ts.run_id,
+            ts.ticker_count,
+            ts.avg_1w,
+            ts.avg_1m,
+            ts.avg_3m,
+            ts.positive_1w_breadth_pct,
+            ts.positive_1m_breadth_pct,
+            ts.positive_3m_breadth_pct,
+            ts.composite_score,
+            ts.snapshot_source
+        FROM theme_snapshots ts
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY ts.theme_id
+            ORDER BY ts.snapshot_time DESC, ts.run_id DESC
+        ) <= ?
+        ORDER BY ts.theme_id, ts.snapshot_time DESC, ts.run_id DESC
+        """,
+        [snapshot_limit],
+    ).df()
+
+
+def tickers_dimension(conn) -> pd.DataFrame:
+    return conn.execute(
+        """
+        WITH latest_completed AS (
+            SELECT
+                s.ticker,
+                s.avg_volume,
+                s.last_updated,
+                r.finished_at AS latest_snapshot_time,
+                ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) AS rn
+            FROM ticker_snapshots s
+            JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE r.status IN ('success', 'partial')
+        ),
+        latest_nonnull_caps AS (
+            SELECT
+                s.ticker,
+                s.market_cap,
+                ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) AS rn
+            FROM ticker_snapshots s
+            JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE r.status IN ('success', 'partial')
+              AND s.market_cap IS NOT NULL
+        )
+        SELECT
+            lc.ticker,
+            lmc.market_cap AS latest_market_cap,
+            lc.avg_volume AS latest_avg_volume,
+            lc.last_updated AS latest_last_updated,
+            lc.latest_snapshot_time
+        FROM latest_completed lc
+        LEFT JOIN latest_nonnull_caps lmc
+          ON lc.ticker = lmc.ticker AND lmc.rn = 1
+        WHERE lc.rn = 1
+        ORDER BY lc.ticker
+        """
+    ).df()
+
+
+def ticker_snapshot_history_recent(conn, snapshot_limit: int = 14) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT
+            s.ticker,
+            r.finished_at AS snapshot_time,
+            s.run_id,
+            s.price,
+            s.perf_1w,
+            s.perf_1m,
+            s.perf_3m,
+            s.market_cap,
+            s.avg_volume,
+            s.last_updated,
+            s.snapshot_source
+        FROM ticker_snapshots s
+        JOIN refresh_runs r ON r.run_id = s.run_id
+        WHERE r.status IN ('success', 'partial')
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY s.ticker
+            ORDER BY s.run_id DESC
+        ) <= ?
+        ORDER BY s.ticker, s.run_id DESC
+        """,
+        [snapshot_limit],
+    ).df()
+
+
+def core_table_status(conn) -> pd.DataFrame:
+    expected = pd.DataFrame({"table_name": CORE_TABLES})
+    existing = conn.execute(
+        """
+        SELECT table_name
+        FROM duckdb_tables()
+        WHERE schema_name = 'main'
+        """
+    ).df()
+    out = expected.merge(existing.assign(exists=True), on="table_name", how="left")
+    out["exists"] = out["exists"].fillna(False)
+    return out
+
+
+def baseline_status(conn, recent_limit: int = 50) -> pd.DataFrame:
+    return conn.execute(
+        """
+        WITH last_run AS (
+            SELECT run_id, provider, status, finished_at
+            FROM refresh_runs
+            ORDER BY run_id DESC
+            LIMIT 1
+        ),
+        latest_theme AS (
+            SELECT MAX(snapshot_time) AS latest_theme_snapshot_time,
+                   COUNT(DISTINCT snapshot_time) AS theme_snapshot_sets
+            FROM theme_snapshots
+        ),
+        latest_ticker AS (
+            SELECT MAX(r.finished_at) AS latest_ticker_snapshot_time,
+                   COUNT(DISTINCT r.finished_at) AS ticker_snapshot_sets
+            FROM ticker_snapshots s
+            JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE r.status IN ('success', 'partial')
+        ),
+        recent_theme_sources AS (
+            SELECT STRING_AGG(snapshot_source, ', ' ORDER BY snapshot_source) AS recent_theme_sources
+            FROM (
+                SELECT DISTINCT snapshot_source
+                FROM (
+                    SELECT snapshot_source
+                    FROM theme_snapshots
+                    ORDER BY snapshot_time DESC, run_id DESC
+                    LIMIT ?
+                )
+            )
+        ),
+        recent_ticker_sources AS (
+            SELECT STRING_AGG(snapshot_source, ', ' ORDER BY snapshot_source) AS recent_ticker_sources
+            FROM (
+                SELECT DISTINCT snapshot_source
+                FROM (
+                    SELECT s.snapshot_source
+                    FROM ticker_snapshots s
+                    JOIN refresh_runs r ON r.run_id = s.run_id
+                    WHERE r.status IN ('success', 'partial')
+                    ORDER BY s.run_id DESC
+                    LIMIT ?
+                )
+            )
+        )
+        SELECT
+            (SELECT COUNT(*) FROM themes) AS themes_count,
+            (SELECT COUNT(*) FROM ticker_snapshots) AS ticker_snapshot_rows,
+            (SELECT COUNT(*) FROM theme_snapshots) AS theme_snapshot_rows,
+            (SELECT COUNT(DISTINCT run_id) FROM theme_snapshots) AS runs_with_theme_snapshots,
+            lr.run_id AS latest_run_id,
+            lr.provider AS latest_run_provider,
+            lr.status AS latest_run_status,
+            lr.finished_at AS latest_run_finished_at,
+            lt.latest_theme_snapshot_time,
+            lk.latest_ticker_snapshot_time,
+            lt.theme_snapshot_sets,
+            lk.ticker_snapshot_sets,
+            COALESCE(rts.recent_theme_sources, '') AS recent_theme_sources,
+            COALESCE(rks.recent_ticker_sources, '') AS recent_ticker_sources
+        FROM latest_theme lt
+        CROSS JOIN latest_ticker lk
+        CROSS JOIN recent_theme_sources rts
+        CROSS JOIN recent_ticker_sources rks
+        LEFT JOIN last_run lr ON TRUE
+        """
+        ,
+        [recent_limit, recent_limit],
+    ).df()

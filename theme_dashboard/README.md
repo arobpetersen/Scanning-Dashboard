@@ -1,4 +1,4 @@
-# Thematic Stock Dashboard (Local v1)
+# Scanning Dashboard 2.0 Baseline
 
 A local-first Streamlit app for **objective, formula-based theme ranking** and theme registry management.
 
@@ -20,6 +20,7 @@ theme_dashboard/
   README.md
   themes_seed_structured.json
   /src
+    airtable_export.py
     config.py
     database.py
     models.py
@@ -39,11 +40,32 @@ theme_dashboard/
     5_Theme_Health.py
     6_Historical_Performance.py
     7_AI_Proposal_Assistant.py
+  run_airtable_export.py
 ```
 
-## Setup (foolproof)
+## Runtime setup
 
-Run these commands from repo root (`/workspace/Scanning-Dashboard`):
+Required runtime dependencies are listed in `requirements.txt`:
+- `streamlit`
+- `pandas`
+- `duckdb`
+- `requests`
+
+### Windows / PowerShell
+
+Run from repo root:
+
+```powershell
+cd theme_dashboard
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+### macOS / Linux / Unix shell
+
+Run from repo root:
 
 ```bash
 cd theme_dashboard
@@ -53,7 +75,20 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Open the URL Streamlit prints (normally `http://localhost:8501`).
+Open the URL Streamlit prints, typically `http://localhost:8501`.
+
+## Dev / test workflow
+
+No separate dev dependency file is required for the current baseline.
+If you want to run the existing tests, use the same environment after installing `requirements.txt`:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests
+```
+
+```bash
+.venv/bin/python -m pytest tests
+```
 
 ## Massive live provider setup
 
@@ -78,6 +113,222 @@ If `MASSIVE_API_KEY` is not set and you choose `live`, the app shows a warning a
 ## Ongoing source of truth
 - **DuckDB is the ongoing source of truth** after initialization.
 - The seed JSON is only a bootstrap input file.
+- Airtable export, when used, is a secondary review/browsing layer only and does not replace DuckDB.
+
+## Baseline verification
+
+Run the lightweight baseline check to verify the current branch is in a usable state without repairing anything:
+
+```powershell
+.\.venv\Scripts\python.exe run_baseline_check.py
+```
+
+```bash
+.venv/bin/python run_baseline_check.py
+```
+
+The command verifies:
+- DuckDB file presence and connection
+- core table presence
+- theme presence after bootstrap/seed
+- latest refresh readability
+- ticker/theme snapshot counts
+- whether history is still shallow
+- whether recent snapshots are `live`, `mock`, `synthetic_backfill`, or mixed
+
+## Airtable export (bounded, manual-first)
+- Purpose: send a bounded recent-history slice from DuckDB into Airtable for browsing, filtering, and manual interaction.
+- Scope is intentionally narrow:
+  - `Themes`
+  - `Theme Snapshot History`
+  - `Tickers`
+  - `Ticker Snapshot History`
+- Not exported:
+  - full-database sync
+  - always-on background sync
+  - DuckDB ownership migration
+- Default bounded window:
+  - last `14` snapshot points per theme
+  - last `14` snapshot points per ticker
+- This limit is configurable with `AIRTABLE_EXPORT_SNAPSHOT_LIMIT` or `--snapshot-limit`.
+
+### Airtable schema target
+
+Current implementation note:
+- the export runner does **not** create Airtable tables or fields automatically
+- first write requires the target base schema to already exist
+- `--validate-only` checks Airtable auth plus expected table/field presence before any write
+
+`Themes`
+- `theme_id`
+- `theme_name`
+- `category`
+- `is_active`
+Recommended field types:
+- `theme_id`: Number
+- `theme_name`: Single line text
+- `category`: Single line text
+- `is_active`: Checkbox
+
+`Theme Snapshot History`
+- `export_key`
+- `theme_id`
+- `snapshot_time`
+- `run_id`
+- `ticker_count`
+- `avg_1w`
+- `avg_1m`
+- `avg_3m`
+- `positive_1w_breadth_pct`
+- `positive_1m_breadth_pct`
+- `positive_3m_breadth_pct`
+- `composite_score`
+- `snapshot_source`
+Recommended field types:
+- `export_key`: Single line text
+- `theme_id`: Number
+- `snapshot_time`: Date with time
+- `run_id`: Number
+- `ticker_count`: Number
+- `avg_1w`: Number
+- `avg_1m`: Number
+- `avg_3m`: Number
+- `positive_1w_breadth_pct`: Percent
+- `positive_1m_breadth_pct`: Percent
+- `positive_3m_breadth_pct`: Percent
+- `composite_score`: Number
+- `snapshot_source`: Single line text
+
+`Tickers`
+- `ticker`
+- `latest_market_cap`
+- `latest_avg_volume`
+- `latest_last_updated`
+- `latest_snapshot_time`
+Recommended field types:
+- `ticker`: Single line text
+- `latest_market_cap`: Number
+- `latest_avg_volume`: Number
+- `latest_last_updated`: Date with time
+- `latest_snapshot_time`: Date with time
+
+`Ticker Snapshot History`
+- `export_key`
+- `ticker`
+- `snapshot_time`
+- `run_id`
+- `price`
+- `perf_1w`
+- `perf_1m`
+- `perf_3m`
+- `market_cap`
+- `avg_volume`
+- `last_updated`
+- `snapshot_source`
+Recommended field types:
+- `export_key`: Single line text
+- `ticker`: Single line text
+- `snapshot_time`: Date with time
+- `run_id`: Number
+- `price`: Number
+- `perf_1w`: Number
+- `perf_1m`: Number
+- `perf_3m`: Number
+- `market_cap`: Number
+- `avg_volume`: Number
+- `last_updated`: Date with time
+- `snapshot_source`: Single line text
+
+### Minimum manual Airtable setup
+1. Create or choose the destination Airtable base.
+2. Create these exact tables:
+   - `Themes`
+   - `Theme Snapshot History`
+   - `Tickers`
+   - `Ticker Snapshot History`
+3. Add the exact fields listed above to each table.
+4. Ensure the key fields exist exactly as named:
+   - `theme_id`
+   - `export_key`
+   - `ticker`
+5. Create a Personal Access Token and grant it access to the target base.
+6. Run `python run_airtable_export.py --validate-only` before the first write.
+
+### Duplicate prevention / sync strategy
+- Export is manual-first through `run_airtable_export.py`.
+- History rows use deterministic export keys:
+  - theme history: `theme:{theme_id}:run:{run_id}`
+  - ticker history: `ticker:{ticker}:run:{run_id}`
+- Dimension rows use stable natural keys:
+  - themes: `theme_id`
+  - tickers: `ticker`
+- Write mode performs lookup-by-key and then splits the bounded payload into:
+  - updates for existing records
+  - creates for missing records
+- This avoids append-only duplicate record spam while keeping the sync scope bounded to the recent export slice.
+
+### Airtable configuration
+Set these environment variables before write mode:
+
+```bash
+export AIRTABLE_API_KEY="your_airtable_api_key"
+export AIRTABLE_BASE_ID="appXXXXXXXXXXXXXX"
+```
+
+Optional table-name overrides:
+
+```bash
+export AIRTABLE_TABLE_THEMES="Themes"
+export AIRTABLE_TABLE_THEME_SNAPSHOT_HISTORY="Theme Snapshot History"
+export AIRTABLE_TABLE_TICKERS="Tickers"
+export AIRTABLE_TABLE_TICKER_SNAPSHOT_HISTORY="Ticker Snapshot History"
+export AIRTABLE_EXPORT_SNAPSHOT_LIMIT="14"
+```
+
+Authentication/scopes used by the current implementation:
+- authentication method: Airtable Personal Access Token (`AIRTABLE_API_KEY`)
+- required capabilities:
+  - record read
+  - record write
+  - base schema read (for preflight validation)
+- schema write/create is **not** used by this implementation
+
+### Manual run commands
+Dry-run only:
+
+```bash
+python run_airtable_export.py --dry-run
+```
+
+Dry-run with bounded preview sample:
+
+```bash
+python run_airtable_export.py --dry-run --snapshot-limit 14 --preview 2
+```
+
+Validate Airtable connection + schema only:
+
+```bash
+python run_airtable_export.py --validate-only
+```
+
+Actual Airtable write:
+
+```bash
+python run_airtable_export.py --write --snapshot-limit 14
+```
+
+What the runner does:
+- initializes DuckDB / seed state if needed
+- reads bounded datasets from DuckDB
+- builds Airtable-friendly payloads
+- prints counts and planned create/update actions
+- can validate Airtable base/table/field readiness before first write
+- writes only in `--write` mode when Airtable credentials are configured
+
+### Optional future chaining
+- This export layer is intentionally decoupled from refresh execution.
+- If you later want post-EOD export, call `python run_airtable_export.py --write` after `python run_eod_refresh.py` in your scheduler/script rather than embedding Airtable writes into core refresh logic.
 
 ## Historical snapshot behavior
 - Every refresh run writes ticker-level records to `ticker_snapshots` keyed by `run_id`.
@@ -110,6 +361,45 @@ If `MASSIVE_API_KEY` is not set and you choose `live`, the app shows a warning a
   - `adr_pct`
   - `market_cap` (if Massive reference data is unavailable for a ticker)
 - `avg_volume` is computed as simple mean of recent daily volumes (last 21 daily bars) from Massive aggregates.
+
+
+## Readability and timestamp semantics
+- Themes ticker table now renders human-readable values for:
+  - `market_cap` (e.g., `125.9B`)
+  - `avg_volume` (e.g., `55.8M`)
+  - `dollar_volume = price * avg_volume` (e.g., `405.6M`)
+  - adaptive `price` decimals based on price level
+  - `perf_1w` / `perf_1m` / `perf_3m` rounded to two decimals and shown as percentages
+- Timestamps are intentionally separated in Themes table:
+  - `market_data_time`: provider data timestamp (`ticker_snapshots.last_updated`)
+  - `snapshot_time`: when that ticker snapshot row was captured (`refresh_runs.finished_at` for the selected ticker row)
+  - `last_refresh_time`: latest completed refresh run timestamp
+- Missing nullable fields are shown as `—` instead of noisy `None` text.
+
+## Market cap behavior
+- Massive reference/profile fetching is controlled by `LIVE_FETCH_REFERENCE_ON_REFRESH` (default enabled).
+- When a live refresh row has missing `market_cap`, refresh flow carries forward the latest known cap per ticker when available.
+- Themes query path selects the latest completed snapshot per ticker, so market cap remains visible even when a ticker was not updated in the most recent partial run.
+
+## Historical collection framework (14+ trading days)
+- Snapshot tables remain append/history-oriented by `run_id` and `snapshot_time`.
+- Query helpers are available for recent-history and latest views:
+  - `theme_history_last_n_snapshots(..., snapshot_limit=14)`
+  - `ticker_history_last_n_snapshots(..., snapshot_limit=14)`
+  - `latest_theme_snapshots()` and `latest_ticker_snapshots()`
+- No pruning policy is enforced below 14 days; data is preserved for future analysis unless you add your own retention process.
+
+## End-of-day scheduled refresh framework (6:00 PM ET)
+- Added safe runner entrypoint: `python run_eod_refresh.py`
+- Behavior (default mode):
+  - runs only on weekdays
+  - runs only at/after 6:00 PM `America/New_York`
+  - skips if a `scheduled_eod` success/partial run already exists for that ET date
+- Manual override is always available:
+  - `python run_eod_refresh.py --force`
+- Intended usage with Task Scheduler/cron:
+  - schedule the command daily (e.g., 6:00 PM ET)
+  - runner handles weekday/time/duplicate protections idempotently
 
 ## Providers
 - `mock`: deterministic sample data for all tickers so the app is usable immediately.

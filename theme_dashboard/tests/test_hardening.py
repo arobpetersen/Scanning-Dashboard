@@ -1,17 +1,22 @@
+import tempfile
 import unittest
+from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import patch
 
 import duckdb
 import pandas as pd
 
+from src.fetch_data import run_refresh
 from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
 from src.leaderboard_utils import build_window_leaderboard
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
-from src.queries import theme_history_window
+from src.queries import latest_ticker_snapshots, theme_history_last_n_snapshots, theme_history_window, theme_ticker_metrics, ticker_history_last_n_snapshots
 from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success
 from src.theme_service import seed_if_needed
 from src.provider_live import LiveProvider
+from src.eod_refresh import has_eod_run_for_date, run_scheduled_eod_refresh
 
 
 class TestLeaderboardUtils(unittest.TestCase):
@@ -204,7 +209,7 @@ class TestMetricFormattingAndReturnSafety(unittest.TestCase):
         out = format_theme_ticker_table(df)
         self.assertEqual(out.iloc[0]["market_cap"], "125.9B")
         self.assertEqual(out.iloc[0]["avg_volume"], "55.8M")
-        self.assertEqual(out.iloc[0]["dollar_volume"], "565.0M")
+        self.assertEqual(out.iloc[0]["dollar_volume"], "565.1M")
         self.assertEqual(float(out.iloc[0]["perf_1w"]), 1.23)
         self.assertTrue(str(out.iloc[0]["last_updated"]).startswith("Mar"))
 
@@ -241,3 +246,193 @@ class TestThemeSeedBackfill(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBootstrapAndHistoryFramework(unittest.TestCase):
+    def test_init_db_bootstrap_after_file_delete_and_seed_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test_theme_dashboard.duckdb"
+            with patch("src.database.DB_PATH", db_path), patch("src.config.DB_PATH", db_path):
+                from src.database import get_conn, init_db
+
+                init_db()
+                self.assertTrue(db_path.exists())
+                with get_conn() as conn:
+                    first_seed = seed_if_needed(conn)
+                    second_seed = seed_if_needed(conn)
+                    self.assertIn(first_seed, [True, False])
+                    self.assertFalse(second_seed)
+
+                db_path.unlink()
+                init_db()
+                with get_conn() as conn:
+                    themes_count = int(conn.execute("select count(*) from themes").fetchone()[0])
+                    self.assertGreater(themes_count, 0)
+
+    def test_history_helpers_return_recent_snapshots_and_latest(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint, snapshot_time timestamp, theme_id bigint, ticker_count bigint, avg_1w double, avg_1m double, avg_3m double,
+                positive_1w_breadth_pct double, positive_1m_breadth_pct double, positive_3m_breadth_pct double,
+                composite_score double, snapshot_source varchar
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'AI', 'Tech')")
+        conn.execute("insert into theme_membership values (1, 'NVDA')")
+
+        for i in range(1, 17):
+            ts = f"2026-03-{i:02d} 22:00:00"
+            conn.execute("insert into refresh_runs values (?, 'success', ?)", [i, ts])
+            conn.execute(
+                "insert into ticker_snapshots values (?, 'NVDA', 100 + ?, 1, 2, 3, 1000000000 + ?, 1000000 + ?, null, null, null, ?, 'live')",
+                [i, i, i, i, ts],
+            )
+            conn.execute(
+                "insert into theme_snapshots values (?, ?, 1, 1, 1, 2, 3, 50, 60, 70, 10 + ?, 'live')",
+                [i, ts, i],
+            )
+
+        recent_theme = theme_history_last_n_snapshots(conn, 1, snapshot_limit=14)
+        recent_ticker = ticker_history_last_n_snapshots(conn, "nvda", snapshot_limit=14)
+        latest_ticker = latest_ticker_snapshots(conn)
+
+        self.assertEqual(len(recent_theme), 14)
+        self.assertEqual(len(recent_ticker), 14)
+        self.assertEqual(int(latest_ticker.iloc[0]["run_id"]), 16)
+        conn.close()
+
+    def test_theme_ticker_metrics_uses_latest_available_snapshot_for_market_cap(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into theme_membership values (1, 'ABC')")
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-10 22:00:00')")
+        conn.execute("insert into refresh_runs values (2, 'partial', '2026-03-11 22:00:00')")
+        conn.execute("insert into ticker_snapshots values (1, 'ABC', 10, 1, 2, 3, 125900000000, 50000000, null, null, null, '2026-03-10 21:00:00')")
+        conn.execute("insert into ticker_snapshots values (2, 'ABC', 11, 1.5, 2.5, 3.5, null, 51000000, null, null, null, '2026-03-11 21:00:00')")
+
+        out = theme_ticker_metrics(conn, 1)
+        self.assertEqual(float(out.iloc[0]["market_cap"]), 125900000000)
+        formatted = format_theme_ticker_table(out)
+        self.assertEqual(formatted.iloc[0]["market_cap"], "125.9B")
+        self.assertEqual(str(out.iloc[0]["latest_refresh_time"]), "2026-03-11 22:00:00")
+        conn.close()
+
+    def test_run_refresh_backfills_market_cap_from_latest_nonnull_snapshot(self):
+        class NullCapProvider:
+            name = "live"
+
+            def fetch_ticker_data(self, tickers):
+                return (
+                    pd.DataFrame(
+                        [
+                            {
+                                "ticker": "ABC",
+                                "price": 11.0,
+                                "perf_1w": 1.5,
+                                "perf_1m": 2.5,
+                                "perf_3m": 3.5,
+                                "market_cap": None,
+                                "avg_volume": 51000000.0,
+                                "short_interest_pct": None,
+                                "float_shares": None,
+                                "adr_pct": None,
+                                "last_updated": "2026-03-11 21:00:00",
+                            }
+                        ]
+                    ),
+                    [],
+                )
+
+            def get_call_accounting(self):
+                return {"api_call_count": 1, "endpoint_counts": {"aggs_daily": 1}}
+
+        db_path = Path(__file__).resolve().parent / "test_market_cap_refresh.duckdb"
+        if db_path.exists():
+            db_path.unlink()
+        try:
+            with patch("src.database.DB_PATH", db_path), patch("src.config.DB_PATH", db_path):
+                from src.database import get_conn, init_db
+
+                init_db()
+                with get_conn() as conn:
+                    conn.execute("delete from themes")
+                    conn.execute("delete from theme_membership")
+                    conn.execute("insert into themes(id, name, category, is_active) values (1, 'Test Theme', 'Tech', true)")
+                    conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'ABC')")
+                    prior_run_id = conn.execute(
+                        """
+                        insert into refresh_runs(provider, started_at, finished_at, status, ticker_count, success_count, failure_count)
+                        values ('live', '2026-03-10 20:00:00', '2026-03-10 22:00:00', 'success', 1, 1, 0)
+                        returning run_id
+                        """
+                    ).fetchone()[0]
+                    conn.execute(
+                        """
+                        insert into ticker_snapshots(
+                            run_id, ticker, price, perf_1w, perf_1m, perf_3m,
+                            market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated, snapshot_source
+                        )
+                        values (?, 'ABC', 10, 1, 2, 3, 125900000000, 50000000, null, null, null, '2026-03-10 21:00:00', 'live')
+                        """,
+                        [prior_run_id],
+                    )
+
+                    with patch("src.fetch_data.get_provider", return_value=NullCapProvider()), patch(
+                        "src.fetch_data.persist_theme_snapshot_for_run", return_value=None
+                    ):
+                        run_id = run_refresh(conn, provider_name="live", tickers=["ABC"])
+
+                    stored = conn.execute(
+                        "select market_cap from ticker_snapshots where run_id = ? and ticker = 'ABC'",
+                        [run_id],
+                    ).fetchone()
+                    self.assertIsNotNone(stored)
+                    self.assertEqual(float(stored[0]), 125900000000)
+        finally:
+            if db_path.exists():
+                db_path.unlink()
+
+
+class TestEODRefreshFramework(unittest.TestCase):
+    def test_has_eod_run_for_date_and_force_runner(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "create table refresh_runs(run_id bigint, status varchar, finished_at timestamp, scope_type varchar)"
+        )
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-10 22:30:00', 'scheduled_eod')")
+
+        dt_et = datetime(2026, 3, 10, 19, 0, tzinfo=UTC)
+        self.assertTrue(has_eod_run_for_date(conn, dt_et))
+
+        with patch("src.eod_refresh.active_ticker_universe", return_value=["AAPL"]), patch("src.eod_refresh.run_refresh", return_value=42) as mock_run:
+            run_id = run_scheduled_eod_refresh(conn, provider_name="live", force=True)
+            self.assertEqual(run_id, 42)
+            mock_run.assert_called_once()
+        conn.close()

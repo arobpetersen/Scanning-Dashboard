@@ -12,7 +12,14 @@ LIVE_RATE_LIMIT_STOP_THRESHOLD = 5
 MASSIVE_API_KEY_ENV = "MASSIVE_API_KEY"
 LIVE_QUOTE_PROFILE_SOURCE = "massive"
 LIVE_HISTORICAL_SOURCE = "massive"
-LIVE_FETCH_REFERENCE_ON_REFRESH = False
+LIVE_FETCH_REFERENCE_ON_REFRESH = os.getenv("LIVE_FETCH_REFERENCE_ON_REFRESH", "1").strip().lower() not in {"0", "false", "no"}
+AIRTABLE_API_KEY_ENV = "AIRTABLE_API_KEY"
+AIRTABLE_BASE_ID_ENV = "AIRTABLE_BASE_ID"
+AIRTABLE_TABLE_THEMES = os.getenv("AIRTABLE_TABLE_THEMES", "Themes").strip() or "Themes"
+AIRTABLE_TABLE_THEME_SNAPSHOT_HISTORY = os.getenv("AIRTABLE_TABLE_THEME_SNAPSHOT_HISTORY", "Theme Snapshot History").strip() or "Theme Snapshot History"
+AIRTABLE_TABLE_TICKERS = os.getenv("AIRTABLE_TABLE_TICKERS", "Tickers").strip() or "Tickers"
+AIRTABLE_TABLE_TICKER_SNAPSHOT_HISTORY = os.getenv("AIRTABLE_TABLE_TICKER_SNAPSHOT_HISTORY", "Ticker Snapshot History").strip() or "Ticker Snapshot History"
+AIRTABLE_EXPORT_SNAPSHOT_LIMIT = int(os.getenv("AIRTABLE_EXPORT_SNAPSHOT_LIMIT", "14").strip() or "14")
 OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
 AI_MODEL = "gpt-5-mini"
 AI_MAX_PROPOSALS = 8
@@ -32,6 +39,16 @@ COMPOSITE_WEIGHTS = {
 
 def massive_api_key() -> str | None:
     value = os.getenv(MASSIVE_API_KEY_ENV, "").strip()
+    return value or None
+
+
+def airtable_api_key() -> str | None:
+    value = os.getenv(AIRTABLE_API_KEY_ENV, "").strip()
+    return value or None
+
+
+def airtable_base_id() -> str | None:
+    value = os.getenv(AIRTABLE_BASE_ID_ENV, "").strip()
     return value or None
 
 
