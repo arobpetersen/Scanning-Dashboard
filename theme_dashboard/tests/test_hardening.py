@@ -185,6 +185,9 @@ class TestMetricFormattingAndReturnSafety(unittest.TestCase):
         self.assertEqual(human_readable_number(50000000), "50.0M")
         self.assertEqual(human_readable_number(55825862), "55.8M")
 
+    def test_short_timestamp_is_cross_platform(self):
+        self.assertEqual(short_timestamp("2026-03-09T21:00:00Z"), "Mar 9 21:00")
+
     def test_theme_ticker_table_adds_dollar_volume_and_formats_time(self):
         df = pd.DataFrame([
             {
