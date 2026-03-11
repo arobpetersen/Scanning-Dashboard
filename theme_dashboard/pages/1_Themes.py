@@ -5,6 +5,7 @@ from src.leaderboard_utils import build_window_leaderboard
 from src.metric_formatting import display_or_dash, format_theme_ticker_table
 from src.momentum_engine import compute_theme_momentum
 from src.queries import theme_snapshot_history, theme_ticker_metrics
+from src.theme_selection import describe_selection_source, resolve_theme_selection
 from src.theme_service import (
     add_ticker,
     create_theme,
@@ -31,6 +32,7 @@ if themes.empty:
 
 SELECTED_THEME_ID_KEY = "selected_theme_id"
 SELECTED_THEME_LABEL_KEY = "explore_theme"
+SELECTED_THEME_SOURCE_KEY = "selected_theme_source"
 
 
 def _extract_selected_row(event) -> int | None:
@@ -76,8 +78,19 @@ def _build_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tu
     return ranked[["rank", "theme_id", "theme", "category", metric_label, "momentum_score", "breadth_1m"]], None
 
 
+def _set_theme_selection(theme_id: int, label: str, source: str) -> None:
+    st.session_state[SELECTED_THEME_ID_KEY] = int(theme_id)
+    st.session_state[SELECTED_THEME_LABEL_KEY] = label
+    st.session_state[SELECTED_THEME_SOURCE_KEY] = source
 
-def _render_leaderboard(title: str, key_prefix: str, leaderboard_df):
+
+def _apply_dropdown_selection(id_by_label: dict[str, int]) -> None:
+    label = st.session_state.get(SELECTED_THEME_LABEL_KEY)
+    if label in id_by_label:
+        _set_theme_selection(int(id_by_label[str(label)]), str(label), "manual_dropdown")
+
+
+def _render_leaderboard(title: str, key_prefix: str, leaderboard_df, label_by_id: dict[int, str]):
     st.markdown(f"**{title}**")
     event = st.dataframe(
         leaderboard_df[["rank", "theme", "category", "performance", "momentum_score", "breadth_1m"]],
@@ -90,12 +103,35 @@ def _render_leaderboard(title: str, key_prefix: str, leaderboard_df):
 
     row_idx = _extract_selected_row(event)
     if row_idx is not None and 0 <= row_idx < len(leaderboard_df):
-        st.session_state[SELECTED_THEME_ID_KEY] = int(leaderboard_df.iloc[row_idx]["theme_id"])
+        picked_theme_id = int(leaderboard_df.iloc[row_idx]["theme_id"])
+        picked_label = label_by_id.get(
+            picked_theme_id,
+            f"{leaderboard_df.iloc[row_idx]['theme']} ({leaderboard_df.iloc[row_idx]['category']})",
+        )
+        _set_theme_selection(picked_theme_id, picked_label, key_prefix)
 
 
 explore_tab, manage_tab = st.tabs(["Explore", "Manage"])
 
 with explore_tab:
+    options = {f"{r['name']} ({r['category']})": int(r["id"]) for _, r in themes.iterrows()}
+    label_by_id = {v: k for k, v in options.items()}
+    id_by_label = dict(options)
+    fallback_theme_id = int(themes.iloc[0]["id"])
+    selected_theme_id, selected_theme_label = resolve_theme_selection(
+        st.session_state.get(SELECTED_THEME_ID_KEY),
+        st.session_state.get(SELECTED_THEME_LABEL_KEY),
+        label_by_id,
+        id_by_label,
+        fallback_theme_id,
+    )
+    if st.session_state.get(SELECTED_THEME_ID_KEY) != selected_theme_id:
+        st.session_state[SELECTED_THEME_ID_KEY] = selected_theme_id
+    if st.session_state.get(SELECTED_THEME_LABEL_KEY) != selected_theme_label:
+        st.session_state[SELECTED_THEME_LABEL_KEY] = selected_theme_label
+    if SELECTED_THEME_SOURCE_KEY not in st.session_state:
+        st.session_state[SELECTED_THEME_SOURCE_KEY] = "default"
+
     with get_conn() as conn:
         momentum_1w = compute_theme_momentum(conn, 7, top_n=20)
         momentum_1m = compute_theme_momentum(conn, 30, top_n=20)
@@ -106,33 +142,27 @@ with explore_tab:
     c1, c2 = st.columns(2)
     with c1:
         if lb1 is None:
-            st.warning(f"Top 10 Themes — 1W: {lb1_msg}")
+            st.warning(f"Top 10 Themes - 1W: {lb1_msg}")
         else:
-            _render_leaderboard("Top 10 Themes — 1W", "open_1w", lb1)
+            _render_leaderboard("Top 10 Themes - 1W", "top_1w", lb1, label_by_id)
     with c2:
         if lb2 is None:
-            st.warning(f"Top 10 Themes — 1M: {lb2_msg}")
+            st.warning(f"Top 10 Themes - 1M: {lb2_msg}")
         else:
-            _render_leaderboard("Top 10 Themes — 1M", "open_1m", lb2)
+            _render_leaderboard("Top 10 Themes - 1M", "top_1m", lb2, label_by_id)
 
     st.divider()
 
-    options = {f"{r['name']} ({r['category']})": int(r["id"]) for _, r in themes.iterrows()}
-    label_by_id = {v: k for k, v in options.items()}
-
-    default_theme_id = st.session_state.get(SELECTED_THEME_ID_KEY)
-    if default_theme_id not in label_by_id:
-        default_theme_id = int(themes.iloc[0]["id"])
-        st.session_state[SELECTED_THEME_ID_KEY] = default_theme_id
-
     labels = list(options.keys())
-    default_label = label_by_id[default_theme_id]
-    # Single source of truth: keep dropdown state synced with selected_theme_id (from table click or dropdown).
-    if st.session_state.get(SELECTED_THEME_LABEL_KEY) != default_label:
-        st.session_state[SELECTED_THEME_LABEL_KEY] = default_label
-    selection = st.selectbox("Choose theme", labels, key=SELECTED_THEME_LABEL_KEY)
-    theme_id = options[selection]
-    st.session_state[SELECTED_THEME_ID_KEY] = theme_id
+    selection = st.selectbox(
+        "Theme detail view",
+        labels,
+        key=SELECTED_THEME_LABEL_KEY,
+        on_change=_apply_dropdown_selection,
+        args=(id_by_label,),
+    )
+    theme_id = int(options[selection])
+    st.caption(f"Selected from: {describe_selection_source(st.session_state.get(SELECTED_THEME_SOURCE_KEY))}")
 
     with get_conn() as conn:
         ticker_df = theme_ticker_metrics(conn, theme_id)
@@ -152,7 +182,7 @@ with explore_tab:
         for perf_col in ("perf_1w", "perf_1m", "perf_3m"):
             if perf_col in display_ticker_df.columns:
                 display_ticker_df[perf_col] = display_ticker_df[perf_col].apply(
-                    lambda v: "—" if v is None else ("—" if str(v) == "nan" else f"{float(v):.2f}%")
+                    lambda v: display_or_dash(None) if v is None else (display_or_dash(None) if str(v) == "nan" else f"{float(v):.2f}%")
                 )
 
         cols = [
@@ -187,7 +217,11 @@ with explore_tab:
             if nullable_col in view_df.columns:
                 view_df[nullable_col] = view_df[nullable_col].apply(display_or_dash)
 
-        st.caption("`market_data_time` is the provider data timestamp. `snapshot_time` is when that ticker snapshot row was captured. `last_refresh_time` is the latest completed refresh run.")
+        st.caption(
+            "`market_data_time` is the provider market-data timestamp. "
+            "`snapshot_time` is when the preferred-source ticker snapshot row was captured. "
+            "`last_refresh_time` is the latest completed refresh in the current ticker-source view."
+        )
         st.dataframe(view_df, width="stretch")
         if not history_df.empty:
             hist = history_df.sort_values("snapshot_time")
