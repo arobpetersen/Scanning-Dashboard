@@ -237,4 +237,5 @@ with themes_tab:
         health_view["latest_snapshot_time"] = health_view["latest_snapshot_time"].apply(
             lambda v: short_timestamp(v) or "—"
         )
+        st.caption("`latest_snapshot_time` uses the preferred current-view theme source, matching live-preferred Health diagnostics.")
         st.dataframe(health_view, width="stretch")

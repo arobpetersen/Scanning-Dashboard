@@ -12,7 +12,15 @@ from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
 from src.leaderboard_utils import build_window_leaderboard
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
-from src.queries import latest_ticker_snapshots, theme_history_last_n_snapshots, theme_history_window, theme_ticker_metrics, ticker_history_last_n_snapshots
+from src.queries import (
+    latest_ticker_snapshots,
+    theme_health_overview,
+    theme_history_last_n_snapshots,
+    theme_history_window,
+    theme_ticker_metrics,
+    ticker_history_last_n_snapshots,
+    top_theme_movers,
+)
 from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success
 from src.theme_service import seed_if_needed
 from src.provider_live import LiveProvider
@@ -75,7 +83,8 @@ class TestBoundarySelection(unittest.TestCase):
                 avg_1m double,
                 avg_3m double,
                 positive_1m_breadth_pct double,
-                composite_score double
+                composite_score double,
+                snapshot_source varchar
             )
             """
         )
@@ -85,16 +94,106 @@ class TestBoundarySelection(unittest.TestCase):
         # Weekly cadence: latest and prior boundary should both be included for 7d window.
         for run_id, ts in [(1, "2026-03-01"), (2, "2026-03-08")]:
             conn.execute(
-                "insert into theme_snapshots values (?, ?, 1, 10, 1, 1, 1, 50, 1)",
+                "insert into theme_snapshots values (?, ?, 1, 10, 1, 1, 1, 50, 1, 'live')",
                 [run_id, ts],
             )
             conn.execute(
-                "insert into theme_snapshots values (?, ?, 2, 10, 1, 1, 1, 50, 1)",
+                "insert into theme_snapshots values (?, ?, 2, 10, 1, 1, 1, 50, 1, 'live')",
                 [run_id, ts],
             )
 
         out = theme_history_window(conn, 7)
         self.assertEqual(int(out["snapshot_time"].nunique()), 2)
+        conn.close()
+
+    def test_top_theme_movers_uses_preferred_source_boundary_window(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1w_breadth_pct double,
+                positive_1m_breadth_pct double,
+                positive_3m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'AI', 'Tech')")
+        conn.execute("insert into themes values (2, 'Energy', 'Macro')")
+
+        conn.execute(
+            "insert into theme_snapshots values (1, '2026-03-01 22:00:00', 1, 10, 1, 2, 3, 40, 40, 40, 10, 'live')"
+        )
+        conn.execute(
+            "insert into theme_snapshots values (2, '2026-03-10 22:00:00', 1, 10, 1, 2, 3, 50, 50, 50, 20, 'live')"
+        )
+        conn.execute(
+            "insert into theme_snapshots values (1, '2026-03-01 22:00:00', 2, 10, 1, 2, 3, 20, 20, 20, 5, 'live')"
+        )
+        conn.execute(
+            "insert into theme_snapshots values (2, '2026-03-10 22:00:00', 2, 10, 1, 2, 3, 30, 30, 30, 15, 'live')"
+        )
+        # Later mock residue should not override the current live-facing movers view.
+        conn.execute(
+            "insert into theme_snapshots values (3, '2026-03-11 22:00:00', 1, 10, 1, 2, 3, 99, 99, 99, 999, 'mock')"
+        )
+
+        out = top_theme_movers(conn, 7, top_n=5)
+
+        self.assertEqual(out.iloc[0]["theme"], "AI")
+        self.assertEqual(float(out.iloc[0]["start_composite"]), 10.0)
+        self.assertEqual(float(out.iloc[0]["end_composite"]), 20.0)
+        self.assertEqual(float(out.iloc[0]["delta_composite"]), 10.0)
+        conn.close()
+
+    def test_theme_health_overview_uses_preferred_source_snapshot_time(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1w_breadth_pct double,
+                positive_1m_breadth_pct double,
+                positive_3m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_runs(run_id bigint, provider varchar)")
+        conn.execute(
+            "create table refresh_failures(run_id bigint, ticker varchar, error_message varchar, failure_category varchar, created_at timestamp)"
+        )
+
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership values (1, 'NVDA')")
+        conn.execute(
+            "insert into theme_snapshots values (1, '2026-03-10 22:00:00', 1, 1, 1, 2, 3, 50, 60, 70, 10, 'live')"
+        )
+        conn.execute(
+            "insert into theme_snapshots values (2, '2026-03-11 22:00:00', 1, 1, 1, 2, 3, 50, 60, 70, 10, 'mock')"
+        )
+
+        out = theme_health_overview(conn, low_constituent_threshold=3, failure_window_days=14)
+
+        self.assertEqual(str(out.iloc[0]["latest_snapshot_time"]), "2026-03-10 22:00:00")
         conn.close()
 
 

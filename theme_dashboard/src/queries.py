@@ -29,6 +29,22 @@ def _table_has_column(conn, table_name: str, column_name: str) -> bool:
     return bool(row and int(row[0]) > 0)
 
 
+def _theme_snapshot_source_expr(conn) -> str:
+    if _table_has_column(conn, "theme_snapshots", "snapshot_source"):
+        return "snapshot_source"
+    if _table_has_column(conn, "refresh_runs", "provider"):
+        return "COALESCE((SELECT provider FROM refresh_runs rr WHERE rr.run_id = theme_snapshots.run_id), 'live')"
+    return "'live'"
+
+
+def _ticker_snapshot_source_expr(conn) -> str:
+    if _table_has_column(conn, "ticker_snapshots", "snapshot_source"):
+        return "s.snapshot_source"
+    if _table_has_column(conn, "refresh_runs", "provider"):
+        return "COALESCE(r.provider, 'live')"
+    return "'live'"
+
+
 def last_refresh_run(conn) -> pd.DataFrame:
     return conn.execute("SELECT * FROM refresh_runs ORDER BY run_id DESC LIMIT 1").df()
 
@@ -264,15 +280,55 @@ def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
 
 
 def top_theme_movers(conn, lookback_days: int, top_n: int = 20) -> pd.DataFrame:
+    preferred_source = preferred_theme_snapshot_source(conn)
+    if not preferred_source:
+        return pd.DataFrame()
+    theme_source_expr = _theme_snapshot_source_expr(conn)
     return conn.execute(
-        """
-        WITH in_window AS (
-            SELECT ts.theme_id, t.name AS theme, ts.snapshot_time, ts.composite_score, ts.positive_1m_breadth_pct,
-                   ROW_NUMBER() OVER (PARTITION BY ts.theme_id ORDER BY ts.snapshot_time ASC) AS first_rn,
-                   ROW_NUMBER() OVER (PARTITION BY ts.theme_id ORDER BY ts.snapshot_time DESC) AS last_rn
+        f"""
+        WITH latest AS (
+            SELECT MAX(snapshot_time) AS latest_time
+            FROM theme_snapshots
+            WHERE {theme_source_expr} = ?
+        ),
+        bounds AS (
+            SELECT
+                latest_time AS end_time,
+                latest_time - (? * INTERVAL '1 day') AS target_start
+            FROM latest
+            WHERE latest_time IS NOT NULL
+        ),
+        start_pick AS (
+            SELECT MAX(theme_snapshots.snapshot_time) AS start_time
+            FROM theme_snapshots
+            JOIN bounds b ON TRUE
+            WHERE theme_snapshots.snapshot_time <= b.target_start
+              AND {theme_source_expr} = ?
+        ),
+        effective AS (
+            SELECT
+                COALESCE(
+                    sp.start_time,
+                    (SELECT MIN(snapshot_time) FROM theme_snapshots WHERE {theme_source_expr} = ?)
+                ) AS start_time,
+                b.end_time AS end_time
+            FROM bounds b
+            LEFT JOIN start_pick sp ON TRUE
+        ),
+        in_window AS (
+            SELECT
+                   ts.theme_id,
+                   t.name AS theme,
+                   ts.snapshot_time,
+                   ts.run_id,
+                   ts.composite_score,
+                   ts.positive_1m_breadth_pct,
+                   ROW_NUMBER() OVER (PARTITION BY ts.theme_id ORDER BY ts.snapshot_time ASC, ts.run_id ASC) AS first_rn,
+                   ROW_NUMBER() OVER (PARTITION BY ts.theme_id ORDER BY ts.snapshot_time DESC, ts.run_id DESC) AS last_rn
             FROM theme_snapshots ts
             JOIN themes t ON t.id = ts.theme_id
-            WHERE ts.snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+            JOIN effective e ON ts.snapshot_time BETWEEN e.start_time AND e.end_time
+            WHERE {theme_source_expr} = ?
         ),
         first_last AS (
             SELECT
@@ -284,18 +340,6 @@ def top_theme_movers(conn, lookback_days: int, top_n: int = 20) -> pd.DataFrame:
                 MAX(CASE WHEN w.last_rn = 1 THEN w.positive_1m_breadth_pct END) AS end_breadth
             FROM in_window w
             GROUP BY w.theme_id
-        ),
-        ranks AS (
-            SELECT
-                ts.theme_id,
-                ROW_NUMBER() OVER (ORDER BY CASE WHEN ts.snapshot_time = (SELECT MIN(snapshot_time) FROM theme_snapshots WHERE snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')) THEN ts.composite_score END DESC) AS start_rank,
-                ROW_NUMBER() OVER (ORDER BY CASE WHEN ts.snapshot_time = (SELECT MAX(snapshot_time) FROM theme_snapshots WHERE snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')) THEN ts.composite_score END DESC) AS end_rank
-            FROM theme_snapshots ts
-            WHERE ts.snapshot_time IN (
-                SELECT MIN(snapshot_time) FROM theme_snapshots WHERE snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
-                UNION ALL
-                SELECT MAX(snapshot_time) FROM theme_snapshots WHERE snapshot_time >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
-            )
         )
         SELECT f.theme_id, f.theme,
                ROUND(f.start_composite,2) AS start_composite,
@@ -305,9 +349,10 @@ def top_theme_movers(conn, lookback_days: int, top_n: int = 20) -> pd.DataFrame:
                ROUND(f.end_breadth,2) AS end_breadth,
                ROUND(f.end_breadth - f.start_breadth,2) AS delta_breadth
         FROM first_last f
-        QUALIFY ROW_NUMBER() OVER (ORDER BY end_composite DESC) <= ?
+        ORDER BY end_composite DESC, theme
+        LIMIT ?
         """,
-        [lookback_days, lookback_days, lookback_days, lookback_days, lookback_days, top_n],
+        [preferred_source, lookback_days, preferred_source, preferred_source, preferred_source, top_n],
     ).df()
 
 
@@ -376,8 +421,11 @@ def top_n_membership_changes(conn, lookback_days: int, top_n: int = 20) -> tuple
 
 
 def theme_health_overview(conn, low_constituent_threshold: int, failure_window_days: int = 14) -> pd.DataFrame:
+    preferred_source = preferred_theme_snapshot_source(conn)
+    theme_source_filter = preferred_source or "__no_source__"
+    theme_source_expr = _theme_snapshot_source_expr(conn)
     return conn.execute(
-        """
+        f"""
         WITH member_counts AS (
             SELECT t.id AS theme_id, COUNT(m.ticker) AS constituent_count
             FROM themes t
@@ -387,6 +435,7 @@ def theme_health_overview(conn, low_constituent_threshold: int, failure_window_d
         latest_snap AS (
             SELECT theme_id, MAX(snapshot_time) AS latest_snapshot_time
             FROM theme_snapshots
+            WHERE {theme_source_expr} = ?
             GROUP BY theme_id
         ),
         live_failures_by_theme AS (
@@ -423,7 +472,7 @@ def theme_health_overview(conn, low_constituent_threshold: int, failure_window_d
           CASE health_status WHEN 'needs_attention' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END,
           theme_name
         """,
-        [failure_window_days, low_constituent_threshold, low_constituent_threshold],
+        [theme_source_filter, failure_window_days, low_constituent_threshold, low_constituent_threshold],
     ).df()
 
 
@@ -673,8 +722,8 @@ def baseline_status(conn, recent_limit: int = 50) -> pd.DataFrame:
     preferred_ticker = preferred_ticker_snapshot_source(conn)
     theme_source_filter = preferred_theme or "__no_source__"
     ticker_source_filter = preferred_ticker or "__no_source__"
-    theme_source_expr = "snapshot_source" if _table_has_column(conn, "theme_snapshots", "snapshot_source") else "COALESCE((SELECT provider FROM refresh_runs rr WHERE rr.run_id = theme_snapshots.run_id), 'live')"
-    ticker_source_expr = "s.snapshot_source" if _table_has_column(conn, "ticker_snapshots", "snapshot_source") else "COALESCE(r.provider, 'live')"
+    theme_source_expr = _theme_snapshot_source_expr(conn)
+    ticker_source_expr = _ticker_snapshot_source_expr(conn)
     return conn.execute(
         f"""
         WITH last_run AS (
