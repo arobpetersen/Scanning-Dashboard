@@ -23,7 +23,8 @@ if seeded:
     st.success("Theme registry imported from themes_seed_structured.json. DuckDB is source of truth.")
 
 provider_name = st.sidebar.selectbox("Provider", ["live", "mock"], index=0 if DEFAULT_PROVIDER == "live" else 1)
-scope_mode = st.sidebar.radio("Refresh scope", ["Live Active Themes", "Selected theme", "Custom ticker list"], index=0)
+active_scope_label = "Live Active Themes" if provider_name == "live" else "Active Themes"
+scope_mode = st.sidebar.radio("Refresh scope", [active_scope_label, "Selected theme", "Custom ticker list"], index=0)
 
 selected_theme_name: str | None = None
 selected_tickers: list[str] | None = None
@@ -41,7 +42,7 @@ elif scope_mode == "Custom ticker list":
     selected_tickers = sorted(set([p.strip().upper() for p in raw.replace("\n", " ").replace(",", " ").split(" ") if p.strip()]))
 
 with get_conn() as conn:
-    resolved_tickers = active_ticker_universe(conn) if scope_mode == "Live Active Themes" else sorted(set(selected_tickers or []))
+    resolved_tickers = active_ticker_universe(conn) if scope_mode == active_scope_label else sorted(set(selected_tickers or []))
     last_run = last_refresh_run(conn)
     rankings = compute_theme_rankings(conn)
     sugg_counts = suggestion_status_counts(conn)
@@ -91,7 +92,7 @@ with rc1:
                     provider_name,
                     tickers=resolved_tickers,
                     progress_callback=_progress,
-                    scope_type={"Live Active Themes": "active_themes", "Selected theme": "selected_theme", "Custom ticker list": "custom_tickers"}[scope_mode],
+                    scope_type={active_scope_label: "active_themes", "Selected theme": "selected_theme", "Custom ticker list": "custom_tickers"}[scope_mode],
                     scope_theme_name=selected_theme_name,
                 )
             pb.progress(100)

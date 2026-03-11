@@ -669,25 +669,33 @@ def core_table_status(conn) -> pd.DataFrame:
 
 
 def baseline_status(conn, recent_limit: int = 50) -> pd.DataFrame:
+    preferred_theme = preferred_theme_snapshot_source(conn)
+    preferred_ticker = preferred_ticker_snapshot_source(conn)
+    theme_source_filter = preferred_theme or "__no_source__"
+    ticker_source_filter = preferred_ticker or "__no_source__"
+    theme_source_expr = "snapshot_source" if _table_has_column(conn, "theme_snapshots", "snapshot_source") else "COALESCE((SELECT provider FROM refresh_runs rr WHERE rr.run_id = theme_snapshots.run_id), 'live')"
+    ticker_source_expr = "s.snapshot_source" if _table_has_column(conn, "ticker_snapshots", "snapshot_source") else "COALESCE(r.provider, 'live')"
     return conn.execute(
-        """
+        f"""
         WITH last_run AS (
             SELECT run_id, provider, status, finished_at
             FROM refresh_runs
             ORDER BY run_id DESC
             LIMIT 1
         ),
-        latest_theme AS (
+        preferred_theme_view AS (
             SELECT MAX(snapshot_time) AS latest_theme_snapshot_time,
                    COUNT(DISTINCT snapshot_time) AS theme_snapshot_sets
             FROM theme_snapshots
+            WHERE {theme_source_expr} = ?
         ),
-        latest_ticker AS (
+        preferred_ticker_view AS (
             SELECT MAX(r.finished_at) AS latest_ticker_snapshot_time,
                    COUNT(DISTINCT r.finished_at) AS ticker_snapshot_sets
             FROM ticker_snapshots s
             JOIN refresh_runs r ON r.run_id = s.run_id
             WHERE r.status IN ('success', 'partial')
+              AND {ticker_source_expr} = ?
         ),
         recent_theme_sources AS (
             SELECT STRING_AGG(snapshot_source, ', ' ORDER BY snapshot_source) AS recent_theme_sources
@@ -730,14 +738,13 @@ def baseline_status(conn, recent_limit: int = 50) -> pd.DataFrame:
             lk.ticker_snapshot_sets,
             COALESCE(rts.recent_theme_sources, '') AS recent_theme_sources,
             COALESCE(rks.recent_ticker_sources, '') AS recent_ticker_sources
-        FROM latest_theme lt
-        CROSS JOIN latest_ticker lk
+        FROM preferred_theme_view lt
+        CROSS JOIN preferred_ticker_view lk
         CROSS JOIN recent_theme_sources rts
         CROSS JOIN recent_ticker_sources rks
         LEFT JOIN last_run lr ON TRUE
-        """
-        ,
-        [recent_limit, recent_limit],
+        """,
+        [theme_source_filter, ticker_source_filter, recent_limit, recent_limit],
     ).df()
 
 
