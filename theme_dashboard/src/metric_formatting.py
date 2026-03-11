@@ -33,7 +33,7 @@ def short_timestamp(value) -> str | None:
         dt = ts
     else:
         dt = pd.Timestamp(ts).to_pydatetime()
-    return dt.strftime("%b %-d %H:%M")
+    return f"{dt.strftime('%b')} {dt.day} {dt.strftime('%H:%M')}"
 
 
 def format_theme_ticker_table(df: pd.DataFrame) -> pd.DataFrame:
