@@ -248,3 +248,7 @@ def init_db() -> None:
         needs_rebuild = any(token not in ddl_text for token in ["review_theme", "obsolete", "priority"])
         if needs_rebuild:
             _rebuild_theme_suggestions(conn)
+
+        from .theme_service import seed_if_needed
+
+        seed_if_needed(conn)
