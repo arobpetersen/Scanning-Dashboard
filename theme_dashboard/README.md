@@ -111,6 +111,45 @@ If `MASSIVE_API_KEY` is not set and you choose `live`, the app shows a warning a
   - `market_cap` (if Massive reference data is unavailable for a ticker)
 - `avg_volume` is computed as simple mean of recent daily volumes (last 21 daily bars) from Massive aggregates.
 
+
+## Readability and timestamp semantics
+- Themes ticker table now renders human-readable values for:
+  - `market_cap` (e.g., `125.9B`)
+  - `avg_volume` (e.g., `55.8M`)
+  - `dollar_volume = price * avg_volume` (e.g., `405.6M`)
+  - adaptive `price` decimals based on price level
+  - `perf_1w` / `perf_1m` / `perf_3m` rounded to two decimals and shown as percentages
+- Timestamps are intentionally separated in Themes table:
+  - `market_data_time`: provider data timestamp (`ticker_snapshots.last_updated`)
+  - `snapshot_time`: when that ticker snapshot row was captured (`refresh_runs.finished_at` for the selected ticker row)
+  - `last_refresh_time`: latest completed refresh run timestamp
+- Missing nullable fields are shown as `—` instead of noisy `None` text.
+
+## Market cap behavior
+- Massive reference/profile fetching is controlled by `LIVE_FETCH_REFERENCE_ON_REFRESH` (default enabled).
+- When a live refresh row has missing `market_cap`, refresh flow carries forward the latest known cap per ticker when available.
+- Themes query path selects the latest completed snapshot per ticker, so market cap remains visible even when a ticker was not updated in the most recent partial run.
+
+## Historical collection framework (14+ trading days)
+- Snapshot tables remain append/history-oriented by `run_id` and `snapshot_time`.
+- Query helpers are available for recent-history and latest views:
+  - `theme_history_last_n_snapshots(..., snapshot_limit=14)`
+  - `ticker_history_last_n_snapshots(..., snapshot_limit=14)`
+  - `latest_theme_snapshots()` and `latest_ticker_snapshots()`
+- No pruning policy is enforced below 14 days; data is preserved for future analysis unless you add your own retention process.
+
+## End-of-day scheduled refresh framework (6:00 PM ET)
+- Added safe runner entrypoint: `python run_eod_refresh.py`
+- Behavior (default mode):
+  - runs only on weekdays
+  - runs only at/after 6:00 PM `America/New_York`
+  - skips if a `scheduled_eod` success/partial run already exists for that ET date
+- Manual override is always available:
+  - `python run_eod_refresh.py --force`
+- Intended usage with Task Scheduler/cron:
+  - schedule the command daily (e.g., 6:00 PM ET)
+  - runner handles weekday/time/duplicate protections idempotently
+
 ## Providers
 - `mock`: deterministic sample data for all tickers so the app is usable immediately.
 - `live`: Massive-backed provider in `src/provider_live.py`.

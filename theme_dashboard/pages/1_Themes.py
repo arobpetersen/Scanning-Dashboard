@@ -2,7 +2,7 @@ import streamlit as st
 
 from src.database import get_conn, init_db
 from src.leaderboard_utils import build_window_leaderboard
-from src.metric_formatting import format_theme_ticker_table
+from src.metric_formatting import display_or_dash, format_theme_ticker_table
 from src.momentum_engine import compute_theme_momentum
 from src.queries import theme_snapshot_history, theme_ticker_metrics
 from src.theme_service import (
@@ -149,8 +149,46 @@ with explore_tab:
             c4.metric("Avg 3M", f"{ticker_df['perf_3m'].mean():.2f}%")
 
         display_ticker_df = format_theme_ticker_table(ticker_df)
-        cols = [c for c in ["ticker", "price", "perf_1w", "perf_1m", "perf_3m", "market_cap", "avg_volume", "dollar_volume", "short_interest_pct", "float_shares", "adr_pct", "last_updated"] if c in display_ticker_df.columns]
-        st.dataframe(display_ticker_df[cols] if cols else display_ticker_df, width="stretch")
+        for perf_col in ("perf_1w", "perf_1m", "perf_3m"):
+            if perf_col in display_ticker_df.columns:
+                display_ticker_df[perf_col] = display_ticker_df[perf_col].apply(
+                    lambda v: "—" if v is None else ("—" if str(v) == "nan" else f"{float(v):.2f}%")
+                )
+
+        cols = [
+            c
+            for c in [
+                "ticker",
+                "price",
+                "perf_1w",
+                "perf_1m",
+                "perf_3m",
+                "market_cap",
+                "avg_volume",
+                "dollar_volume",
+                "short_interest_pct",
+                "float_shares",
+                "adr_pct",
+                "last_updated",
+                "snapshot_time",
+                "latest_refresh_time",
+            ]
+            if c in display_ticker_df.columns
+        ]
+
+        rename_map = {
+            "last_updated": "market_data_time",
+            "snapshot_time": "snapshot_time",
+            "latest_refresh_time": "last_refresh_time",
+        }
+        view_df = display_ticker_df[cols].rename(columns=rename_map) if cols else display_ticker_df
+
+        for nullable_col in ("short_interest_pct", "float_shares", "adr_pct"):
+            if nullable_col in view_df.columns:
+                view_df[nullable_col] = view_df[nullable_col].apply(display_or_dash)
+
+        st.caption("`market_data_time` is the provider data timestamp. `snapshot_time` is when that ticker snapshot row was captured. `last_refresh_time` is the latest completed refresh run.")
+        st.dataframe(view_df, width="stretch")
         if not history_df.empty:
             hist = history_df.sort_values("snapshot_time")
             st.line_chart(hist.set_index("snapshot_time")[["composite_score", "avg_1m", "positive_1m_breadth_pct"]])

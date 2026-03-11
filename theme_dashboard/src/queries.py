@@ -24,32 +24,57 @@ def latest_completed_runs(conn, limit: int = 2) -> pd.DataFrame:
     ).df()
 
 
-def latest_completed_run_id(conn) -> int | None:
-    runs = latest_completed_runs(conn, limit=1)
-    if runs.empty:
-        return None
-    return int(runs.iloc[0]["run_id"])
-
-
 def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
-    run_id = latest_completed_run_id(conn)
-    if run_id is None:
+    latest_run = latest_completed_runs(conn, limit=1)
+    if latest_run.empty:
         return conn.execute(
             "SELECT ticker FROM theme_membership WHERE theme_id = ? ORDER BY ticker", [theme_id]
         ).df()
 
+    latest_refresh_time = latest_run.iloc[0]["finished_at"]
+
     return conn.execute(
         """
-        SELECT m.ticker, s.price, s.perf_1w, s.perf_1m, s.perf_3m,
-               s.market_cap, s.avg_volume, s.short_interest_pct, s.float_shares,
-               s.adr_pct, s.last_updated
+        WITH completed_snapshots AS (
+            SELECT
+                s.ticker,
+                s.price,
+                s.perf_1w,
+                s.perf_1m,
+                s.perf_3m,
+                s.market_cap,
+                s.avg_volume,
+                s.short_interest_pct,
+                s.float_shares,
+                s.adr_pct,
+                s.last_updated,
+                r.finished_at AS snapshot_time,
+                ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) AS rn
+            FROM ticker_snapshots s
+            JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE r.status IN ('success', 'partial')
+        )
+        SELECT
+            m.ticker,
+            cs.price,
+            cs.perf_1w,
+            cs.perf_1m,
+            cs.perf_3m,
+            cs.market_cap,
+            cs.avg_volume,
+            cs.short_interest_pct,
+            cs.float_shares,
+            cs.adr_pct,
+            cs.last_updated,
+            cs.snapshot_time,
+            ? AS latest_refresh_time
         FROM theme_membership m
-        LEFT JOIN ticker_snapshots s
-          ON m.ticker = s.ticker AND s.run_id = ?
+        LEFT JOIN completed_snapshots cs
+          ON m.ticker = cs.ticker AND cs.rn = 1
         WHERE m.theme_id = ?
         ORDER BY m.ticker
         """,
-        [run_id, theme_id],
+        [latest_refresh_time, theme_id],
     ).df()
 
 
@@ -310,3 +335,58 @@ def synthetic_data_active(conn) -> bool:
         """
     ).fetchone()
     return bool(row and row[0] and int(row[0]) > 0)
+
+
+def theme_history_last_n_snapshots(conn, theme_id: int, snapshot_limit: int = 14) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT ts.run_id, ts.snapshot_time, ts.theme_id,
+               ts.ticker_count, ts.avg_1w, ts.avg_1m, ts.avg_3m,
+               ts.positive_1w_breadth_pct, ts.positive_1m_breadth_pct, ts.positive_3m_breadth_pct,
+               ts.composite_score, ts.snapshot_source
+        FROM theme_snapshots ts
+        WHERE ts.theme_id = ?
+        ORDER BY ts.snapshot_time DESC
+        LIMIT ?
+        """,
+        [theme_id, snapshot_limit],
+    ).df()
+
+
+def ticker_history_last_n_snapshots(conn, ticker: str, snapshot_limit: int = 14) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT s.run_id, s.ticker, s.price, s.perf_1w, s.perf_1m, s.perf_3m,
+               s.market_cap, s.avg_volume, s.last_updated,
+               r.finished_at AS snapshot_time, s.snapshot_source
+        FROM ticker_snapshots s
+        JOIN refresh_runs r ON r.run_id = s.run_id
+        WHERE s.ticker = ?
+          AND r.status IN ('success', 'partial')
+        ORDER BY s.run_id DESC
+        LIMIT ?
+        """,
+        [ticker.strip().upper(), snapshot_limit],
+    ).df()
+
+
+def latest_theme_snapshots(conn) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT *
+        FROM theme_snapshots
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY theme_id ORDER BY snapshot_time DESC, run_id DESC) = 1
+        """
+    ).df()
+
+
+def latest_ticker_snapshots(conn) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT s.*, r.finished_at AS snapshot_time
+        FROM ticker_snapshots s
+        JOIN refresh_runs r ON r.run_id = s.run_id
+        WHERE r.status IN ('success', 'partial')
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) = 1
+        """
+    ).df()
