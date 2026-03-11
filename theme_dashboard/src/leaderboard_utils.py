@@ -17,7 +17,12 @@ def build_window_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -> 
 
     snapshot_count = int(history["snapshot_time"].nunique())
     if snapshot_count < 2:
-        return pd.DataFrame(), "Need at least two boundary snapshots to compare this window."
+        source_hint = momentum.get("source_preference") or "current"
+        return (
+            pd.DataFrame(),
+            f"Need at least two boundary snapshots for this window (currently {snapshot_count} available under {source_hint}-preferred selection). "
+            "The comparison needs one latest snapshot and one earlier boundary snapshot near the start of the selected window, so two same-day imports may still be insufficient for 1W/1M.",
+        )
 
     latest = history.sort_values("snapshot_time").groupby("theme", as_index=False).tail(1)
 

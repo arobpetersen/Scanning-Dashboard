@@ -251,6 +251,7 @@ def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
         )
         SELECT ts.run_id, ts.snapshot_time, ts.theme_id, t.name AS theme, t.category,
                ts.ticker_count, ts.avg_1w, ts.avg_1m, ts.avg_3m,
+               ts.snapshot_source,
                ts.positive_1m_breadth_pct, ts.composite_score
         FROM theme_snapshots ts
         JOIN themes t ON t.id = ts.theme_id

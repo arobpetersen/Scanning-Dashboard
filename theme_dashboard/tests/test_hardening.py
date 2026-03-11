@@ -43,6 +43,22 @@ class TestLeaderboardUtils(unittest.TestCase):
         self.assertEqual(ranked_1w.iloc[0]["theme"], "B")
         self.assertEqual(ranked_1m.iloc[0]["theme"], "A")
 
+    def test_window_leaderboard_explains_true_boundary_requirement(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-11", "theme": "A", "avg_1w": 1.0},
+                {"snapshot_time": "2026-03-11", "theme": "B", "avg_1w": 2.0},
+            ]
+        )
+        momentum = {"history": history, "window_summary": pd.DataFrame(), "source_preference": "live"}
+
+        ranked, msg = build_window_leaderboard(momentum, "avg_1w", top_k=10)
+
+        self.assertTrue(ranked.empty)
+        self.assertIn("two boundary snapshots", msg)
+        self.assertIn("currently 1 available", msg)
+        self.assertIn("two same-day imports may still be insufficient", msg)
+
 
 class TestBoundarySelection(unittest.TestCase):
     def test_theme_history_window_uses_boundary_snapshot(self):

@@ -478,6 +478,10 @@ Scope observability: each run records scope metadata (`scope_type`, `scope_theme
 
 Live safeguard: the run stops early if repeated rate-limit errors are detected (configured by `LIVE_RATE_LIMIT_STOP_THRESHOLD` in `src/config.py`) and is finalized cleanly with a summary error message.
 
+Normal-use refresh scope default:
+- the app now defaults refresh scope to **Live Active Themes**
+- **Selected theme** and **Custom ticker list** remain available for narrower manual operation
+
 
 
 

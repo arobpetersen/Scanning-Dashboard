@@ -26,6 +26,7 @@ def _empty_result() -> dict:
         "weakening_themes": empty,
         "new_leaders": [],
         "dropped_leaders": [],
+        "source_preference": None,
     }
 
 
@@ -33,6 +34,11 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
     history = theme_history_window(conn, lookback_days)
     if history.empty:
         return _empty_result()
+
+    source_preference = None
+    if "snapshot_source" in history.columns and not history["snapshot_source"].dropna().empty:
+        sources = sorted(set(history["snapshot_source"].dropna().astype(str).tolist()))
+        source_preference = sources[0] if len(sources) == 1 else ", ".join(sources)
 
     history = history.sort_values(["theme", "snapshot_time"]).copy()
     history["rank"] = history.groupby("snapshot_time")["composite_score"].rank(method="dense", ascending=False)
@@ -76,4 +82,5 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
         "weakening_themes": merged.sort_values(["delta_composite", "delta_breadth"], ascending=[True, True]).head(top_n),
         "new_leaders": entered,
         "dropped_leaders": dropped,
+        "source_preference": source_preference,
     }
