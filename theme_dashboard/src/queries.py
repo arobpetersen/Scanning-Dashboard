@@ -69,6 +69,154 @@ def theme_snapshot_history(conn, theme_id: int, limit: int = 20) -> pd.DataFrame
     ).df()
 
 
+def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
+    # Boundary-based selection keeps short lookbacks stable on sparse cadence.
+    return conn.execute(
+        """
+        WITH latest AS (
+            SELECT MAX(snapshot_time) AS latest_time
+            FROM theme_snapshots
+        ),
+        bounds AS (
+            SELECT
+                latest_time AS end_time,
+                latest_time - (? * INTERVAL '1 day') AS target_start
+            FROM latest
+            WHERE latest_time IS NOT NULL
+        ),
+        start_pick AS (
+            SELECT MAX(ts.snapshot_time) AS start_time
+            FROM theme_snapshots ts
+            JOIN bounds b ON TRUE
+            WHERE ts.snapshot_time <= b.target_start
+        ),
+        effective AS (
+            SELECT
+                COALESCE(sp.start_time, (SELECT MIN(snapshot_time) FROM theme_snapshots)) AS start_time,
+                b.end_time AS end_time
+            FROM bounds b
+            LEFT JOIN start_pick sp ON TRUE
+        )
+        SELECT ts.run_id, ts.snapshot_time, ts.theme_id, t.name AS theme, t.category,
+               ts.ticker_count, ts.avg_1w, ts.avg_1m, ts.avg_3m,
+               ts.positive_1m_breadth_pct, ts.composite_score
+        FROM theme_snapshots ts
+        JOIN themes t ON t.id = ts.theme_id
+        JOIN effective e ON ts.snapshot_time BETWEEN e.start_time AND e.end_time
+        ORDER BY ts.snapshot_time ASC, ts.composite_score DESC
+        """,
+        [lookback_days],
+    ).df()
+
+
+def top_n_membership_changes(conn, lookback_days: int, top_n: int = 20) -> tuple[list[str], list[str]]:
+    first_top = conn.execute(
+        """
+        WITH latest AS (
+            SELECT MAX(snapshot_time) AS latest_time
+            FROM theme_snapshots
+        ),
+        bounds AS (
+            SELECT
+                latest_time AS end_time,
+                latest_time - (? * INTERVAL '1 day') AS target_start
+            FROM latest
+            WHERE latest_time IS NOT NULL
+        ),
+        start_pick AS (
+            SELECT MAX(ts.snapshot_time) AS start_time
+            FROM theme_snapshots ts
+            JOIN bounds b ON TRUE
+            WHERE ts.snapshot_time <= b.target_start
+        ),
+        effective AS (
+            SELECT
+                COALESCE(sp.start_time, (SELECT MIN(snapshot_time) FROM theme_snapshots)) AS start_time,
+                b.end_time AS end_time
+            FROM bounds b
+            LEFT JOIN start_pick sp ON TRUE
+        )
+        SELECT t.name
+        FROM theme_snapshots ts
+        JOIN themes t ON t.id = ts.theme_id
+        JOIN effective e ON ts.snapshot_time = e.start_time
+        ORDER BY ts.composite_score DESC
+        LIMIT ?
+        """,
+        [lookback_days, top_n],
+    ).df()
+    last_top = conn.execute(
+        """
+        WITH latest AS (
+            SELECT MAX(snapshot_time) AS latest_time
+            FROM theme_snapshots
+        )
+        SELECT t.name
+        FROM theme_snapshots ts
+        JOIN themes t ON t.id = ts.theme_id
+        JOIN latest l ON ts.snapshot_time = l.latest_time
+        ORDER BY ts.composite_score DESC
+        LIMIT ?
+        """,
+        [top_n],
+    ).df()
+    start_set = set(first_top["name"].tolist()) if not first_top.empty else set()
+    end_set = set(last_top["name"].tolist()) if not last_top.empty else set()
+    return sorted(end_set - start_set), sorted(start_set - end_set)
+
+
+def theme_health_overview(conn, low_constituent_threshold: int, failure_window_days: int = 14) -> pd.DataFrame:
+    return conn.execute(
+        """
+        WITH member_counts AS (
+            SELECT t.id AS theme_id, COUNT(m.ticker) AS constituent_count
+            FROM themes t
+            LEFT JOIN theme_membership m ON t.id = m.theme_id
+            GROUP BY t.id
+        ),
+        latest_snap AS (
+            SELECT theme_id, MAX(snapshot_time) AS latest_snapshot_time
+            FROM theme_snapshots
+            GROUP BY theme_id
+        ),
+        live_failures_by_theme AS (
+            SELECT m.theme_id, COUNT(*) AS live_failure_count_recent
+            FROM refresh_failures f
+            JOIN refresh_runs r ON r.run_id = f.run_id
+            JOIN theme_membership m ON m.ticker = f.ticker
+            WHERE r.provider = 'live'
+              AND f.created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+            GROUP BY m.theme_id
+        )
+        SELECT
+            t.id AS theme_id,
+            t.name AS theme_name,
+            t.category,
+            t.is_active,
+            mc.constituent_count,
+            (mc.constituent_count > 0 AND mc.constituent_count < ?) AS low_count_flag,
+            (mc.constituent_count = 0) AS empty_theme_flag,
+            COALESCE(lf.live_failure_count_recent, 0) AS live_failure_count_recent,
+            ls.latest_snapshot_time,
+            CASE
+              WHEN mc.constituent_count = 0 THEN 'needs_attention'
+              WHEN t.is_active = FALSE AND mc.constituent_count > 0 THEN 'needs_attention'
+              WHEN COALESCE(lf.live_failure_count_recent, 0) >= 3 THEN 'watch'
+              WHEN mc.constituent_count > 0 AND mc.constituent_count < ? THEN 'watch'
+              ELSE 'healthy'
+            END AS health_status
+        FROM themes t
+        JOIN member_counts mc ON mc.theme_id = t.id
+        LEFT JOIN latest_snap ls ON ls.theme_id = t.id
+        LEFT JOIN live_failures_by_theme lf ON lf.theme_id = t.id
+        ORDER BY
+          CASE health_status WHEN 'needs_attention' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END,
+          theme_name
+        """,
+        [failure_window_days, low_constituent_threshold, low_constituent_threshold],
+    ).df()
+
+
 def snapshot_counts(conn) -> pd.DataFrame:
     return conn.execute(
         """
@@ -96,3 +244,7 @@ def row_counts(conn) -> pd.DataFrame:
         SELECT 'refresh_failures', COUNT(*) FROM refresh_failures
         """
     ).df()
+
+
+def synthetic_data_active(conn) -> bool:
+    return False

@@ -11,6 +11,18 @@ REFRESH_STALE_TIMEOUT_MINUTES = 30
 LIVE_RATE_LIMIT_STOP_THRESHOLD = 5
 FINNHUB_API_KEY_ENV = "FINNHUB_API_KEY"
 
+# Compatibility constants used by pages/engines (no schema dependency)
+LIVE_QUOTE_PROFILE_SOURCE = "finnhub"
+LIVE_HISTORICAL_SOURCE = "finnhub"
+MASSIVE_API_KEY_ENV = FINNHUB_API_KEY_ENV
+AI_MODEL = "gpt-5-mini"
+AI_MAX_PROPOSALS = 8
+OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+RULE_LOW_CONSTITUENT_THRESHOLD = 3
+RULE_MAX_SUGGESTIONS_PER_RULE = 15
+RULE_LIVE_FAILURE_MIN_COUNT = 3
+RULE_LIVE_FAILURE_WINDOW_DAYS = 14
+
 COMPOSITE_WEIGHTS = {
     "perf_1w": 0.25,
     "perf_1m": 0.50,
@@ -20,4 +32,14 @@ COMPOSITE_WEIGHTS = {
 
 def finnhub_api_key() -> str | None:
     value = os.getenv(FINNHUB_API_KEY_ENV, "").strip()
+    return value or None
+
+
+def massive_api_key() -> str | None:
+    # Backward-compatible alias while provider remains Finnhub-based in this recovery patch.
+    return finnhub_api_key()
+
+
+def openai_api_key() -> str | None:
+    value = os.getenv(OPENAI_API_KEY_ENV, "").strip()
     return value or None

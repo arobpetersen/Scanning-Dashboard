@@ -4,21 +4,18 @@ import streamlit as st
 
 from src.config import (
     DEFAULT_PROVIDER,
-    LIVE_HISTORICAL_SOURCE,
-    LIVE_QUOTE_PROFILE_SOURCE,
-    MASSIVE_API_KEY_ENV,
+    FINNHUB_API_KEY_ENV,
     REFRESH_STALE_TIMEOUT_MINUTES,
     RULE_LIVE_FAILURE_WINDOW_DAYS,
     RULE_LOW_CONSTITUENT_THRESHOLD,
     STALE_DATA_HOURS,
-    massive_api_key,
+    finnhub_api_key,
 )
 from src.database import get_conn, init_db
 from src.failure_classification import categorize_failure_message
 from src.fetch_data import mark_stale_running_runs
 from src.queries import last_refresh_run, refresh_history, row_counts, snapshot_counts, theme_health_overview
 from src.suggestions_service import suggestion_status_counts
-from src.symbol_hygiene import approve_suppression, reject_keep_active, reset_failure_history, symbol_hygiene_queue
 from src.theme_service import seed_if_needed
 
 st.set_page_config(page_title="Health", layout="wide")
@@ -38,8 +35,7 @@ ops_tab, themes_tab = st.tabs(["Operations", "Theme Health"])
 
 with ops_tab:
     st.write(f"Default provider: `{DEFAULT_PROVIDER}`")
-    st.write(f"Massive configured: `{bool(massive_api_key())}` ({MASSIVE_API_KEY_ENV})")
-    st.write(f"Live sources: quote/profile=`{LIVE_QUOTE_PROFILE_SOURCE}`, historical=`{LIVE_HISTORICAL_SOURCE}`")
+    st.write(f"Finnhub configured: `{bool(finnhub_api_key())}` ({FINNHUB_API_KEY_ENV})")
     st.write(f"Stale timeout: `{REFRESH_STALE_TIMEOUT_MINUTES}` minutes")
     if stale_marked:
         st.warning(f"Marked {stale_marked} stale run(s) failed on page load.")
@@ -52,13 +48,7 @@ with ops_tab:
 
     if not last_run.empty:
         run = last_run.iloc[0]
-        st.info(
-            f"Last run #{int(run['run_id'])} provider={run['provider']} status={run['status']} "
-            f"success={int(run['success_count'])} fail={int(run['failure_count'])} "
-            f"flagged={int(run.get('flagged_symbol_count') or 0)} suppressed={int(run.get('suppressed_symbol_count') or 0)}"
-        )
-        if run.get("failure_category_counts"):
-            st.caption(f"Failure categories: {run.get('failure_category_counts')}")
+        st.info(f"Last run #{int(run['run_id'])} provider={run['provider']} status={run['status']} success={int(run['success_count'])} fail={int(run['failure_count'])}")
         finished_at = run["finished_at"]
         if finished_at is not None:
             if finished_at.tzinfo is None:
@@ -73,62 +63,19 @@ with ops_tab:
     else:
         run_id = int(last_run.iloc[0]["run_id"])
         with get_conn() as conn:
-            recent_failures = conn.execute(
-                "SELECT ticker, error_message, failure_category, created_at FROM refresh_failures WHERE run_id=? ORDER BY created_at DESC LIMIT 200",
-                [run_id],
-            ).df()
+            recent_failures = conn.execute("SELECT ticker, error_message, created_at FROM refresh_failures WHERE run_id=? ORDER BY created_at DESC LIMIT 200", [run_id]).df()
         if recent_failures.empty:
             st.success("No failures in latest run.")
         else:
-            if "failure_category" not in recent_failures.columns or recent_failures["failure_category"].isna().any():
-                recent_failures["failure_category"] = recent_failures["error_message"].apply(categorize_failure_message)
             cats = (
-                recent_failures.groupby("failure_category", as_index=False)
+                recent_failures.assign(error_category=recent_failures["error_message"].apply(categorize_failure_message))
+                .groupby("error_category", as_index=False)
                 .size()
                 .rename(columns={"size": "cnt"})
                 .sort_values("cnt", ascending=False)
             )
             st.dataframe(cats, width="stretch")
             st.dataframe(recent_failures, width="stretch")
-
-    st.subheader("Symbol hygiene review queue")
-    with get_conn() as conn:
-        queue = symbol_hygiene_queue(conn, limit=250)
-
-    if queue.empty:
-        st.success("No flagged/suppressed/watch symbols currently in queue.")
-    else:
-        st.caption("Review context and actions are inline per symbol for fast triage.")
-        for _, row in queue.iterrows():
-            ticker = str(row["ticker"])
-            with st.container(border=True):
-                c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1.1, 0.9, 0.9, 1.2, 1.1, 1.8])
-                c1.write(f"**{ticker}**")
-                c2.write(f"cat: `{row.get('last_failure_category') or 'n/a'}`")
-                c3.write(f"consec: `{int(row.get('consecutive_failure_count') or 0)}`")
-                c4.write(f"rolling: `{int(row.get('rolling_failure_count') or 0)}`")
-                c5.write(f"last success: `{row.get('last_success_at') or 'never'}`")
-                c6.write(f"status: `{row.get('status')}`")
-                c7.write(f"suggested: `{row.get('suggested_status') or 'none'}`")
-                st.caption(str(row.get("suggested_reason") or ""))
-
-                a1, a2, a3, a4 = st.columns(4)
-                if a1.button("Approve suppression", key=f"approve_{ticker}"):
-                    with get_conn() as conn:
-                        approve_suppression(conn, ticker)
-                    st.rerun()
-                if a2.button("Reject / keep active", key=f"reject_{ticker}"):
-                    with get_conn() as conn:
-                        reject_keep_active(conn, ticker)
-                    st.rerun()
-                if a3.button("Return to watch", key=f"watch_{ticker}"):
-                    with get_conn() as conn:
-                        reset_failure_history(conn, ticker, to_watch=True)
-                    st.rerun()
-                if a4.button("Reset history", key=f"reset_{ticker}"):
-                    with get_conn() as conn:
-                        reset_failure_history(conn, ticker, to_watch=False)
-                    st.rerun()
 
     st.subheader("Refresh history")
     st.dataframe(history, width="stretch")
@@ -176,17 +123,4 @@ with themes_tab:
         m3.metric("Watch", int((view["health_status"] == "watch").sum()))
         m4.metric("Healthy", int((view["health_status"] == "healthy").sum()))
 
-        st.dataframe(
-            view[[
-                "theme_name",
-                "category",
-                "is_active",
-                "constituent_count",
-                "low_count_flag",
-                "empty_theme_flag",
-                "live_failure_count_recent",
-                "latest_snapshot_time",
-                "health_status",
-            ]],
-            width="stretch",
-        )
+        st.dataframe(view[["theme_name", "category", "is_active", "constituent_count", "low_count_flag", "empty_theme_flag", "live_failure_count_recent", "latest_snapshot_time", "health_status"]], width="stretch")
