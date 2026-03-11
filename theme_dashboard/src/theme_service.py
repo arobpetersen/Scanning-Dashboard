@@ -48,28 +48,25 @@ def seed_if_needed(conn) -> bool:
         return False
 
     themes_count = int(conn.execute("SELECT COUNT(*) FROM themes").fetchone()[0])
+    seed_theme_names = {name for name, _, _ in prepared_themes}
+
     existing_theme_names = {
         row[0]
-        for row in conn.execute("SELECT name FROM themes WHERE name IN (SELECT UNNEST(?))", [
-            [name for name, _, _ in prepared_themes]
-        ]).fetchall()
+        for row in conn.execute("SELECT name FROM themes").fetchall()
     }
-    missing_theme_names = {name for name, _, _ in prepared_themes if name not in existing_theme_names}
+    missing_theme_names = seed_theme_names - existing_theme_names
 
-    existing_pairs: set[tuple[str, str]] = set()
-    if expected_pairs:
-        existing_pairs = {
-            (row[0], row[1])
-            for row in conn.execute(
-                """
-                SELECT t.name, m.ticker
-                FROM themes t
-                JOIN theme_membership m ON m.theme_id = t.id
-                WHERE t.name IN (SELECT UNNEST(?))
-                """,
-                [[name for name, _, _ in prepared_themes]],
-            ).fetchall()
-        }
+    existing_pairs = {
+        (row[0], row[1])
+        for row in conn.execute(
+            """
+            SELECT t.name, m.ticker
+            FROM themes t
+            JOIN theme_membership m ON m.theme_id = t.id
+            """
+        ).fetchall()
+        if row[0] in seed_theme_names
+    }
     missing_memberships = expected_pairs - existing_pairs
 
     if themes_count > 0 and not missing_theme_names and not missing_memberships:
