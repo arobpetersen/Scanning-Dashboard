@@ -1,7 +1,7 @@
 import streamlit as st
 
 from src.database import get_conn, init_db
-from src.leaderboard_utils import build_window_leaderboard
+from src.leaderboard_utils import build_category_leaderboard, build_window_leaderboard
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.momentum_engine import compute_theme_momentum
 from src.queries import ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
@@ -120,6 +120,15 @@ def _render_leaderboard(title: str, key_prefix: str, leaderboard_df, label_by_id
             st.session_state[handled_key] = selection_token
 
 
+def _render_category_leaderboard(title: str, leaderboard_df) -> None:
+    st.markdown(f"**{title}**")
+    st.dataframe(
+        leaderboard_df[["rank", "category", "theme_count", "performance", "momentum_score", "breadth_1m"]],
+        width="stretch",
+        hide_index=True,
+    )
+
+
 explore_tab, manage_tab = st.tabs(["Explore", "Manage"])
 
 with explore_tab:
@@ -147,18 +156,27 @@ with explore_tab:
 
     lb1, lb1_msg = _build_leaderboard(momentum_1w, "avg_1w", "performance")
     lb2, lb2_msg = _build_leaderboard(momentum_1m, "avg_1m", "performance")
+    leaderboard_mode = st.radio("Top table view", ["Themes", "Categories"], horizontal=True, key="themes_leaderboard_mode")
+    category_lb1 = build_category_leaderboard(lb1, top_k=10) if lb1 is not None else None
+    category_lb2 = build_category_leaderboard(lb2, top_k=10) if lb2 is not None else None
 
     c1, c2 = st.columns(2)
     with c1:
         if lb1 is None:
             st.warning(f"Top 10 Themes - 1W: {lb1_msg}")
+        elif leaderboard_mode == "Categories":
+            _render_category_leaderboard("Top Categories - 1W", category_lb1)
         else:
             _render_leaderboard("Top 10 Themes - 1W", "top_1w", lb1, label_by_id)
     with c2:
         if lb2 is None:
             st.warning(f"Top 10 Themes - 1M: {lb2_msg}")
+        elif leaderboard_mode == "Categories":
+            _render_category_leaderboard("Top Categories - 1M", category_lb2)
         else:
             _render_leaderboard("Top 10 Themes - 1M", "top_1m", lb2, label_by_id)
+    if leaderboard_mode == "Categories":
+        st.caption("Category mode summarizes the currently displayed theme leaderboard rows. Switch back to Themes mode to click a row into the detail view.")
 
     st.divider()
 

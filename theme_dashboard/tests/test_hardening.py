@@ -10,7 +10,7 @@ import pandas as pd
 from src.fetch_data import run_refresh
 from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
-from src.leaderboard_utils import build_window_leaderboard
+from src.leaderboard_utils import build_category_leaderboard, build_window_leaderboard
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
 from src.queries import (
     latest_ticker_snapshots,
@@ -69,6 +69,22 @@ class TestLeaderboardUtils(unittest.TestCase):
         self.assertIn("two boundary snapshots", msg)
         self.assertIn("currently 1 available", msg)
         self.assertIn("two same-day imports may still be insufficient", msg)
+
+    def test_category_leaderboard_groups_and_falls_back_to_theme_name(self):
+        leaderboard = pd.DataFrame(
+            [
+                {"rank": 1, "theme": "AI Infra", "category": "Tech", "performance": 8.0, "momentum_score": 5.0, "breadth_1m": 70.0},
+                {"rank": 2, "theme": "Semis", "category": "Tech", "performance": 6.0, "momentum_score": 4.0, "breadth_1m": 60.0},
+                {"rank": 3, "theme": "Oil Services", "category": "", "performance": 7.0, "momentum_score": 3.0, "breadth_1m": 50.0},
+            ]
+        )
+
+        out = build_category_leaderboard(leaderboard, top_k=10)
+
+        self.assertEqual(out.iloc[0]["category"], "Tech")
+        self.assertEqual(int(out.iloc[0]["theme_count"]), 2)
+        self.assertEqual(float(out.iloc[0]["performance"]), 7.0)
+        self.assertIn("Oil Services", out["category"].tolist())
 
 
 class TestBoundarySelection(unittest.TestCase):

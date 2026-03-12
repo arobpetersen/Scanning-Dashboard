@@ -39,3 +39,30 @@ def build_window_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -> 
     )
     ranked["rank"] = ranked.index + 1
     return ranked[["rank", "theme", perf_col, "momentum_score", "rank_change"]], None
+
+
+def build_category_leaderboard(leaderboard_df: pd.DataFrame, top_k: int = 10) -> pd.DataFrame:
+    """Aggregate a theme leaderboard into a category summary view."""
+    if leaderboard_df.empty:
+        return pd.DataFrame()
+
+    grouped = leaderboard_df.copy()
+    grouped["category_group"] = grouped["category"].fillna("").astype(str).str.strip()
+    grouped.loc[grouped["category_group"] == "", "category_group"] = grouped["theme"]
+
+    aggregated = (
+        grouped.groupby("category_group", dropna=False)
+        .agg(
+            performance=("performance", "mean"),
+            momentum_score=("momentum_score", "mean"),
+            breadth_1m=("breadth_1m", "mean"),
+            theme_count=("theme", "nunique"),
+        )
+        .reset_index()
+        .rename(columns={"category_group": "category"})
+        .sort_values(["performance", "momentum_score", "breadth_1m", "theme_count", "category"], ascending=[False, False, False, False, True])
+        .head(top_k)
+        .reset_index(drop=True)
+    )
+    aggregated["rank"] = aggregated.index + 1
+    return aggregated[["rank", "category", "theme_count", "performance", "momentum_score", "breadth_1m"]]
