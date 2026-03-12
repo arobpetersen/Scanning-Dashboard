@@ -138,6 +138,43 @@ def apply_refresh_failure(conn, ticker: str, run_id: int, error_message: str) ->
     return {"flagged": flagged, "auto_suppressed": auto_suppressed, "category": category}
 
 
+def hygiene_decision_context(row) -> dict[str, str]:
+    status = str(row.get("status") or "")
+    suggested = str(row.get("suggested_status") or "")
+    category = str(row.get("last_failure_category") or "")
+    consecutive = int(row.get("consecutive_failure_count") or 0)
+
+    if status == REFRESH_SUPPRESSED:
+        return {
+            "recommended_action": "Keep suppressed",
+            "confidence": "high",
+            "explanation": "Refreshes are already suppressed. This preserves lineage/history while keeping the symbol out of active refresh.",
+        }
+    if suggested == REFRESH_SUPPRESSED and category == "NO_CANDLES" and consecutive >= NO_CANDLES_AUTO_SUPPRESS_THRESHOLD:
+        return {
+            "recommended_action": "Approve suppression",
+            "confidence": "high",
+            "explanation": "Repeated NO_CANDLES failures have reached a strong threshold. Suppress from active refresh; review theme membership separately.",
+        }
+    if suggested == REFRESH_SUPPRESSED and category == "NO_CANDLES" and consecutive >= NO_CANDLES_FLAG_THRESHOLD:
+        return {
+            "recommended_action": "Approve suppression",
+            "confidence": "medium",
+            "explanation": "Repeated NO_CANDLES failures suggest this symbol may no longer provide usable data. Suppression is preferred to deletion.",
+        }
+    if status == WATCH:
+        return {
+            "recommended_action": "Keep active / watch",
+            "confidence": "medium",
+            "explanation": "Operational issue pattern exists, but evidence is not strong enough for suppression. Continue refresh with monitoring.",
+        }
+    return {
+        "recommended_action": "Review manually",
+        "confidence": "low",
+        "explanation": "Use failure streaks and data recency as context. Suppression controls refresh eligibility; it does not delete DB lineage or theme history.",
+    }
+
+
 def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
     return conn.execute(
         """
@@ -184,6 +221,31 @@ def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
         """,
         [limit],
     ).df()
+
+
+def sort_symbol_hygiene_queue(queue: pd.DataFrame, sort_mode: str) -> pd.DataFrame:
+    if queue.empty:
+        return queue
+
+    out = queue.copy()
+    decision = out.apply(hygiene_decision_context, axis=1, result_type="expand")
+    out["recommended_action"] = decision["recommended_action"]
+    out["confidence"] = decision["confidence"]
+    out["recommendation_explanation"] = decision["explanation"]
+    out["_confidence_rank"] = out["confidence"].map({"high": 2, "medium": 1, "low": 0}).fillna(0)
+    out["_days_since_sort"] = out["days_since_last_valid_data"].fillna(10**9)
+
+    if sort_mode == "Longest invalid period":
+        sort_cols = ["_days_since_sort", "_confidence_rank", "consecutive_failure_count", "rolling_failure_count", "ticker"]
+    elif sort_mode == "Most consecutive failures":
+        sort_cols = ["consecutive_failure_count", "_confidence_rank", "_days_since_sort", "rolling_failure_count", "ticker"]
+    elif sort_mode == "Most rolling failures":
+        sort_cols = ["rolling_failure_count", "_confidence_rank", "_days_since_sort", "consecutive_failure_count", "ticker"]
+    else:
+        sort_cols = ["_confidence_rank", "_days_since_sort", "consecutive_failure_count", "rolling_failure_count", "ticker"]
+
+    ascending = [False, False, False, False, True]
+    return out.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
 
 
 def approve_suppression(conn, ticker: str, note: str | None = None) -> None:

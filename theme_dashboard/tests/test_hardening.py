@@ -23,7 +23,7 @@ from src.queries import (
     ticker_history_last_n_snapshots,
     top_theme_movers,
 )
-from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success, symbol_hygiene_queue
+from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success, sort_symbol_hygiene_queue, symbol_hygiene_queue
 from src.theme_service import seed_if_needed
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
@@ -468,6 +468,46 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
         self.assertEqual(str(out.iloc[0]["last_market_data_at"]), "2026-02-28 21:00:00")
         self.assertGreaterEqual(int(out.iloc[0]["days_since_last_valid_data"]), 0)
         conn.close()
+
+    def test_sort_symbol_hygiene_queue_supports_operational_priorities(self):
+        queue = pd.DataFrame(
+            [
+                {
+                    "ticker": "AAA",
+                    "status": "inactive_candidate",
+                    "suggested_status": "refresh_suppressed",
+                    "suggested_reason": "review",
+                    "last_failure_category": "NO_CANDLES",
+                    "consecutive_failure_count": 5,
+                    "rolling_failure_count": 8,
+                    "last_success_at": None,
+                    "last_failure_at": "2026-03-10 22:00:00",
+                    "last_run_id": 5,
+                    "last_market_data_at": "2026-02-01 21:00:00",
+                    "days_since_last_valid_data": 40,
+                },
+                {
+                    "ticker": "BBB",
+                    "status": "watch",
+                    "suggested_status": None,
+                    "suggested_reason": None,
+                    "last_failure_category": "TIMEOUT",
+                    "consecutive_failure_count": 1,
+                    "rolling_failure_count": 12,
+                    "last_success_at": "2026-03-10 22:00:00",
+                    "last_failure_at": "2026-03-11 22:00:00",
+                    "last_run_id": 6,
+                    "last_market_data_at": "2026-03-10 21:00:00",
+                    "days_since_last_valid_data": 2,
+                },
+            ]
+        )
+
+        by_confidence = sort_symbol_hygiene_queue(queue, "Highest confidence")
+        by_rolling = sort_symbol_hygiene_queue(queue, "Most rolling failures")
+
+        self.assertEqual(by_confidence.iloc[0]["ticker"], "AAA")
+        self.assertEqual(by_rolling.iloc[0]["ticker"], "BBB")
 
 
 class TestMetricFormattingAndReturnSafety(unittest.TestCase):

@@ -19,9 +19,16 @@ from src.fetch_data import mark_stale_running_runs
 from src.metric_formatting import short_timestamp
 from src.queries import baseline_status, last_refresh_run, refresh_history, row_counts, snapshot_counts, source_audit_status, theme_health_overview
 from src.suggestions_service import suggestion_status_counts
-from src.symbol_hygiene import approve_suppression, reject_keep_active, reset_failure_history, symbol_hygiene_queue
+from src.symbol_hygiene import (
+    approve_suppression,
+    hygiene_decision_context,
+    reject_keep_active,
+    reset_failure_history,
+    sort_symbol_hygiene_queue,
+    symbol_hygiene_queue,
+)
 from src.theme_selection import set_theme_selection_state
-from src.theme_service import seed_if_needed
+from src.theme_service import get_theme_members, seed_if_needed, update_theme
 
 st.set_page_config(page_title="Health", layout="wide")
 st.title("Health & Operations")
@@ -47,42 +54,6 @@ def _extract_selected_row(event) -> int | None:
             return int(getattr(cell, "row"))
     return None
 
-
-def _hygiene_recommendation(row) -> tuple[str, str, str]:
-    status = str(row.get("status") or "")
-    suggested = str(row.get("suggested_status") or "")
-    category = str(row.get("last_failure_category") or "")
-    consecutive = int(row.get("consecutive_failure_count") or 0)
-
-    if status == "refresh_suppressed":
-        return (
-            "Keep suppressed",
-            "high",
-            "Refreshes are already suppressed. This preserves lineage/history while keeping the symbol out of active refresh.",
-        )
-    if suggested == "refresh_suppressed" and category == "NO_CANDLES" and consecutive >= 5:
-        return (
-            "Approve suppression",
-            "high",
-            "Repeated NO_CANDLES failures have reached a strong threshold. Suppress from active refresh; review theme membership separately.",
-        )
-    if suggested == "refresh_suppressed" and category == "NO_CANDLES" and consecutive >= 3:
-        return (
-            "Approve suppression",
-            "medium",
-            "Repeated NO_CANDLES failures suggest this symbol may no longer provide usable data. Suppression is preferred to deletion.",
-        )
-    if status == "watch":
-        return (
-            "Keep active / watch",
-            "medium",
-            "Operational issue pattern exists, but evidence is not strong enough for suppression. Continue refresh with monitoring.",
-        )
-    return (
-        "Review manually",
-        "low",
-        "Use failure streaks and data recency as context. Suppression controls refresh eligibility; it does not delete DB lineage or theme history.",
-    )
 
 init_db()
 with get_conn() as conn:
@@ -204,13 +175,28 @@ with ops_tab:
     if queue.empty:
         st.success("No flagged/suppressed/watch symbols currently in queue.")
     else:
+        queue_sort = st.selectbox(
+            "Queue sort",
+            [
+                "Highest confidence",
+                "Longest invalid period",
+                "Most consecutive failures",
+                "Most rolling failures",
+            ],
+            index=0,
+            help="Prioritize the review queue by confidence, data staleness, or failure streak intensity.",
+        )
+        queue = sort_symbol_hygiene_queue(queue, queue_sort)
         st.caption(
             "Suppression is a refresh-control decision, not a delete action. "
             "Preferred policy: keep symbol lineage/history in DuckDB, suppress high-confidence non-viable symbols from active refresh, and review theme membership separately."
         )
         for _, row in queue.iterrows():
             ticker = str(row["ticker"])
-            recommendation, confidence, recommendation_help = _hygiene_recommendation(row)
+            decision = hygiene_decision_context(row)
+            recommendation = decision["recommended_action"]
+            confidence = decision["confidence"]
+            recommendation_help = decision["explanation"]
             last_market_data = short_timestamp(row.get("last_market_data_at")) or "none"
             days_since_valid = row.get("days_since_last_valid_data")
             days_since_valid_text = "unknown" if days_since_valid is None else f"{int(days_since_valid)}d"
@@ -339,6 +325,57 @@ with themes_tab:
             theme_id = int(picked["theme_id"])
             theme_name = str(picked["theme_name"])
             theme_label = f"{theme_name} ({picked['category']})"
+            with get_conn() as conn:
+                member_rows = get_theme_members(conn, theme_id)
+            members = member_rows["ticker"].tolist() if not member_rows.empty else []
+
+            st.subheader("Selected theme detail")
+            st.caption("Edit only theme-owned fields here. Membership inspection is read-only in this panel; use Themes page management for broader changes.")
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Theme", theme_name)
+            d2.metric("Category", str(picked["category"] or "Uncategorized"))
+            d3.metric("Active", "Yes" if bool(picked["is_active"]) else "No")
+            d4.metric("Ticker count", int(picked["constituent_count"] or 0))
+            if members:
+                st.caption("Current member tickers")
+                st.dataframe(member_rows, width="stretch", hide_index=True)
+            else:
+                st.info("This theme currently has no member tickers.")
+
+            with st.form(f"health_theme_edit_{theme_id}"):
+                st.write("Edit theme fields")
+                edit_name = st.text_input("Theme name", value=theme_name, help="Required. Theme names must remain unique.")
+                edit_category = st.text_input(
+                    "Category",
+                    value=str(picked["category"] or ""),
+                    help="Optional. Blank values will be normalized to 'Uncategorized'.",
+                )
+                edit_active = st.checkbox("Theme is active", value=bool(picked["is_active"]))
+                submitted = st.form_submit_button("Save theme changes")
+
+            if submitted:
+                intended_name = edit_name.strip()
+                intended_category = edit_category.strip() or "Uncategorized"
+                current_category = str(picked["category"] or "Uncategorized")
+                current_active = bool(picked["is_active"])
+
+                if not intended_name:
+                    st.error("Theme name cannot be blank.")
+                elif (
+                    intended_name == theme_name
+                    and intended_category == current_category
+                    and edit_active == current_active
+                ):
+                    st.info("No changes to save.")
+                else:
+                    try:
+                        with get_conn() as conn:
+                            update_theme(conn, theme_id, edit_name, edit_category, edit_active)
+                        st.success(f"Updated theme `{intended_name}`.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not update theme. {exc}")
+
             if st.button(f"Open `{theme_name}` in Themes detail", key="open_health_theme_detail"):
                 st.session_state["manage_theme"] = f"{theme_name} [{theme_id}]"
                 set_theme_selection_state(st.session_state, theme_id, theme_label, "health_theme")
