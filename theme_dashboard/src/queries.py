@@ -29,6 +29,18 @@ def _table_has_column(conn, table_name: str, column_name: str) -> bool:
     return bool(row and int(row[0]) > 0)
 
 
+def _table_exists(conn, table_name: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM duckdb_tables()
+        WHERE table_name = ?
+        """,
+        [table_name],
+    ).fetchone()
+    return bool(row and int(row[0]) > 0)
+
+
 def _theme_snapshot_source_expr(conn) -> str:
     if _table_has_column(conn, "theme_snapshots", "snapshot_source"):
         return "snapshot_source"
@@ -43,6 +55,86 @@ def _ticker_snapshot_source_expr(conn) -> str:
     if _table_has_column(conn, "refresh_runs", "provider"):
         return "COALESCE(r.provider, 'live')"
     return "'live'"
+
+
+def _historical_theme_snapshot_union(conn) -> pd.DataFrame:
+    preferred_source = preferred_theme_snapshot_source(conn)
+    if not preferred_source:
+        return pd.DataFrame()
+    positive_1w_expr = "ts.positive_1w_breadth_pct" if _table_has_column(conn, "theme_snapshots", "positive_1w_breadth_pct") else "NULL"
+    positive_3m_expr = "ts.positive_3m_breadth_pct" if _table_has_column(conn, "theme_snapshots", "positive_3m_breadth_pct") else "NULL"
+
+    captured = conn.execute(
+        f"""
+        SELECT
+            ts.run_id,
+            CAST(ts.snapshot_time AS DATE) AS snapshot_date,
+            ts.snapshot_time,
+            ts.theme_id,
+            t.name AS theme,
+            t.category,
+            ts.ticker_count,
+            ts.avg_1w,
+            ts.avg_1m,
+            ts.avg_3m,
+            {positive_1w_expr} AS positive_1w_breadth_pct,
+            ts.positive_1m_breadth_pct,
+            {positive_3m_expr} AS positive_3m_breadth_pct,
+            ts.composite_score,
+            ts.snapshot_source AS snapshot_source,
+            'captured' AS provenance_class,
+            ts.snapshot_source AS provenance_source_label
+        FROM theme_snapshots ts
+        JOIN themes t ON t.id = ts.theme_id
+        WHERE ts.snapshot_source = ?
+        """,
+        [preferred_source],
+    ).df()
+
+    reconstructed = pd.DataFrame()
+    if _table_exists(conn, "reconstructed_theme_snapshots"):
+        reconstructed = conn.execute(
+            """
+            SELECT
+                r.run_id,
+                r.snapshot_date,
+                r.snapshot_time,
+                r.theme_id,
+                t.name AS theme,
+                t.category,
+                r.ticker_count,
+                r.avg_1w,
+                r.avg_1m,
+                r.avg_3m,
+                r.positive_1w_breadth_pct,
+                r.positive_1m_breadth_pct,
+                r.positive_3m_breadth_pct,
+                r.composite_score,
+                r.market_data_source AS snapshot_source,
+                r.provenance_class,
+                r.provenance_source_label
+            FROM reconstructed_theme_snapshots r
+            JOIN themes t ON t.id = r.theme_id
+            WHERE r.market_data_source = ?
+            """,
+            [preferred_source],
+        ).df()
+
+    combined = pd.concat([captured, reconstructed], ignore_index=True) if not reconstructed.empty else captured
+    if combined.empty:
+        return combined
+
+    combined["snapshot_time"] = pd.to_datetime(combined["snapshot_time"])
+    combined["snapshot_date"] = pd.to_datetime(combined["snapshot_date"]).dt.date
+    combined["_precedence"] = combined["provenance_class"].map({"captured": 0, "reconstructed": 1}).fillna(9)
+    combined = (
+        combined.sort_values(["theme_id", "snapshot_date", "_precedence", "snapshot_time"], ascending=[True, True, True, False])
+        .drop_duplicates(subset=["theme_id", "snapshot_date"], keep="first")
+        .drop(columns=["_precedence"])
+        .sort_values(["snapshot_time", "composite_score"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
+    return combined
 
 
 def last_refresh_run(conn) -> pd.DataFrame:
@@ -212,211 +304,102 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
 
 
 def theme_snapshot_history(conn, theme_id: int, limit: int = 20) -> pd.DataFrame:
-    preferred_source = preferred_theme_snapshot_source(conn)
-    if not preferred_source:
+    history = _historical_theme_snapshot_union(conn)
+    if history.empty:
         return pd.DataFrame()
-    return conn.execute(
-        """
-        SELECT ts.run_id, ts.snapshot_time, ts.ticker_count,
-               ts.avg_1w, ts.avg_1m, ts.avg_3m,
-               ts.positive_1w_breadth_pct, ts.positive_1m_breadth_pct, ts.positive_3m_breadth_pct,
-               ts.composite_score
-        FROM theme_snapshots ts
-        WHERE ts.theme_id = ?
-          AND ts.snapshot_source = ?
-        ORDER BY ts.run_id DESC
-        LIMIT ?
-        """,
-        [theme_id, preferred_source, limit],
-    ).df()
+    view = history[history["theme_id"] == int(theme_id)].copy()
+    if view.empty:
+        return view
+    return (
+        view[
+            [
+                "run_id",
+                "snapshot_time",
+                "ticker_count",
+                "avg_1w",
+                "avg_1m",
+                "avg_3m",
+                "positive_1w_breadth_pct",
+                "positive_1m_breadth_pct",
+                "positive_3m_breadth_pct",
+                "composite_score",
+                "snapshot_source",
+                "provenance_class",
+                "provenance_source_label",
+            ]
+        ]
+        .sort_values(["snapshot_time", "run_id"], ascending=[False, False])
+        .head(limit)
+        .reset_index(drop=True)
+    )
 
 
 def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
-    preferred_source = preferred_theme_snapshot_source(conn)
-    if not preferred_source:
+    history = _historical_theme_snapshot_union(conn)
+    if history.empty:
         return pd.DataFrame()
-    # Boundary-based windowing keeps short lookbacks (especially 1W) stable on sparse/weekly cadence.
-    # We anchor to the latest available snapshot and pick the nearest snapshot at or before start target.
-    return conn.execute(
-        """
-        WITH latest AS (
-            SELECT MAX(snapshot_time) AS latest_time
-            FROM theme_snapshots
-            WHERE snapshot_source = ?
-        ),
-        bounds AS (
-            SELECT
-                latest_time AS end_time,
-                latest_time - (? * INTERVAL '1 day') AS target_start
-            FROM latest
-            WHERE latest_time IS NOT NULL
-        ),
-        start_pick AS (
-            SELECT MAX(ts.snapshot_time) AS start_time
-            FROM theme_snapshots ts
-            JOIN bounds b ON TRUE
-            WHERE ts.snapshot_time <= b.target_start
-              AND ts.snapshot_source = ?
-        ),
-        effective AS (
-            SELECT
-                COALESCE(sp.start_time, (SELECT MIN(snapshot_time) FROM theme_snapshots WHERE snapshot_source = ?)) AS start_time,
-                b.end_time AS end_time
-            FROM bounds b
-            LEFT JOIN start_pick sp ON TRUE
-        )
-        SELECT ts.run_id, ts.snapshot_time, ts.theme_id, t.name AS theme, t.category,
-               ts.ticker_count, ts.avg_1w, ts.avg_1m, ts.avg_3m,
-               ts.snapshot_source,
-               ts.positive_1m_breadth_pct, ts.composite_score
-        FROM theme_snapshots ts
-        JOIN themes t ON t.id = ts.theme_id
-        JOIN effective e ON ts.snapshot_time BETWEEN e.start_time AND e.end_time
-        WHERE ts.snapshot_source = ?
-        ORDER BY ts.snapshot_time ASC, ts.composite_score DESC
-        """,
-        [preferred_source, lookback_days, preferred_source, preferred_source, preferred_source],
-    ).df()
+
+    boundary_times = pd.to_datetime(history["snapshot_time"]).dropna().drop_duplicates().sort_values()
+    if boundary_times.empty:
+        return pd.DataFrame()
+
+    end_time = boundary_times.iloc[-1]
+    target_start = end_time - pd.Timedelta(days=int(lookback_days))
+    start_candidates = boundary_times[boundary_times <= target_start]
+    start_time = start_candidates.iloc[-1] if not start_candidates.empty else boundary_times.iloc[0]
+
+    window = history[(pd.to_datetime(history["snapshot_time"]) >= start_time) & (pd.to_datetime(history["snapshot_time"]) <= end_time)].copy()
+    return window.sort_values(["snapshot_time", "composite_score"], ascending=[True, False]).reset_index(drop=True)
 
 
 def top_theme_movers(conn, lookback_days: int, top_n: int = 20) -> pd.DataFrame:
-    preferred_source = preferred_theme_snapshot_source(conn)
-    if not preferred_source:
+    history = theme_history_window(conn, lookback_days)
+    if history.empty:
         return pd.DataFrame()
-    theme_source_expr = _theme_snapshot_source_expr(conn)
-    return conn.execute(
-        f"""
-        WITH latest AS (
-            SELECT MAX(snapshot_time) AS latest_time
-            FROM theme_snapshots
-            WHERE {theme_source_expr} = ?
-        ),
-        bounds AS (
-            SELECT
-                latest_time AS end_time,
-                latest_time - (? * INTERVAL '1 day') AS target_start
-            FROM latest
-            WHERE latest_time IS NOT NULL
-        ),
-        start_pick AS (
-            SELECT MAX(theme_snapshots.snapshot_time) AS start_time
-            FROM theme_snapshots
-            JOIN bounds b ON TRUE
-            WHERE theme_snapshots.snapshot_time <= b.target_start
-              AND {theme_source_expr} = ?
-        ),
-        effective AS (
-            SELECT
-                COALESCE(
-                    sp.start_time,
-                    (SELECT MIN(snapshot_time) FROM theme_snapshots WHERE {theme_source_expr} = ?)
-                ) AS start_time,
-                b.end_time AS end_time
-            FROM bounds b
-            LEFT JOIN start_pick sp ON TRUE
-        ),
-        in_window AS (
-            SELECT
-                   ts.theme_id,
-                   t.name AS theme,
-                   ts.snapshot_time,
-                   ts.run_id,
-                   ts.composite_score,
-                   ts.positive_1m_breadth_pct,
-                   ROW_NUMBER() OVER (PARTITION BY ts.theme_id ORDER BY ts.snapshot_time ASC, ts.run_id ASC) AS first_rn,
-                   ROW_NUMBER() OVER (PARTITION BY ts.theme_id ORDER BY ts.snapshot_time DESC, ts.run_id DESC) AS last_rn
-            FROM theme_snapshots ts
-            JOIN themes t ON t.id = ts.theme_id
-            JOIN effective e ON ts.snapshot_time BETWEEN e.start_time AND e.end_time
-            WHERE {theme_source_expr} = ?
-        ),
-        first_last AS (
-            SELECT
-                w.theme_id,
-                MAX(CASE WHEN w.first_rn = 1 THEN w.theme END) AS theme,
-                MAX(CASE WHEN w.first_rn = 1 THEN w.composite_score END) AS start_composite,
-                MAX(CASE WHEN w.last_rn = 1 THEN w.composite_score END) AS end_composite,
-                MAX(CASE WHEN w.first_rn = 1 THEN w.positive_1m_breadth_pct END) AS start_breadth,
-                MAX(CASE WHEN w.last_rn = 1 THEN w.positive_1m_breadth_pct END) AS end_breadth
-            FROM in_window w
-            GROUP BY w.theme_id
-        )
-        SELECT f.theme_id, f.theme,
-               ROUND(f.start_composite,2) AS start_composite,
-               ROUND(f.end_composite,2) AS end_composite,
-               ROUND(f.end_composite - f.start_composite,2) AS delta_composite,
-               ROUND(f.start_breadth,2) AS start_breadth,
-               ROUND(f.end_breadth,2) AS end_breadth,
-               ROUND(f.end_breadth - f.start_breadth,2) AS delta_breadth
-        FROM first_last f
-        ORDER BY end_composite DESC, theme
-        LIMIT ?
-        """,
-        [preferred_source, lookback_days, preferred_source, preferred_source, preferred_source, top_n],
-    ).df()
+
+    history = history.sort_values(["theme_id", "snapshot_time"]).copy()
+    first = history.groupby("theme_id", as_index=False).first()
+    last = history.groupby("theme_id", as_index=False).last()
+    merged = first[["theme_id", "theme", "composite_score", "positive_1m_breadth_pct"]].merge(
+        last[["theme_id", "theme", "composite_score", "positive_1m_breadth_pct"]],
+        on=["theme_id", "theme"],
+        suffixes=("_start", "_end"),
+    )
+    merged["delta_composite"] = merged["composite_score_end"] - merged["composite_score_start"]
+    merged["delta_breadth"] = merged["positive_1m_breadth_pct_end"] - merged["positive_1m_breadth_pct_start"]
+    merged = merged.rename(
+        columns={
+            "composite_score_start": "start_composite",
+            "composite_score_end": "end_composite",
+            "positive_1m_breadth_pct_start": "start_breadth",
+            "positive_1m_breadth_pct_end": "end_breadth",
+        }
+    )
+    merged = merged.round(2).sort_values(["end_composite", "theme"], ascending=[False, True]).head(top_n)
+    return merged[["theme_id", "theme", "start_composite", "end_composite", "delta_composite", "start_breadth", "end_breadth", "delta_breadth"]].reset_index(drop=True)
 
 
 def top_n_membership_changes(conn, lookback_days: int, top_n: int = 20) -> tuple[list[str], list[str]]:
-    preferred_source = preferred_theme_snapshot_source(conn)
-    if not preferred_source:
+    history = theme_history_window(conn, lookback_days)
+    if history.empty:
         return [], []
-    first_top = conn.execute(
-        """
-        WITH latest AS (
-            SELECT MAX(snapshot_time) AS latest_time
-            FROM theme_snapshots
-            WHERE snapshot_source = ?
-        ),
-        bounds AS (
-            SELECT
-                latest_time AS end_time,
-                latest_time - (? * INTERVAL '1 day') AS target_start
-            FROM latest
-            WHERE latest_time IS NOT NULL
-        ),
-        start_pick AS (
-            SELECT MAX(ts.snapshot_time) AS start_time
-            FROM theme_snapshots ts
-            JOIN bounds b ON TRUE
-            WHERE ts.snapshot_time <= b.target_start
-              AND ts.snapshot_source = ?
-        ),
-        effective AS (
-            SELECT
-                COALESCE(sp.start_time, (SELECT MIN(snapshot_time) FROM theme_snapshots WHERE snapshot_source = ?)) AS start_time,
-                b.end_time AS end_time
-            FROM bounds b
-            LEFT JOIN start_pick sp ON TRUE
-        )
-        SELECT t.name
-        FROM theme_snapshots ts
-        JOIN themes t ON t.id = ts.theme_id
-        JOIN effective e ON ts.snapshot_time = e.start_time
-        WHERE ts.snapshot_source = ?
-        ORDER BY ts.composite_score DESC
-        LIMIT ?
-        """,
-        [preferred_source, lookback_days, preferred_source, preferred_source, preferred_source, top_n],
-    ).df()
-    last_top = conn.execute(
-        """
-        WITH latest AS (
-            SELECT MAX(snapshot_time) AS latest_time
-            FROM theme_snapshots
-            WHERE snapshot_source = ?
-        )
-        SELECT t.name
-        FROM theme_snapshots ts
-        JOIN themes t ON t.id = ts.theme_id
-        JOIN latest l ON ts.snapshot_time = l.latest_time
-        WHERE ts.snapshot_source = ?
-        ORDER BY ts.composite_score DESC
-        LIMIT ?
-        """,
-        [preferred_source, preferred_source, top_n],
-    ).df()
-    start_set = set(first_top["name"].tolist()) if not first_top.empty else set()
-    end_set = set(last_top["name"].tolist()) if not last_top.empty else set()
+    boundary_times = pd.to_datetime(history["snapshot_time"]).dropna().drop_duplicates().sort_values()
+    if len(boundary_times) < 2:
+        return [], []
+    start_time = boundary_times.iloc[0]
+    end_time = boundary_times.iloc[-1]
+    start_top = (
+        history[pd.to_datetime(history["snapshot_time"]) == start_time]
+        .sort_values(["composite_score", "theme"], ascending=[False, True])
+        .head(top_n)
+    )
+    end_top = (
+        history[pd.to_datetime(history["snapshot_time"]) == end_time]
+        .sort_values(["composite_score", "theme"], ascending=[False, True])
+        .head(top_n)
+    )
+    start_set = set(start_top["theme"].astype(str).tolist()) if not start_top.empty else set()
+    end_set = set(end_top["theme"].astype(str).tolist()) if not end_top.empty else set()
     return sorted(end_set - start_set), sorted(start_set - end_set)
 
 
@@ -523,23 +506,35 @@ def synthetic_data_active(conn) -> bool:
 
 
 def theme_history_last_n_snapshots(conn, theme_id: int, snapshot_limit: int = 14) -> pd.DataFrame:
-    preferred_source = preferred_theme_snapshot_source(conn)
-    if not preferred_source:
+    history = _historical_theme_snapshot_union(conn)
+    if history.empty:
         return pd.DataFrame()
-    return conn.execute(
-        """
-        SELECT ts.run_id, ts.snapshot_time, ts.theme_id,
-               ts.ticker_count, ts.avg_1w, ts.avg_1m, ts.avg_3m,
-               ts.positive_1w_breadth_pct, ts.positive_1m_breadth_pct, ts.positive_3m_breadth_pct,
-               ts.composite_score, ts.snapshot_source
-        FROM theme_snapshots ts
-        WHERE ts.theme_id = ?
-          AND ts.snapshot_source = ?
-        ORDER BY ts.snapshot_time DESC
-        LIMIT ?
-        """,
-        [theme_id, preferred_source, snapshot_limit],
-    ).df()
+    view = history[history["theme_id"] == int(theme_id)].copy()
+    if view.empty:
+        return view
+    return (
+        view[
+            [
+                "run_id",
+                "snapshot_time",
+                "theme_id",
+                "ticker_count",
+                "avg_1w",
+                "avg_1m",
+                "avg_3m",
+                "positive_1w_breadth_pct",
+                "positive_1m_breadth_pct",
+                "positive_3m_breadth_pct",
+                "composite_score",
+                "snapshot_source",
+                "provenance_class",
+                "provenance_source_label",
+            ]
+        ]
+        .sort_values(["snapshot_time", "run_id"], ascending=[False, False])
+        .head(snapshot_limit)
+        .reset_index(drop=True)
+    )
 
 
 def ticker_history_last_n_snapshots(conn, ticker: str, snapshot_limit: int = 14) -> pd.DataFrame:
@@ -719,6 +714,35 @@ def themes_dimension(conn) -> pd.DataFrame:
         FROM themes
         ORDER BY name
         """
+    ).df()
+
+
+def historical_reconstruction_runs(conn, limit: int = 20) -> pd.DataFrame:
+    if not _table_exists(conn, "historical_reconstruction_runs"):
+        return pd.DataFrame()
+    return conn.execute(
+        """
+        SELECT
+            run_id,
+            run_kind,
+            provenance_source_label,
+            market_data_source,
+            status,
+            start_date,
+            end_date,
+            ticker_count,
+            theme_count,
+            snapshot_rows_written,
+            snapshot_rows_skipped,
+            failed_tickers,
+            started_at,
+            finished_at,
+            error_message
+        FROM historical_reconstruction_runs
+        ORDER BY run_id DESC
+        LIMIT ?
+        """,
+        [limit],
     ).df()
 
 

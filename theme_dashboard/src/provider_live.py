@@ -100,9 +100,7 @@ class LiveProvider(ProviderBase):
             return None
         return float(sum(sample) / len(sample))
 
-    def _fetch_history(self, ticker: str) -> tuple[list[float], list[float], datetime]:
-        end_date = date.today()
-        start_date = end_date - timedelta(days=365)
+    def fetch_ticker_history_range(self, ticker: str, start_date: date, end_date: date) -> pd.DataFrame:
         payload = self._get(
             f"/v2/aggs/ticker/{ticker}/range/1/day/{start_date.isoformat()}/{end_date.isoformat()}",
             adjusted="true",
@@ -114,16 +112,32 @@ class LiveProvider(ProviderBase):
         if not results:
             raise RuntimeError("NO_CANDLES: Massive returned no daily aggregates")
 
-        closes = [float(r["c"]) for r in results if r.get("c") is not None]
-        volumes = [float(r["v"]) for r in results if r.get("v") is not None]
-        if not closes:
+        rows = []
+        for result in results:
+            if result.get("c") is None or result.get("t") is None:
+                continue
+            snapshot_date = datetime.fromtimestamp(float(result["t"]) / 1000.0, tz=timezone.utc).date()
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "snapshot_date": snapshot_date,
+                    "close": float(result["c"]),
+                    "volume": float(result["v"]) if result.get("v") is not None else None,
+                }
+            )
+        history = pd.DataFrame(rows)
+        if history.empty:
             raise RuntimeError("NO_CANDLES: Massive aggregate closes missing")
+        return history
 
-        ts_ms = results[-1].get("t")
-        if ts_ms is None:
-            last_updated = datetime.now(timezone.utc)
-        else:
-            last_updated = datetime.fromtimestamp(float(ts_ms) / 1000.0, tz=timezone.utc)
+    def _fetch_history(self, ticker: str) -> tuple[list[float], list[float], datetime]:
+        end_date = date.today()
+        start_date = end_date - timedelta(days=365)
+        history = self.fetch_ticker_history_range(ticker, start_date, end_date)
+        closes = history["close"].astype(float).tolist()
+        volumes = history["volume"].dropna().astype(float).tolist()
+
+        last_updated = datetime.combine(history["snapshot_date"].max(), datetime.min.time(), tzinfo=timezone.utc)
 
         return closes, volumes, last_updated
 

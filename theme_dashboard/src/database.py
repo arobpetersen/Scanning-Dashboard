@@ -11,6 +11,7 @@ CREATE SEQUENCE IF NOT EXISTS themes_id_seq;
 CREATE SEQUENCE IF NOT EXISTS snapshots_id_seq;
 CREATE SEQUENCE IF NOT EXISTS refresh_run_id_seq;
 CREATE SEQUENCE IF NOT EXISTS suggestion_id_seq;
+CREATE SEQUENCE IF NOT EXISTS historical_reconstruction_run_id_seq;
 
 CREATE TABLE IF NOT EXISTS themes (
     id BIGINT PRIMARY KEY DEFAULT nextval('themes_id_seq'),
@@ -90,6 +91,47 @@ CREATE TABLE IF NOT EXISTS theme_snapshots (
     PRIMARY KEY (run_id, theme_id)
 );
 
+CREATE TABLE IF NOT EXISTS historical_reconstruction_runs (
+    run_id BIGINT PRIMARY KEY DEFAULT nextval('historical_reconstruction_run_id_seq'),
+    run_kind VARCHAR NOT NULL,
+    provenance_class VARCHAR NOT NULL DEFAULT 'reconstructed',
+    provenance_source_label VARCHAR NOT NULL,
+    market_data_source VARCHAR NOT NULL,
+    started_at TIMESTAMP NOT NULL,
+    finished_at TIMESTAMP,
+    status VARCHAR NOT NULL,
+    start_date DATE,
+    end_date DATE,
+    target_tickers VARCHAR,
+    target_theme_ids VARCHAR,
+    ticker_count BIGINT NOT NULL DEFAULT 0,
+    theme_count BIGINT NOT NULL DEFAULT 0,
+    snapshot_rows_written BIGINT NOT NULL DEFAULT 0,
+    snapshot_rows_skipped BIGINT NOT NULL DEFAULT 0,
+    failed_tickers VARCHAR,
+    error_message VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS reconstructed_theme_snapshots (
+    run_id BIGINT NOT NULL,
+    snapshot_date DATE NOT NULL,
+    snapshot_time TIMESTAMP NOT NULL,
+    theme_id BIGINT NOT NULL,
+    ticker_count BIGINT NOT NULL,
+    avg_1w DOUBLE,
+    avg_1m DOUBLE,
+    avg_3m DOUBLE,
+    positive_1w_breadth_pct DOUBLE,
+    positive_1m_breadth_pct DOUBLE,
+    positive_3m_breadth_pct DOUBLE,
+    composite_score DOUBLE,
+    provenance_class VARCHAR NOT NULL DEFAULT 'reconstructed',
+    provenance_source_label VARCHAR NOT NULL,
+    market_data_source VARCHAR NOT NULL,
+    membership_basis VARCHAR NOT NULL DEFAULT 'current_governed_membership',
+    PRIMARY KEY (snapshot_date, theme_id, provenance_source_label)
+);
+
 CREATE TABLE IF NOT EXISTS theme_suggestions (
     suggestion_id BIGINT PRIMARY KEY DEFAULT nextval('suggestion_id_seq'),
     suggestion_type VARCHAR NOT NULL,
@@ -146,6 +188,9 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_run_id ON ticker_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_ticker ON ticker_snapshots(ticker);
 CREATE INDEX IF NOT EXISTS idx_theme_snapshots_run_id ON theme_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_theme_snapshots_theme_id ON theme_snapshots(theme_id);
+CREATE INDEX IF NOT EXISTS idx_reconstructed_theme_snapshots_theme_id ON reconstructed_theme_snapshots(theme_id);
+CREATE INDEX IF NOT EXISTS idx_reconstructed_theme_snapshots_date ON reconstructed_theme_snapshots(snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_historical_reconstruction_runs_status ON historical_reconstruction_runs(status);
 CREATE INDEX IF NOT EXISTS idx_refresh_failures_run_id ON refresh_failures(run_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_failures_category ON refresh_failures(failure_category);
 CREATE INDEX IF NOT EXISTS idx_refresh_run_tickers_run_id ON refresh_run_tickers(run_id);

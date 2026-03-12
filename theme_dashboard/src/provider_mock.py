@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Iterable
 import pandas as pd
 
@@ -55,3 +55,34 @@ class MockProvider(ProviderBase):
             )
 
         return pd.DataFrame(rows), failures
+
+    def fetch_ticker_history_range(self, ticker: str, start_date: date, end_date: date) -> pd.DataFrame:
+        normalized = (ticker or "").strip().upper()
+        if not normalized:
+            return pd.DataFrame(columns=["ticker", "snapshot_date", "close", "volume"])
+
+        dates = pd.bdate_range(start=start_date, end=end_date)
+        if len(dates) == 0:
+            return pd.DataFrame(columns=["ticker", "snapshot_date", "close", "volume"])
+
+        seed = self._rng_from_ticker(normalized)
+        base_price = 10 + (seed % 12000) / 100
+        drift = ((seed // 29) % 40 - 20) / 1000.0
+        wave_scale = ((seed // 31) % 25 + 5) / 1000.0
+        volume_base = 5e5 + ((seed // 37) % 30000) * 100
+
+        rows = []
+        price = float(base_price)
+        for idx, ts in enumerate(dates):
+            cycle = ((idx % 10) - 5) / 5.0
+            price = max(1.0, price * (1.0 + drift + wave_scale * cycle))
+            rows.append(
+                {
+                    "ticker": normalized,
+                    "snapshot_date": ts.date(),
+                    "close": round(price, 4),
+                    "volume": float(volume_base + (idx % 15) * 5000),
+                }
+            )
+
+        return pd.DataFrame(rows)

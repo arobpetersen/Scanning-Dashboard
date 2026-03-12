@@ -19,6 +19,7 @@ from src.fetch_data import mark_stale_running_runs
 from src.metric_formatting import short_timestamp
 from src.queries import (
     baseline_status,
+    historical_reconstruction_runs,
     last_refresh_run,
     refresh_history,
     row_counts,
@@ -142,6 +143,16 @@ with ops_tab:
             st.info("Mixed source history exists as residue, but current live-facing views are using live-preferred data.")
         else:
             st.success("Current live-facing views are source-pure under live-preferred selection.")
+
+    with get_conn() as conn:
+        reconstruction_runs = historical_reconstruction_runs(conn, limit=10)
+    if not reconstruction_runs.empty:
+        st.subheader("Historical reconstruction runs")
+        st.caption(
+            "Reconstructed daily history is additive and used for deeper movement analysis only. "
+            "It uses current governed membership applied to historical market data and is never treated as true captured point-in-time composition."
+        )
+        st.dataframe(reconstruction_runs, width="stretch", hide_index=True)
 
     if not last_run.empty:
         run = last_run.iloc[0]

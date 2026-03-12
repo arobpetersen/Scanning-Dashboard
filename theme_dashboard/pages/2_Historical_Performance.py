@@ -221,10 +221,19 @@ w1, w2, w3 = st.columns(3)
 w1.metric("Window start", str(pd.to_datetime(window_meta.get("window_start")).strftime("%Y-%m-%d")) if window_meta.get("window_start") is not None else "—")
 w2.metric("Window end", str(pd.to_datetime(window_meta.get("window_end")).strftime("%Y-%m-%d")) if window_meta.get("window_end") is not None else "—")
 w3.metric("Boundary snapshots", int(window_meta.get("boundary_snapshot_count") or 0))
+st.caption(
+    f"Resolved boundary provenance: `{window_meta.get('boundary_provenance_mix') or 'unknown'}` | "
+    f"overall window provenance: `{window_meta.get('provenance_mix') or 'unknown'}`"
+)
 if window_meta.get("collapsed_to_available_history"):
     st.info(
         f"Selected {int(window_meta.get('requested_lookback_days') or 0)}d lookback currently resolves to an effective "
         f"{int(window_meta.get('effective_window_days') or 0)}d boundary window because older snapshots are not yet available."
+    )
+if str(window_meta.get("provenance_mix") or "").startswith("reconstructed") or window_meta.get("provenance_mix") == "mixed":
+    st.caption(
+        "Reconstructed history applies current governed membership to historical market data. "
+        "It improves boundary depth but is not a true point-in-time membership record."
     )
 
 m1, m2, m3, m4 = st.columns(4)

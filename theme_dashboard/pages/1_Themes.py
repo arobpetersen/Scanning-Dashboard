@@ -1,6 +1,8 @@
+import pandas as pd
 import streamlit as st
 
 from src.database import get_conn, init_db
+from src.historical_backfill import reconstruct_theme_history_range
 from src.leaderboard_utils import (
     build_category_leaderboard,
     build_category_theme_breakdown,
@@ -535,6 +537,11 @@ with manage_tab:
                     list(theme_options.keys()),
                     default=selected_theme_labels,
                 )
+                backfill_recent_history = st.checkbox(
+                    "Backfill recent reconstructed history for affected themes (30d)",
+                    value=False,
+                    help="Explicitly runs the reconstructed-history pipeline for this ticker/theme change.",
+                )
                 form_submitted = st.form_submit_button(action_label)
 
             if form_submitted:
@@ -548,6 +555,19 @@ with manage_tab:
                     try:
                         with get_conn() as conn:
                             result = set_ticker_theme_assignments(conn, normalized_form_ticker, chosen_theme_ids)
+                            backfill_result = None
+                            if backfill_recent_history and int(result["added_count"]) > 0:
+                                backfill_result = reconstruct_theme_history_range(
+                                    conn,
+                                    provider_name="live",
+                                    start_date=(pd.Timestamp.utcnow() - pd.Timedelta(days=30)).date().isoformat(),
+                                    end_date=pd.Timestamp.utcnow().date().isoformat(),
+                                    tickers=[normalized_form_ticker],
+                                    theme_ids=list(result.get("affected_theme_ids", [])),
+                                    provenance_source_label="ticker_intake_backfill",
+                                    run_kind="ticker_intake_backfill",
+                                    replace_existing=True,
+                                )
                         if int(result["added_count"]) == 0 and int(result["removed_count"]) == 0:
                             st.session_state["manage_ticker_feedback"] = {
                                 "level": "warning",
@@ -557,12 +577,19 @@ with manage_tab:
                                 ),
                             }
                         else:
+                            extra = ""
+                            if backfill_result is not None:
+                                extra = (
+                                    f" Reconstructed history backfill wrote {int(backfill_result.get('snapshot_rows_written', 0))} "
+                                    f"rows and skipped {int(backfill_result.get('snapshot_rows_skipped', 0))}."
+                                )
                             st.session_state["manage_ticker_feedback"] = {
                                 "level": "success",
                                 "message": (
                                     f"Saved `{result['ticker']}`: "
                                     f"{int(result['added_count'])} assignment(s) added, "
                                     f"{int(result['removed_count'])} removed."
+                                    f"{extra}"
                                 ),
                             }
                         st.rerun()
