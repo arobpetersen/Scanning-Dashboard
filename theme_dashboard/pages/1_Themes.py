@@ -297,6 +297,17 @@ with explore_tab:
             st.dataframe(history_df, width="stretch")
 
 with manage_tab:
+    ticker_feedback = st.session_state.pop("manage_ticker_feedback", None)
+    if ticker_feedback:
+        level = str(ticker_feedback.get("level") or "info")
+        message = str(ticker_feedback.get("message") or "")
+        if level == "success":
+            st.success(message)
+        elif level == "warning":
+            st.warning(message)
+        else:
+            st.error(message)
+
     st.subheader("Create Theme")
     with st.form("create_theme", clear_on_submit=True):
         new_name = st.text_input("Name")
@@ -468,17 +479,22 @@ with manage_tab:
                         with get_conn() as conn:
                             result = set_ticker_theme_assignments(conn, normalized_form_ticker, chosen_theme_ids)
                         if int(result["added_count"]) == 0 and int(result["removed_count"]) == 0:
-                            st.info(
-                                f"No membership changes were needed for `{result['ticker']}`. "
-                                f"It is already assigned to {int(result['assigned_theme_count'])} theme(s)."
-                            )
+                            st.session_state["manage_ticker_feedback"] = {
+                                "level": "warning",
+                                "message": (
+                                    f"No membership changes were needed for `{result['ticker']}`. "
+                                    f"It is already assigned to {int(result['assigned_theme_count'])} theme(s)."
+                                ),
+                            }
                         else:
-                            st.success(
-                                f"Saved `{result['ticker']}`: "
-                                f"{int(result['added_count'])} assignment(s) added, "
-                                f"{int(result['removed_count'])} removed."
-                            )
-                        st.session_state["manage_ticker_lookup"] = normalized_form_ticker
+                            st.session_state["manage_ticker_feedback"] = {
+                                "level": "success",
+                                "message": (
+                                    f"Saved `{result['ticker']}`: "
+                                    f"{int(result['added_count'])} assignment(s) added, "
+                                    f"{int(result['removed_count'])} removed."
+                                ),
+                            }
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Ticker save failed: {exc}")
