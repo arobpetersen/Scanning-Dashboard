@@ -24,11 +24,13 @@ from src.queries import (
     top_theme_movers,
 )
 from src.symbol_hygiene import (
+    OVERRIDE_ACTIONS,
     STAGED_ACTIONS,
     apply_refresh_failure,
     apply_refresh_success,
     apply_staged_symbol_hygiene_actions,
     filter_symbol_hygiene_queue,
+    resolve_staged_symbol_hygiene_action,
     sort_symbol_hygiene_queue,
     symbol_hygiene_queue,
 )
@@ -578,6 +580,13 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
         self.assertEqual(rows, [("AAA", "refresh_suppressed", None), ("BBB", "active", None), ("CCC", "watch", None)])
         self.assertEqual(STAGED_ACTIONS["reset"], "Stage reset history")
         conn.close()
+
+    def test_resolve_staged_symbol_hygiene_action_prefers_override(self):
+        self.assertEqual(resolve_staged_symbol_hygiene_action(True, "none"), "suppress")
+        self.assertEqual(resolve_staged_symbol_hygiene_action(False, "keep_active"), "keep_active")
+        self.assertEqual(resolve_staged_symbol_hygiene_action(True, "watch"), "watch")
+        self.assertEqual(resolve_staged_symbol_hygiene_action(False, "none"), "none")
+        self.assertEqual(OVERRIDE_ACTIONS["reset"], "Reset history")
 
 
 class TestMetricFormattingAndReturnSafety(unittest.TestCase):

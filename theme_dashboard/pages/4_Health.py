@@ -20,10 +20,12 @@ from src.metric_formatting import short_timestamp
 from src.queries import baseline_status, last_refresh_run, refresh_history, row_counts, snapshot_counts, source_audit_status, theme_health_overview
 from src.suggestions_service import suggestion_status_counts
 from src.symbol_hygiene import (
+    OVERRIDE_ACTIONS,
     STAGED_ACTIONS,
     apply_staged_symbol_hygiene_actions,
     filter_symbol_hygiene_queue,
     hygiene_decision_context,
+    resolve_staged_symbol_hygiene_action,
     sort_symbol_hygiene_queue,
     symbol_hygiene_queue,
 )
@@ -252,6 +254,8 @@ with ops_tab:
                     days_since_valid = row.get("days_since_last_valid_data")
                     days_since_valid_text = "unknown" if days_since_valid is None else f"{int(days_since_valid)}d"
                     staged_action = stage_defaults.get(ticker, "none")
+                    default_approve = staged_action == "suppress"
+                    default_override = staged_action if staged_action in OVERRIDE_ACTIONS and staged_action != "none" else "none"
                     with st.container(border=True):
                         c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1.1, 1.2, 1.3, 0.9, 1.1, 1.4])
                         c1.write(f"**{ticker}**")
@@ -270,13 +274,23 @@ with ops_tab:
                         st.caption(str(row.get("suggested_reason") or recommendation_help))
                         if staged_action != "none":
                             st.info(f"Staged: {STAGED_ACTIONS[staged_action]}")
+                        approve_help = (
+                            "Check to stage the common approve-suppression action. "
+                            "If you choose an override below, the override wins."
+                        )
+                        st.checkbox(
+                            "Approve recommended action",
+                            value=default_approve,
+                            key=f"stage_approve_{ticker}",
+                            help=approve_help,
+                        )
                         st.selectbox(
-                            f"Staged action for {ticker}",
-                            options=list(STAGED_ACTIONS.keys()),
-                            index=list(STAGED_ACTIONS.keys()).index(staged_action if staged_action in STAGED_ACTIONS else "none"),
-                            format_func=lambda key: STAGED_ACTIONS[key],
-                            key=f"stage_action_{ticker}",
-                            help="Stage a local review decision. Changes are only written when you apply the staged batch.",
+                            f"Override action for {ticker}",
+                            options=list(OVERRIDE_ACTIONS.keys()),
+                            index=list(OVERRIDE_ACTIONS.keys()).index(default_override),
+                            format_func=lambda key: OVERRIDE_ACTIONS[key],
+                            key=f"stage_override_{ticker}",
+                            help="Optional override for less common actions. Overrides the checkbox if selected.",
                         )
 
                 f1, f2 = st.columns(2)
@@ -285,7 +299,10 @@ with ops_tab:
 
             if update_staged or apply_staged:
                 refreshed_staged = {
-                    str(row["ticker"]): st.session_state.get(f"stage_action_{str(row['ticker'])}", "none")
+                    str(row["ticker"]): resolve_staged_symbol_hygiene_action(
+                        bool(st.session_state.get(f"stage_approve_{str(row['ticker'])}", False)),
+                        st.session_state.get(f"stage_override_{str(row['ticker'])}", "none"),
+                    )
                     for _, row in queue.iterrows()
                 }
                 cleaned = {ticker: action for ticker, action in refreshed_staged.items() if action in STAGED_ACTIONS and action != "none"}

@@ -20,6 +20,12 @@ STAGED_ACTIONS = {
     "watch": "Stage return to watch",
     "reset": "Stage reset history",
 }
+OVERRIDE_ACTIONS = {
+    "none": "No override",
+    "keep_active": "Keep active",
+    "watch": "Return to watch",
+    "reset": "Reset history",
+}
 
 
 def _load_state(conn, ticker: str):
@@ -180,6 +186,13 @@ def hygiene_decision_context(row) -> dict[str, str]:
         "confidence": "low",
         "explanation": "Use failure streaks and data recency as context. Suppression controls refresh eligibility; it does not delete DB lineage or theme history.",
     }
+
+
+def resolve_staged_symbol_hygiene_action(approve_recommended: bool, override_action: str | None) -> str:
+    normalized_override = str(override_action or "none").strip().lower()
+    if normalized_override in OVERRIDE_ACTIONS and normalized_override != "none":
+        return normalized_override
+    return "suppress" if approve_recommended else "none"
 
 
 def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
