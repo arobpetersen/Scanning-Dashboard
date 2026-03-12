@@ -13,6 +13,13 @@ INACTIVE_CANDIDATE = "inactive_candidate"
 
 NO_CANDLES_FLAG_THRESHOLD = 3
 NO_CANDLES_AUTO_SUPPRESS_THRESHOLD = 5
+STAGED_ACTIONS = {
+    "none": "No staged action",
+    "suppress": "Stage suppress",
+    "keep_active": "Stage keep active",
+    "watch": "Stage return to watch",
+    "reset": "Stage reset history",
+}
 
 
 def _load_state(conn, ticker: str):
@@ -275,6 +282,48 @@ def approve_suppression(conn, ticker: str, note: str | None = None) -> None:
         """,
         [reason, ticker],
     )
+
+
+def apply_symbol_hygiene_action(conn, ticker: str, action: str) -> None:
+    normalized = (action or "").strip().lower()
+    if normalized == "suppress":
+        approve_suppression(conn, ticker)
+    elif normalized == "keep_active":
+        reject_keep_active(conn, ticker)
+    elif normalized == "watch":
+        reset_failure_history(conn, ticker, to_watch=True)
+    elif normalized == "reset":
+        reset_failure_history(conn, ticker, to_watch=False)
+    else:
+        raise ValueError(f"Unknown symbol hygiene action: {action}")
+
+
+def apply_staged_symbol_hygiene_actions(conn, staged_actions: dict[str, str]) -> dict[str, object]:
+    normalized_actions = {
+        str(ticker).strip().upper(): str(action).strip().lower()
+        for ticker, action in staged_actions.items()
+        if str(ticker).strip() and str(action).strip().lower() in STAGED_ACTIONS and str(action).strip().lower() != "none"
+    }
+    if not normalized_actions:
+        return {"applied_count": 0, "by_action": {}, "tickers": []}
+
+    by_action: dict[str, int] = {}
+    tickers = sorted(normalized_actions.keys())
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        for ticker, action in normalized_actions.items():
+            apply_symbol_hygiene_action(conn, ticker, action)
+            by_action[action] = by_action.get(action, 0) + 1
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    return {
+        "applied_count": len(normalized_actions),
+        "by_action": by_action,
+        "tickers": tickers,
+    }
 
 
 def reject_keep_active(conn, ticker: str) -> None:

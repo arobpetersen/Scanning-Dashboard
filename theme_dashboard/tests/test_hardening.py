@@ -23,7 +23,15 @@ from src.queries import (
     ticker_history_last_n_snapshots,
     top_theme_movers,
 )
-from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success, filter_symbol_hygiene_queue, sort_symbol_hygiene_queue, symbol_hygiene_queue
+from src.symbol_hygiene import (
+    STAGED_ACTIONS,
+    apply_refresh_failure,
+    apply_refresh_success,
+    apply_staged_symbol_hygiene_actions,
+    filter_symbol_hygiene_queue,
+    sort_symbol_hygiene_queue,
+    symbol_hygiene_queue,
+)
 from src.suggestions_service import review_suggestion
 from src.theme_service import refresh_active_ticker_universe, seed_if_needed
 from src.theme_service import set_ticker_theme_assignments
@@ -524,6 +532,52 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
 
         self.assertEqual(pending["ticker"].tolist(), ["AAA", "BBB"])
         self.assertEqual(resolved["ticker"].tolist(), ["CCC"])
+
+    def test_apply_staged_symbol_hygiene_actions_updates_multiple_rows(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into symbol_refresh_status(ticker, status, suggested_status, consecutive_failure_count, rolling_failure_count)
+            values
+            ('AAA', 'inactive_candidate', 'refresh_suppressed', 5, 8),
+            ('BBB', 'watch', null, 1, 3),
+            ('CCC', 'inactive_candidate', 'refresh_suppressed', 4, 6)
+            """
+        )
+
+        out = apply_staged_symbol_hygiene_actions(
+            conn,
+            {"AAA": "suppress", "BBB": "keep_active", "CCC": "watch", "DDD": "none"},
+        )
+        rows = conn.execute(
+            "select ticker, status, suggested_status from symbol_refresh_status order by ticker"
+        ).fetchall()
+
+        self.assertEqual(int(out["applied_count"]), 3)
+        self.assertEqual(out["by_action"]["suppress"], 1)
+        self.assertEqual(out["by_action"]["keep_active"], 1)
+        self.assertEqual(out["by_action"]["watch"], 1)
+        self.assertEqual(rows, [("AAA", "refresh_suppressed", None), ("BBB", "active", None), ("CCC", "watch", None)])
+        self.assertEqual(STAGED_ACTIONS["reset"], "Stage reset history")
+        conn.close()
 
 
 class TestMetricFormattingAndReturnSafety(unittest.TestCase):

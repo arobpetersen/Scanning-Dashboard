@@ -20,11 +20,10 @@ from src.metric_formatting import short_timestamp
 from src.queries import baseline_status, last_refresh_run, refresh_history, row_counts, snapshot_counts, source_audit_status, theme_health_overview
 from src.suggestions_service import suggestion_status_counts
 from src.symbol_hygiene import (
-    approve_suppression,
+    STAGED_ACTIONS,
+    apply_staged_symbol_hygiene_actions,
     filter_symbol_hygiene_queue,
     hygiene_decision_context,
-    reject_keep_active,
-    reset_failure_history,
     sort_symbol_hygiene_queue,
     symbol_hygiene_queue,
 )
@@ -33,17 +32,6 @@ from src.theme_service import get_theme_members, seed_if_needed, update_theme
 
 st.set_page_config(page_title="Health", layout="wide")
 st.title("Health & Operations")
-
-feedback = st.session_state.pop("symbol_hygiene_feedback", None)
-if feedback:
-    level = str(feedback.get("level") or "info")
-    message = str(feedback.get("message") or "")
-    if level == "success":
-        st.success(message)
-    elif level == "warning":
-        st.warning(message)
-    else:
-        st.error(message)
 
 
 def _extract_selected_row(event) -> int | None:
@@ -181,8 +169,20 @@ with ops_tab:
             st.dataframe(recent_failures, width="stretch")
 
     st.subheader("Symbol hygiene review queue")
+    feedback = st.session_state.pop("symbol_hygiene_feedback", None)
+    if feedback:
+        level = str(feedback.get("level") or "info")
+        message = str(feedback.get("message") or "")
+        if level == "success":
+            st.success(message)
+        elif level == "warning":
+            st.warning(message)
+        else:
+            st.error(message)
     with get_conn() as conn:
         queue = symbol_hygiene_queue(conn, limit=250)
+
+    staged_actions = st.session_state.setdefault("symbol_hygiene_staged", {})
 
     if queue.empty:
         st.success("No flagged/suppressed/watch symbols currently in queue.")
@@ -191,6 +191,7 @@ with ops_tab:
             "Queue view",
             ["Pending review", "Suppressed / resolved", "All"],
             index=0,
+            key="symbol_hygiene_queue_view",
             help="Pending review focuses on actionable items. Suppressed / resolved shows symbols already moved out of active refresh.",
         )
         queue_sort = st.selectbox(
@@ -202,6 +203,7 @@ with ops_tab:
                 "Most rolling failures",
             ],
             index=0,
+            key="symbol_hygiene_queue_sort",
             help="Prioritize the review queue by confidence, data staleness, or failure streak intensity.",
         )
         queue = filter_symbol_hygiene_queue(queue, queue_view)
@@ -215,81 +217,121 @@ with ops_tab:
         elif queue_view == "Suppressed / resolved":
             st.caption("This view shows symbols already removed from active refresh. They remain in DuckDB for lineage/history and can be reviewed separately from theme membership.")
 
+        staged_visible = {ticker: action for ticker, action in staged_actions.items() if action in STAGED_ACTIONS and action != "none"}
+        s1, s2 = st.columns([3, 1])
+        with s1:
+            if staged_visible:
+                action_counts: dict[str, int] = {}
+                for action in staged_visible.values():
+                    action_counts[action] = action_counts.get(action, 0) + 1
+                counts_text = ", ".join(f"{STAGED_ACTIONS[action]}: {count}" for action, count in sorted(action_counts.items()))
+                st.info(f"Staged changes: {len(staged_visible)} symbol(s). {counts_text}")
+            else:
+                st.caption("No staged hygiene actions yet. Review rows below, then update or apply the staged batch once.")
+        with s2:
+            if st.button("Clear staged changes", key="clear_hygiene_staged", disabled=not bool(staged_visible)):
+                st.session_state["symbol_hygiene_staged"] = {}
+                st.session_state["symbol_hygiene_feedback"] = {"level": "success", "message": "Cleared staged hygiene actions."}
+                st.rerun()
+
         if queue.empty:
             st.success("No symbols match the current queue view.")
-        
-        for _, row in queue.iterrows():
-            ticker = str(row["ticker"])
-            decision = hygiene_decision_context(row)
-            recommendation = decision["recommended_action"]
-            confidence = decision["confidence"]
-            recommendation_help = decision["explanation"]
-            last_market_data = short_timestamp(row.get("last_market_data_at")) or "none"
-            days_since_valid = row.get("days_since_last_valid_data")
-            days_since_valid_text = "unknown" if days_since_valid is None else f"{int(days_since_valid)}d"
-            with st.container(border=True):
-                c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1.1, 1.2, 1.3, 0.9, 1.1, 1.4])
-                c1.write(f"**{ticker}**")
-                c2.write(f"cat: `{row.get('last_failure_category') or 'n/a'}`")
-                c3.write(f"status: `{row.get('status')}`")
-                c4.write(f"recommended: `{recommendation}`")
-                c5.write(f"confidence: `{confidence}`")
-                c6.write(f"last valid data: `{last_market_data}`")
-                c7.write(f"days since valid: `{days_since_valid_text}`")
-                st.caption(
-                    f"consecutive={int(row.get('consecutive_failure_count') or 0)} | "
-                    f"rolling={int(row.get('rolling_failure_count') or 0)} | "
-                    f"last success={row.get('last_success_at') or 'never'} | "
-                    f"suggested_status={row.get('suggested_status') or 'none'}"
-                )
-                st.caption(str(row.get("suggested_reason") or recommendation_help))
+        else:
+            stage_defaults = {
+                row["ticker"]: staged_visible.get(str(row["ticker"]), "none")
+                for _, row in queue.iterrows()
+            }
+            with st.form("symbol_hygiene_stage_form"):
+                for _, row in queue.iterrows():
+                    ticker = str(row["ticker"])
+                    decision = hygiene_decision_context(row)
+                    recommendation = decision["recommended_action"]
+                    confidence = decision["confidence"]
+                    recommendation_help = decision["explanation"]
+                    last_market_data = short_timestamp(row.get("last_market_data_at")) or "none"
+                    days_since_valid = row.get("days_since_last_valid_data")
+                    days_since_valid_text = "unknown" if days_since_valid is None else f"{int(days_since_valid)}d"
+                    staged_action = stage_defaults.get(ticker, "none")
+                    with st.container(border=True):
+                        c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1.1, 1.2, 1.3, 0.9, 1.1, 1.4])
+                        c1.write(f"**{ticker}**")
+                        c2.write(f"cat: `{row.get('last_failure_category') or 'n/a'}`")
+                        c3.write(f"status: `{row.get('status')}`")
+                        c4.write(f"recommended: `{recommendation}`")
+                        c5.write(f"confidence: `{confidence}`")
+                        c6.write(f"last valid data: `{last_market_data}`")
+                        c7.write(f"days since valid: `{days_since_valid_text}`")
+                        st.caption(
+                            f"consecutive={int(row.get('consecutive_failure_count') or 0)} | "
+                            f"rolling={int(row.get('rolling_failure_count') or 0)} | "
+                            f"last success={row.get('last_success_at') or 'never'} | "
+                            f"suggested_status={row.get('suggested_status') or 'none'}"
+                        )
+                        st.caption(str(row.get("suggested_reason") or recommendation_help))
+                        if staged_action != "none":
+                            st.info(f"Staged: {STAGED_ACTIONS[staged_action]}")
+                        st.selectbox(
+                            f"Staged action for {ticker}",
+                            options=list(STAGED_ACTIONS.keys()),
+                            index=list(STAGED_ACTIONS.keys()).index(staged_action if staged_action in STAGED_ACTIONS else "none"),
+                            format_func=lambda key: STAGED_ACTIONS[key],
+                            key=f"stage_action_{ticker}",
+                            help="Stage a local review decision. Changes are only written when you apply the staged batch.",
+                        )
 
-                a1, a2, a3, a4 = st.columns(4)
-                if a1.button(
-                    "Approve suppression",
-                    key=f"approve_{ticker}",
-                    help="Suppress this symbol from future refresh runs while keeping its database lineage/history and current memberships intact.",
-                ):
-                    try:
-                        with get_conn() as conn:
-                            approve_suppression(conn, ticker)
-                        st.session_state["symbol_hygiene_feedback"] = {
-                            "level": "success",
-                            "message": (
-                                f"Suppression approved for `{ticker}`. "
-                                "It is now excluded from active refresh and removed from the default Pending review queue."
-                            ),
-                        }
-                    except Exception as exc:
-                        st.session_state["symbol_hygiene_feedback"] = {
-                            "level": "error",
-                            "message": f"Approve suppression failed for `{ticker}`: {exc}",
-                        }
+                f1, f2 = st.columns(2)
+                update_staged = f1.form_submit_button("Update staged actions")
+                apply_staged = f2.form_submit_button("Apply staged changes", type="primary")
+
+            if update_staged or apply_staged:
+                refreshed_staged = {
+                    str(row["ticker"]): st.session_state.get(f"stage_action_{str(row['ticker'])}", "none")
+                    for _, row in queue.iterrows()
+                }
+                cleaned = {ticker: action for ticker, action in refreshed_staged.items() if action in STAGED_ACTIONS and action != "none"}
+                retained = {
+                    ticker: action
+                    for ticker, action in staged_actions.items()
+                    if ticker not in refreshed_staged and action in STAGED_ACTIONS and action != "none"
+                }
+                merged_staged = {**retained, **cleaned}
+                st.session_state["symbol_hygiene_staged"] = merged_staged
+
+                if update_staged:
+                    st.session_state["symbol_hygiene_feedback"] = {
+                        "level": "success",
+                        "message": f"Updated staged hygiene actions for {len(merged_staged)} symbol(s).",
+                    }
                     st.rerun()
-                if a2.button(
-                    "Reject / keep active",
-                    key=f"reject_{ticker}",
-                    help="Clear the suppression recommendation and keep the symbol eligible for active refresh. This does not remove it from the database.",
-                ):
+
+                if not merged_staged:
+                    st.session_state["symbol_hygiene_feedback"] = {
+                        "level": "warning",
+                        "message": "No staged hygiene actions to apply.",
+                    }
+                    st.rerun()
+
+                try:
                     with get_conn() as conn:
-                        reject_keep_active(conn, ticker)
-                    st.rerun()
-                if a3.button(
-                    "Return to watch",
-                    key=f"watch_{ticker}",
-                    help="Reset the failure streak and place the symbol in watch mode for continued monitoring without suppressing it.",
-                ):
-                    with get_conn() as conn:
-                        reset_failure_history(conn, ticker, to_watch=True)
-                    st.rerun()
-                if a4.button(
-                    "Reset history",
-                    key=f"reset_{ticker}",
-                    help="Clear recorded failure history and return the symbol to active status. Use when prior failures are no longer decision-relevant.",
-                ):
-                    with get_conn() as conn:
-                        reset_failure_history(conn, ticker, to_watch=False)
-                    st.rerun()
+                        result = apply_staged_symbol_hygiene_actions(conn, merged_staged)
+                    by_action = result.get("by_action") or {}
+                    summary_bits = ", ".join(
+                        f"{STAGED_ACTIONS[action]}: {count}" for action, count in sorted(by_action.items())
+                    )
+                    st.session_state["symbol_hygiene_staged"] = {}
+                    st.session_state["symbol_hygiene_feedback"] = {
+                        "level": "success",
+                        "message": (
+                            f"Applied staged hygiene changes for {int(result.get('applied_count') or 0)} symbol(s). "
+                            f"{summary_bits}".strip()
+                        ),
+                    }
+                except Exception as exc:
+                    st.session_state["symbol_hygiene_feedback"] = {
+                        "level": "error",
+                        "message": f"Applying staged hygiene changes failed: {exc}",
+                    }
+                st.rerun()
 
     st.subheader("Refresh history")
     st.dataframe(history, width="stretch")
