@@ -256,10 +256,31 @@ def list_suggestions(
 
     df = conn.execute(
         f"""
-        SELECT s.*, t.name AS existing_theme_name, tt.name AS target_theme_name
+        WITH ticker_membership_context AS (
+            SELECT
+                m.ticker,
+                STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                STRING_AGG(
+                    t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                    ', '
+                    ORDER BY t.name
+                ) AS current_membership_context
+            FROM theme_membership m
+            JOIN themes t ON t.id = m.theme_id
+            GROUP BY m.ticker
+        )
+        SELECT
+            s.*,
+            t.name AS existing_theme_name,
+            tt.name AS target_theme_name,
+            tmc.current_theme_names,
+            tmc.current_categories,
+            tmc.current_membership_context
         FROM theme_suggestions s
         LEFT JOIN themes t ON t.id = s.existing_theme_id
         LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+        LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
         {where}
         ORDER BY s.suggestion_id DESC
         """,

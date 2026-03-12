@@ -33,6 +33,27 @@ if feedback:
     else:
         st.error(message)
 
+
+def _render_ticker_membership_context(row) -> None:
+    ticker = str(row.get("proposed_ticker") or "").strip().upper()
+    if not ticker:
+        return
+
+    context = str(row.get("current_membership_context") or "").strip()
+    themes = str(row.get("current_theme_names") or "").strip()
+    categories = str(row.get("current_categories") or "").strip()
+
+    with st.container(border=True):
+        st.write(f"**Ticker context: `{ticker}`**")
+        if context:
+            st.caption(f"In themes: {context}")
+        else:
+            st.caption("Not currently assigned to any theme.")
+        if themes:
+            st.write(f"Themes: `{themes}`")
+        if categories:
+            st.write(f"Categories: `{categories}`")
+
 init_db()
 with get_conn() as conn:
     seed_if_needed(conn)
@@ -142,6 +163,13 @@ with queue_tab:
         approved = queue[queue["status"] == "approved"]
         if not pending.empty:
             selected = st.selectbox("Pending suggestion", options=pending["suggestion_id"].tolist())
+            selected_row = pending[pending["suggestion_id"] == selected].iloc[0]
+            st.caption(
+                f"Selected pending suggestion #{int(selected_row['suggestion_id'])}: "
+                f"`{selected_row['suggestion_type']}` from `{selected_row['source']}`"
+            )
+            if str(selected_row.get("proposed_ticker") or "").strip():
+                _render_ticker_membership_context(selected_row)
             rnotes = st.text_input("Review notes", value="", key="rnotes")
             c1, c2 = st.columns(2)
             with c1:
@@ -199,6 +227,13 @@ with queue_tab:
                     st.rerun()
         if not approved.empty:
             aid = st.selectbox("Approved suggestion", options=approved["suggestion_id"].tolist())
+            approved_row = approved[approved["suggestion_id"] == aid].iloc[0]
+            st.caption(
+                f"Selected approved suggestion #{int(approved_row['suggestion_id'])}: "
+                f"`{approved_row['suggestion_type']}` from `{approved_row['source']}`"
+            )
+            if str(approved_row.get("proposed_ticker") or "").strip():
+                _render_ticker_membership_context(approved_row)
             anotes = st.text_input("Apply notes", value="", key="anotes")
             if st.button("Apply approved"):
                 with get_conn() as conn:

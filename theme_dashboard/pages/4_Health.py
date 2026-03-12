@@ -17,7 +17,16 @@ from src.database import get_conn, init_db
 from src.failure_classification import categorize_failure_message
 from src.fetch_data import mark_stale_running_runs
 from src.metric_formatting import short_timestamp
-from src.queries import baseline_status, last_refresh_run, refresh_history, row_counts, snapshot_counts, source_audit_status, theme_health_overview
+from src.queries import (
+    baseline_status,
+    last_refresh_run,
+    refresh_history,
+    row_counts,
+    snapshot_counts,
+    source_audit_status,
+    theme_health_overview,
+    theme_member_hygiene_context,
+)
 from src.suggestions_service import suggestion_status_counts
 from src.symbol_hygiene import (
     OVERRIDE_ACTIONS,
@@ -425,7 +434,7 @@ with themes_tab:
             theme_name = str(picked["theme_name"])
             theme_label = f"{theme_name} ({picked['category']})"
             with get_conn() as conn:
-                member_rows = get_theme_members(conn, theme_id)
+                member_rows = theme_member_hygiene_context(conn, theme_id)
             members = member_rows["ticker"].tolist() if not member_rows.empty else []
 
             st.subheader("Selected theme detail")
@@ -436,8 +445,15 @@ with themes_tab:
             d3.metric("Active", "Yes" if bool(picked["is_active"]) else "No")
             d4.metric("Ticker count", int(picked["constituent_count"] or 0))
             if members:
-                st.caption("Current member tickers")
-                st.dataframe(member_rows, width="stretch", hide_index=True)
+                failed_count = int(member_rows["last_failure_at"].notna().sum()) if "last_failure_at" in member_rows.columns else 0
+                st.metric("Members with recent failures", failed_count)
+                member_view = member_rows.copy()
+                member_view["last_failure_category"] = member_view["last_failure_category"].fillna("—")
+                member_view["last_failure_at"] = member_view["last_failure_at"].apply(lambda v: short_timestamp(v) or "—")
+                member_view["consecutive_failure_count"] = member_view["consecutive_failure_count"].fillna("—")
+                member_view["symbol_hygiene_status"] = member_view["symbol_hygiene_status"].fillna("—")
+                st.caption("Member ticker failure context. Tickers with the most recent failures are listed first.")
+                st.dataframe(member_view, width="stretch", hide_index=True)
             else:
                 st.info("This theme currently has no member tickers.")
 
@@ -449,7 +465,11 @@ with themes_tab:
                     value=str(picked["category"] or ""),
                     help="Optional. Blank values will be normalized to 'Uncategorized'.",
                 )
-                edit_active = st.checkbox("Theme is active", value=bool(picked["is_active"]))
+                edit_active = st.checkbox(
+                    "Active status (editable)",
+                    value=bool(picked["is_active"]),
+                    help="Toggle whether this theme remains active in normal operations.",
+                )
                 submitted = st.form_submit_button("Save theme changes")
 
             if submitted:

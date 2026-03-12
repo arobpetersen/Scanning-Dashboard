@@ -687,6 +687,27 @@ def ticker_lookup_memberships(conn, ticker: str) -> pd.DataFrame:
     ).df()
 
 
+def theme_member_hygiene_context(conn, theme_id: int) -> pd.DataFrame:
+    return conn.execute(
+        """
+        SELECT
+            m.ticker,
+            s.last_failure_category,
+            s.last_failure_at,
+            s.consecutive_failure_count,
+            s.status AS symbol_hygiene_status
+        FROM theme_membership m
+        LEFT JOIN symbol_refresh_status s ON s.ticker = m.ticker
+        WHERE m.theme_id = ?
+        ORDER BY
+            CASE WHEN s.last_failure_at IS NULL THEN 1 ELSE 0 END,
+            s.last_failure_at DESC,
+            m.ticker
+        """,
+        [theme_id],
+    ).df()
+
+
 def themes_dimension(conn) -> pd.DataFrame:
     return conn.execute(
         """

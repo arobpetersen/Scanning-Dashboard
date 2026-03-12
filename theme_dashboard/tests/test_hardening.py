@@ -19,6 +19,7 @@ from src.queries import (
     theme_health_overview,
     theme_history_last_n_snapshots,
     theme_history_window,
+    theme_member_hygiene_context,
     theme_ticker_metrics,
     ticker_history_last_n_snapshots,
     top_theme_movers,
@@ -34,7 +35,7 @@ from src.symbol_hygiene import (
     sort_symbol_hygiene_queue,
     symbol_hygiene_queue,
 )
-from src.suggestions_service import review_suggestion
+from src.suggestions_service import list_suggestions, review_suggestion
 from src.theme_service import refresh_active_ticker_universe, seed_if_needed
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
@@ -325,6 +326,47 @@ class TestBoundarySelection(unittest.TestCase):
         out = theme_health_overview(conn, low_constituent_threshold=3, failure_window_days=14)
 
         self.assertEqual(str(out.iloc[0]["latest_snapshot_time"]), "2026-03-10 22:00:00")
+        conn.close()
+
+    def test_theme_member_hygiene_context_sorts_recent_failures_first(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into theme_membership values (1, 'AAA')")
+        conn.execute("insert into theme_membership values (1, 'BBB')")
+        conn.execute("insert into theme_membership values (1, 'CCC')")
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, last_failure_category, consecutive_failure_count, last_failure_at
+            ) values
+            ('BBB', 'watch', 'TIMEOUT', 2, '2026-03-11 22:00:00'),
+            ('AAA', 'inactive_candidate', 'NO_CANDLES', 5, '2026-03-10 22:00:00')
+            """
+        )
+
+        out = theme_member_hygiene_context(conn, 1)
+
+        self.assertEqual(out["ticker"].tolist(), ["BBB", "AAA", "CCC"])
+        self.assertEqual(str(out.iloc[0]["last_failure_category"]), "TIMEOUT")
+        self.assertTrue(pd.isna(out.iloc[2]["last_failure_at"]))
         conn.close()
 
 
@@ -876,6 +918,49 @@ class TestSuggestionsWorkflow(unittest.TestCase):
         self.assertEqual(stored, ("approved", "looks good"))
         self.assertFalse(bool(noop["changed"]))
         self.assertIn("already approved", str(noop["message"]))
+        conn.close()
+
+    def test_list_suggestions_includes_ticker_membership_context(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table theme_suggestions(
+                suggestion_id bigint primary key,
+                suggestion_type varchar,
+                status varchar,
+                source varchar,
+                rationale varchar,
+                priority varchar,
+                proposed_theme_name varchar,
+                proposed_ticker varchar,
+                existing_theme_id bigint,
+                proposed_target_theme_id bigint,
+                reviewed_at timestamp,
+                reviewer_notes varchar,
+                created_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Edge Computing', 'Emerging Tech', true)")
+        conn.execute("insert into themes values (2, 'Cloud Security', 'Technology - Software', true)")
+        conn.execute("insert into theme_membership values (1, 'CRWD')")
+        conn.execute("insert into theme_membership values (2, 'CRWD')")
+        conn.execute(
+            """
+            insert into theme_suggestions(
+                suggestion_id, suggestion_type, status, source, rationale, priority, proposed_ticker, created_at
+            ) values (1, 'review_theme', 'pending', 'manual', '', 'medium', 'CRWD', '2026-03-12 12:00:00')
+            """
+        )
+
+        out = list_suggestions(conn, status="pending")
+
+        self.assertEqual(out.iloc[0]["current_theme_names"], "Cloud Security, Edge Computing")
+        self.assertIn("Cloud Security (Technology - Software)", str(out.iloc[0]["current_membership_context"]))
+        self.assertIn("Edge Computing (Emerging Tech)", str(out.iloc[0]["current_membership_context"]))
+        self.assertIn("Emerging Tech", str(out.iloc[0]["current_categories"]))
         conn.close()
 
 
