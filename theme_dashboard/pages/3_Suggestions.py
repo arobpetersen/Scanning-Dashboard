@@ -22,6 +22,17 @@ from src.theme_service import get_theme_members, list_themes, seed_if_needed
 st.set_page_config(page_title="Suggestions", layout="wide")
 st.title("Suggestions")
 
+feedback = st.session_state.pop("suggestions_feedback", None)
+if feedback:
+    level = str(feedback.get("level") or "info")
+    message = str(feedback.get("message") or "")
+    if level == "success":
+        st.success(message)
+    elif level == "warning":
+        st.warning(message)
+    else:
+        st.error(message)
+
 init_db()
 with get_conn() as conn:
     seed_if_needed(conn)
@@ -135,13 +146,56 @@ with queue_tab:
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("Approve"):
-                    with get_conn() as conn:
-                        review_suggestion(conn, int(selected), "approved", rnotes)
+                    try:
+                        with get_conn() as conn:
+                            result = review_suggestion(conn, int(selected), "approved", rnotes)
+                        new_status = str(result.get("new_status") or "approved")
+                        if bool(result.get("changed")):
+                            visible_note = (
+                                " It will disappear on rerun if your current filter excludes approved items."
+                                if status_filter not in {"all", "approved"}
+                                else " It remains visible because the current filter still includes approved items."
+                            )
+                            st.session_state["suggestions_feedback"] = {
+                                "level": "success",
+                                "message": f"{result['message']}{visible_note}",
+                            }
+                        else:
+                            st.session_state["suggestions_feedback"] = {
+                                "level": "warning",
+                                "message": str(result.get("message") or f"Suggestion #{selected} is already {new_status}."),
+                            }
+                    except Exception as exc:
+                        st.session_state["suggestions_feedback"] = {
+                            "level": "error",
+                            "message": f"Approve failed: {exc}",
+                        }
                     st.rerun()
             with c2:
                 if st.button("Reject"):
-                    with get_conn() as conn:
-                        review_suggestion(conn, int(selected), "rejected", rnotes)
+                    try:
+                        with get_conn() as conn:
+                            result = review_suggestion(conn, int(selected), "rejected", rnotes)
+                        if bool(result.get("changed")):
+                            visible_note = (
+                                " It will disappear on rerun if your current filter excludes rejected items."
+                                if status_filter not in {"all", "rejected"}
+                                else " It remains visible because the current filter still includes rejected items."
+                            )
+                            st.session_state["suggestions_feedback"] = {
+                                "level": "success",
+                                "message": f"{result['message']}{visible_note}",
+                            }
+                        else:
+                            st.session_state["suggestions_feedback"] = {
+                                "level": "warning",
+                                "message": str(result.get("message") or f"Suggestion #{selected} is already rejected."),
+                            }
+                    except Exception as exc:
+                        st.session_state["suggestions_feedback"] = {
+                            "level": "error",
+                            "message": f"Reject failed: {exc}",
+                        }
                     st.rerun()
         if not approved.empty:
             aid = st.selectbox("Approved suggestion", options=approved["suggestion_id"].tolist())

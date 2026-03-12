@@ -351,9 +351,32 @@ def bulk_update_filtered_status(
     return len(id_list)
 
 
-def review_suggestion(conn, suggestion_id: int, new_status: str, reviewer_notes: str) -> None:
+def review_suggestion(conn, suggestion_id: int, new_status: str, reviewer_notes: str) -> dict[str, object]:
     if new_status not in {"approved", "rejected"}:
         raise ValueError("Review status must be approved or rejected")
+
+    existing = conn.execute(
+        """
+        SELECT status
+        FROM theme_suggestions
+        WHERE suggestion_id = ?
+        """,
+        [suggestion_id],
+    ).fetchone()
+    if existing is None:
+        raise ValueError("Suggestion not found")
+
+    current_status = str(existing[0] or "")
+    if current_status == new_status:
+        return {
+            "suggestion_id": int(suggestion_id),
+            "changed": False,
+            "old_status": current_status,
+            "new_status": new_status,
+            "message": f"Suggestion #{int(suggestion_id)} is already {new_status}.",
+        }
+    if current_status not in {"pending", "approved", "rejected"}:
+        raise ValueError(f"Suggestion #{int(suggestion_id)} cannot be reviewed from status '{current_status}'.")
 
     conn.execute(
         """
@@ -365,6 +388,13 @@ def review_suggestion(conn, suggestion_id: int, new_status: str, reviewer_notes:
         """,
         [new_status, reviewer_notes.strip(), suggestion_id],
     )
+    return {
+        "suggestion_id": int(suggestion_id),
+        "changed": True,
+        "old_status": current_status,
+        "new_status": new_status,
+        "message": f"Suggestion #{int(suggestion_id)} moved from {current_status} to {new_status}.",
+    }
 
 
 def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None:

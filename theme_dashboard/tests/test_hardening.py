@@ -24,6 +24,7 @@ from src.queries import (
     top_theme_movers,
 )
 from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success, sort_symbol_hygiene_queue, symbol_hygiene_queue
+from src.suggestions_service import review_suggestion
 from src.theme_service import seed_if_needed
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
@@ -719,6 +720,48 @@ class TestTickerAssignmentEditing(unittest.TestCase):
         self.assertEqual(int(second["added_count"]), 0)
         self.assertEqual(int(second["removed_count"]), 1)
         self.assertEqual(members_after, [(2, "NVDA")])
+        conn.close()
+
+
+class TestSuggestionsWorkflow(unittest.TestCase):
+    def test_review_suggestion_reports_change_and_noop(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table theme_suggestions(
+                suggestion_id bigint primary key,
+                suggestion_type varchar,
+                status varchar,
+                source varchar,
+                rationale varchar,
+                priority varchar,
+                proposed_theme_name varchar,
+                proposed_ticker varchar,
+                existing_theme_id bigint,
+                proposed_target_theme_id bigint,
+                reviewed_at timestamp,
+                reviewer_notes varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into theme_suggestions(
+                suggestion_id, suggestion_type, status, source, rationale, priority
+            ) values (1, 'review_theme', 'pending', 'manual', '', 'medium')
+            """
+        )
+
+        changed = review_suggestion(conn, 1, "approved", "looks good")
+        stored = conn.execute("select status, reviewer_notes from theme_suggestions where suggestion_id = 1").fetchone()
+        noop = review_suggestion(conn, 1, "approved", "looks good")
+
+        self.assertTrue(bool(changed["changed"]))
+        self.assertEqual(changed["old_status"], "pending")
+        self.assertEqual(changed["new_status"], "approved")
+        self.assertEqual(stored, ("approved", "looks good"))
+        self.assertFalse(bool(noop["changed"]))
+        self.assertIn("already approved", str(noop["message"]))
         conn.close()
 
 
