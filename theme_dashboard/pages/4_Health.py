@@ -281,6 +281,13 @@ with ops_tab:
                             f"suggested_status={row.get('suggested_status') or 'none'}"
                         )
                         st.caption(str(row.get("suggested_reason") or recommendation_help))
+                        current_themes = str(row.get("current_theme_names") or "").strip()
+                        current_categories = str(row.get("current_categories") or "").strip()
+                        if current_themes:
+                            st.caption(f"Themes: {current_themes}")
+                            st.caption(f"Categories: {current_categories or 'Uncategorized'}")
+                        else:
+                            st.caption("Not currently assigned to any theme.")
                         if staged_action != "none":
                             st.info(f"Staged: {STAGED_ACTIONS[staged_action]}")
                         approve_help = (
@@ -447,7 +454,13 @@ with themes_tab:
             if members:
                 failed_count = int(member_rows["last_failure_at"].notna().sum()) if "last_failure_at" in member_rows.columns else 0
                 st.metric("Members with recent failures", failed_count)
-                member_view = member_rows.copy()
+                member_view = member_rows.copy().astype(
+                    {
+                        "last_failure_category": "object",
+                        "consecutive_failure_count": "object",
+                        "symbol_hygiene_status": "object",
+                    }
+                )
                 member_view["last_failure_category"] = member_view["last_failure_category"].fillna("—")
                 member_view["last_failure_at"] = member_view["last_failure_at"].apply(lambda v: short_timestamp(v) or "—")
                 member_view["consecutive_failure_count"] = member_view["consecutive_failure_count"].fillna("—")

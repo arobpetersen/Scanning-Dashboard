@@ -623,6 +623,54 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
         self.assertEqual(STAGED_ACTIONS["reset"], "Stage reset history")
         conn.close()
 
+    def test_symbol_hygiene_queue_includes_membership_context(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, '3D Printing', 'Emerging Tech', true)")
+        conn.execute("insert into theme_membership values (1, 'DDD')")
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, suggested_status, last_failure_category, consecutive_failure_count, rolling_failure_count
+            ) values ('DDD', 'inactive_candidate', 'refresh_suppressed', 'NO_CANDLES', 4, 7)
+            """
+        )
+
+        out = symbol_hygiene_queue(conn, limit=20)
+
+        self.assertEqual(out.iloc[0]["current_theme_names"], "3D Printing")
+        self.assertEqual(out.iloc[0]["current_categories"], "Emerging Tech")
+        conn.close()
+
     def test_resolve_staged_symbol_hygiene_action_prefers_override(self):
         self.assertEqual(resolve_staged_symbol_hygiene_action(True, "none"), "suppress")
         self.assertEqual(resolve_staged_symbol_hygiene_action(False, "keep_active"), "keep_active")

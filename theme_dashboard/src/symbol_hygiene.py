@@ -28,6 +28,19 @@ OVERRIDE_ACTIONS = {
 }
 
 
+def _table_exists(conn, table_name: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM duckdb_tables()
+        WHERE schema_name = 'main'
+          AND table_name = ?
+        """,
+        [table_name],
+    ).fetchone()
+    return bool(row and int(row[0]) > 0)
+
+
 def _load_state(conn, ticker: str):
     return conn.execute(
         """
@@ -196,8 +209,31 @@ def resolve_staged_symbol_hygiene_action(approve_recommended: bool, override_act
 
 
 def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
-    return conn.execute(
+    membership_join = ""
+    membership_columns = "NULL AS current_theme_names, NULL AS current_categories,"
+    membership_cte = ""
+    if _table_exists(conn, "theme_membership") and _table_exists(conn, "themes"):
+        membership_cte = """
+        ,
+        membership_context AS (
+            SELECT
+                m.ticker,
+                STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                STRING_AGG(
+                    DISTINCT COALESCE(NULLIF(t.category, ''), 'Uncategorized'),
+                    ', '
+                    ORDER BY COALESCE(NULLIF(t.category, ''), 'Uncategorized')
+                ) AS current_categories
+            FROM theme_membership m
+            JOIN themes t ON t.id = m.theme_id
+            GROUP BY m.ticker
+        )
         """
+        membership_columns = "mc.current_theme_names, mc.current_categories,"
+        membership_join = "LEFT JOIN membership_context mc ON mc.ticker = s.ticker"
+
+    return conn.execute(
+        f"""
         WITH latest_market_data AS (
             SELECT
                 ts.ticker,
@@ -207,6 +243,7 @@ def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
             WHERE r.status IN ('success', 'partial')
             GROUP BY ts.ticker
         )
+        {membership_cte}
         SELECT
             s.ticker,
             s.status,
@@ -219,12 +256,14 @@ def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
             s.last_failure_at,
             s.last_run_id,
             lmd.last_market_data_at,
+            {membership_columns}
             CASE
               WHEN lmd.last_market_data_at IS NULL THEN NULL
               ELSE DATE_DIFF('day', CAST(lmd.last_market_data_at AS DATE), CURRENT_DATE)
             END AS days_since_last_valid_data
         FROM symbol_refresh_status s
         LEFT JOIN latest_market_data lmd ON lmd.ticker = s.ticker
+        {membership_join}
         WHERE s.suggested_status IS NOT NULL
            OR s.status IN ('inactive_candidate', 'refresh_suppressed', 'watch')
         ORDER BY
