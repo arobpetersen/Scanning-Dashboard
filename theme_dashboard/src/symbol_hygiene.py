@@ -208,6 +208,30 @@ def resolve_staged_symbol_hygiene_action(approve_recommended: bool, override_act
     return "suppress" if approve_recommended else "none"
 
 
+def sync_symbol_hygiene_staged_action(session_state, ticker: str) -> str:
+    normalized_ticker = str(ticker).strip().upper()
+    staged = session_state.setdefault("symbol_hygiene_staged", {})
+    action = resolve_staged_symbol_hygiene_action(
+        bool(session_state.get(f"stage_approve_{normalized_ticker}", False)),
+        session_state.get(f"stage_override_{normalized_ticker}", "none"),
+    )
+    if action == "none":
+        staged.pop(normalized_ticker, None)
+    else:
+        staged[normalized_ticker] = action
+    session_state["symbol_hygiene_staged"] = staged
+    return action
+
+
+def clear_symbol_hygiene_staged_state(session_state, tickers: list[str]) -> None:
+    staged = session_state.setdefault("symbol_hygiene_staged", {})
+    all_tickers = sorted({str(t).strip().upper() for t in tickers if str(t).strip()} | {str(t).strip().upper() for t in staged.keys()})
+    for ticker in all_tickers:
+        session_state[f"stage_approve_{ticker}"] = False
+        session_state[f"stage_override_{ticker}"] = "none"
+    session_state["symbol_hygiene_staged"] = {}
+
+
 def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
     membership_join = ""
     membership_columns = "NULL AS current_theme_names, NULL AS current_categories,"

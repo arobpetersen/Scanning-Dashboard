@@ -30,8 +30,10 @@ from src.symbol_hygiene import (
     apply_refresh_failure,
     apply_refresh_success,
     apply_staged_symbol_hygiene_actions,
+    clear_symbol_hygiene_staged_state,
     filter_symbol_hygiene_queue,
     resolve_staged_symbol_hygiene_action,
+    sync_symbol_hygiene_staged_action,
     sort_symbol_hygiene_queue,
     symbol_hygiene_queue,
 )
@@ -677,6 +679,30 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
         self.assertEqual(resolve_staged_symbol_hygiene_action(True, "watch"), "watch")
         self.assertEqual(resolve_staged_symbol_hygiene_action(False, "none"), "none")
         self.assertEqual(OVERRIDE_ACTIONS["reset"], "Reset history")
+
+    def test_sync_and_clear_symbol_hygiene_staged_state_use_one_source_of_truth(self):
+        session_state = {
+            "symbol_hygiene_staged": {},
+            "stage_approve_AAA": True,
+            "stage_override_AAA": "none",
+            "stage_approve_BBB": True,
+            "stage_override_BBB": "watch",
+        }
+
+        first = sync_symbol_hygiene_staged_action(session_state, "AAA")
+        second = sync_symbol_hygiene_staged_action(session_state, "BBB")
+
+        self.assertEqual(first, "suppress")
+        self.assertEqual(second, "watch")
+        self.assertEqual(session_state["symbol_hygiene_staged"], {"AAA": "suppress", "BBB": "watch"})
+
+        clear_symbol_hygiene_staged_state(session_state, ["AAA", "BBB"])
+
+        self.assertEqual(session_state["symbol_hygiene_staged"], {})
+        self.assertFalse(bool(session_state["stage_approve_AAA"]))
+        self.assertEqual(session_state["stage_override_AAA"], "none")
+        self.assertFalse(bool(session_state["stage_approve_BBB"]))
+        self.assertEqual(session_state["stage_override_BBB"], "none")
 
 
 class TestMetricFormattingAndReturnSafety(unittest.TestCase):

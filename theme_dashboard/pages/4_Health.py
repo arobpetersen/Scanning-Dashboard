@@ -32,9 +32,10 @@ from src.symbol_hygiene import (
     OVERRIDE_ACTIONS,
     STAGED_ACTIONS,
     apply_staged_symbol_hygiene_actions,
+    clear_symbol_hygiene_staged_state,
     filter_symbol_hygiene_queue,
     hygiene_decision_context,
-    resolve_staged_symbol_hygiene_action,
+    sync_symbol_hygiene_staged_action,
     sort_symbol_hygiene_queue,
     symbol_hygiene_queue,
 )
@@ -228,8 +229,9 @@ with ops_tab:
         elif queue_view == "Suppressed / resolved":
             st.caption("This view shows symbols already removed from active refresh. They remain in DuckDB for lineage/history and can be reviewed separately from theme membership.")
 
+        queue_tickers = [str(row["ticker"]).strip().upper() for _, row in queue.iterrows()]
         staged_visible = {ticker: action for ticker, action in staged_actions.items() if action in STAGED_ACTIONS and action != "none"}
-        s1, s2 = st.columns([3, 1])
+        s1, s2, s3 = st.columns([3, 1, 1])
         with s1:
             if staged_visible:
                 action_counts: dict[str, int] = {}
@@ -238,120 +240,22 @@ with ops_tab:
                 counts_text = ", ".join(f"{STAGED_ACTIONS[action]}: {count}" for action, count in sorted(action_counts.items()))
                 st.info(f"Staged changes: {len(staged_visible)} symbol(s). {counts_text}")
             else:
-                st.caption("No staged hygiene actions yet. Review rows below, then update or apply the staged batch once.")
+                st.caption("No staged hygiene actions yet. Review rows below and staged selections will appear here immediately.")
         with s2:
             if st.button("Clear staged changes", key="clear_hygiene_staged", disabled=not bool(staged_visible)):
-                st.session_state["symbol_hygiene_staged"] = {}
+                clear_symbol_hygiene_staged_state(st.session_state, queue_tickers)
                 st.session_state["symbol_hygiene_feedback"] = {"level": "success", "message": "Cleared staged hygiene actions."}
                 st.rerun()
-
-        if queue.empty:
-            st.success("No symbols match the current queue view.")
-        else:
-            stage_defaults = {
-                row["ticker"]: staged_visible.get(str(row["ticker"]), "none")
-                for _, row in queue.iterrows()
-            }
-            with st.form("symbol_hygiene_stage_form"):
-                for _, row in queue.iterrows():
-                    ticker = str(row["ticker"])
-                    decision = hygiene_decision_context(row)
-                    recommendation = decision["recommended_action"]
-                    confidence = decision["confidence"]
-                    recommendation_help = decision["explanation"]
-                    last_market_data = short_timestamp(row.get("last_market_data_at")) or "none"
-                    days_since_valid = row.get("days_since_last_valid_data")
-                    days_since_valid_text = "unknown" if days_since_valid is None else f"{int(days_since_valid)}d"
-                    staged_action = stage_defaults.get(ticker, "none")
-                    default_approve = staged_action == "suppress"
-                    default_override = staged_action if staged_action in OVERRIDE_ACTIONS and staged_action != "none" else "none"
-                    with st.container(border=True):
-                        c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1.1, 1.2, 1.3, 0.9, 1.1, 1.4])
-                        c1.write(f"**{ticker}**")
-                        c2.write(f"cat: `{row.get('last_failure_category') or 'n/a'}`")
-                        c3.write(f"status: `{row.get('status')}`")
-                        c4.write(f"recommended: `{recommendation}`")
-                        c5.write(f"confidence: `{confidence}`")
-                        c6.write(f"last valid data: `{last_market_data}`")
-                        c7.write(f"days since valid: `{days_since_valid_text}`")
-                        st.caption(
-                            f"consecutive={int(row.get('consecutive_failure_count') or 0)} | "
-                            f"rolling={int(row.get('rolling_failure_count') or 0)} | "
-                            f"last success={row.get('last_success_at') or 'never'} | "
-                            f"suggested_status={row.get('suggested_status') or 'none'}"
-                        )
-                        st.caption(str(row.get("suggested_reason") or recommendation_help))
-                        current_themes = str(row.get("current_theme_names") or "").strip()
-                        current_categories = str(row.get("current_categories") or "").strip()
-                        if current_themes:
-                            st.caption(f"Themes: {current_themes}")
-                            st.caption(f"Categories: {current_categories or 'Uncategorized'}")
-                        else:
-                            st.caption("Not currently assigned to any theme.")
-                        if staged_action != "none":
-                            st.info(f"Staged: {STAGED_ACTIONS[staged_action]}")
-                        approve_help = (
-                            "Check to stage the common approve-suppression action. "
-                            "If you choose an override below, the override wins."
-                        )
-                        st.checkbox(
-                            "Approve recommended action",
-                            value=default_approve,
-                            key=f"stage_approve_{ticker}",
-                            help=approve_help,
-                        )
-                        st.selectbox(
-                            f"Override action for {ticker}",
-                            options=list(OVERRIDE_ACTIONS.keys()),
-                            index=list(OVERRIDE_ACTIONS.keys()).index(default_override),
-                            format_func=lambda key: OVERRIDE_ACTIONS[key],
-                            key=f"stage_override_{ticker}",
-                            help="Optional override for less common actions. Overrides the checkbox if selected.",
-                        )
-
-                f1, f2 = st.columns(2)
-                update_staged = f1.form_submit_button("Update staged actions")
-                apply_staged = f2.form_submit_button("Apply staged changes", type="primary")
-
-            if update_staged or apply_staged:
-                refreshed_staged = {
-                    str(row["ticker"]): resolve_staged_symbol_hygiene_action(
-                        bool(st.session_state.get(f"stage_approve_{str(row['ticker'])}", False)),
-                        st.session_state.get(f"stage_override_{str(row['ticker'])}", "none"),
-                    )
-                    for _, row in queue.iterrows()
-                }
-                cleaned = {ticker: action for ticker, action in refreshed_staged.items() if action in STAGED_ACTIONS and action != "none"}
-                retained = {
-                    ticker: action
-                    for ticker, action in staged_actions.items()
-                    if ticker not in refreshed_staged and action in STAGED_ACTIONS and action != "none"
-                }
-                merged_staged = {**retained, **cleaned}
-                st.session_state["symbol_hygiene_staged"] = merged_staged
-
-                if update_staged:
-                    st.session_state["symbol_hygiene_feedback"] = {
-                        "level": "success",
-                        "message": f"Updated staged hygiene actions for {len(merged_staged)} symbol(s).",
-                    }
-                    st.rerun()
-
-                if not merged_staged:
-                    st.session_state["symbol_hygiene_feedback"] = {
-                        "level": "warning",
-                        "message": "No staged hygiene actions to apply.",
-                    }
-                    st.rerun()
-
+        with s3:
+            if st.button("Apply staged changes", key="apply_hygiene_staged", type="primary", disabled=not bool(staged_visible)):
                 try:
                     with get_conn() as conn:
-                        result = apply_staged_symbol_hygiene_actions(conn, merged_staged)
+                        result = apply_staged_symbol_hygiene_actions(conn, staged_visible)
                     by_action = result.get("by_action") or {}
                     summary_bits = ", ".join(
                         f"{STAGED_ACTIONS[action]}: {count}" for action, count in sorted(by_action.items())
                     )
-                    st.session_state["symbol_hygiene_staged"] = {}
+                    clear_symbol_hygiene_staged_state(st.session_state, queue_tickers)
                     st.session_state["symbol_hygiene_feedback"] = {
                         "level": "success",
                         "message": (
@@ -365,6 +269,74 @@ with ops_tab:
                         "message": f"Applying staged hygiene changes failed: {exc}",
                     }
                 st.rerun()
+
+        if queue.empty:
+            st.success("No symbols match the current queue view.")
+        else:
+            for _, row in queue.iterrows():
+                ticker = str(row["ticker"]).strip().upper()
+                decision = hygiene_decision_context(row)
+                recommendation = decision["recommended_action"]
+                confidence = decision["confidence"]
+                recommendation_help = decision["explanation"]
+                last_market_data = short_timestamp(row.get("last_market_data_at")) or "none"
+                days_since_valid = row.get("days_since_last_valid_data")
+                days_since_valid_text = "unknown" if days_since_valid is None else f"{int(days_since_valid)}d"
+                staged_action = staged_visible.get(ticker, "none")
+                default_approve = staged_action == "suppress"
+                default_override = staged_action if staged_action in OVERRIDE_ACTIONS and staged_action != "none" else "none"
+                approve_key = f"stage_approve_{ticker}"
+                override_key = f"stage_override_{ticker}"
+                if approve_key not in st.session_state:
+                    st.session_state[approve_key] = default_approve
+                if override_key not in st.session_state:
+                    st.session_state[override_key] = default_override
+
+                with st.container(border=True):
+                    c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1.1, 1.2, 1.3, 0.9, 1.1, 1.4])
+                    c1.write(f"**{ticker}**")
+                    c2.write(f"cat: `{row.get('last_failure_category') or 'n/a'}`")
+                    c3.write(f"status: `{row.get('status')}`")
+                    c4.write(f"recommended: `{recommendation}`")
+                    c5.write(f"confidence: `{confidence}`")
+                    c6.write(f"last valid data: `{last_market_data}`")
+                    c7.write(f"days since valid: `{days_since_valid_text}`")
+                    st.caption(
+                        f"consecutive={int(row.get('consecutive_failure_count') or 0)} | "
+                        f"rolling={int(row.get('rolling_failure_count') or 0)} | "
+                        f"last success={row.get('last_success_at') or 'never'} | "
+                        f"suggested_status={row.get('suggested_status') or 'none'}"
+                    )
+                    st.caption(str(row.get("suggested_reason") or recommendation_help))
+                    current_themes = str(row.get("current_theme_names") or "").strip()
+                    current_categories = str(row.get("current_categories") or "").strip()
+                    if current_themes:
+                        st.caption(f"Themes: {current_themes}")
+                        st.caption(f"Categories: {current_categories or 'Uncategorized'}")
+                    else:
+                        st.caption("Not currently assigned to any theme.")
+                    if staged_action != "none":
+                        st.info(f"Staged: {STAGED_ACTIONS[staged_action]}")
+                    approve_help = (
+                        "Check to stage the common approve-suppression action. "
+                        "If you choose an override below, the override wins."
+                    )
+                    st.checkbox(
+                        "Approve recommended action",
+                        key=approve_key,
+                        help=approve_help,
+                        on_change=sync_symbol_hygiene_staged_action,
+                        args=(st.session_state, ticker),
+                    )
+                    st.selectbox(
+                        f"Override action for {ticker}",
+                        options=list(OVERRIDE_ACTIONS.keys()),
+                        format_func=lambda key: OVERRIDE_ACTIONS[key],
+                        key=override_key,
+                        help="Optional override for less common actions. Overrides the checkbox if selected.",
+                        on_change=sync_symbol_hygiene_staged_action,
+                        args=(st.session_state, ticker),
+                    )
 
     st.subheader("Refresh history")
     st.dataframe(history, width="stretch")
