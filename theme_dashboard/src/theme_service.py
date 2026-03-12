@@ -172,6 +172,48 @@ def remove_ticker(conn, theme_id: int, ticker: str) -> None:
     )
 
 
+def replace_ticker_in_theme(conn, theme_id: int, current_ticker: str, replacement_ticker: str) -> dict[str, str | int]:
+    current = _normalize_ticker(current_ticker)
+    replacement = _normalize_ticker(replacement_ticker)
+    if current == replacement:
+        raise ValueError("Replacement ticker must be different from the current ticker.")
+
+    current_row = conn.execute(
+        "SELECT 1 FROM theme_membership WHERE theme_id = ? AND ticker = ? LIMIT 1",
+        [theme_id, current],
+    ).fetchone()
+    if current_row is None:
+        raise ValueError(f"{current} is not currently assigned to this theme.")
+
+    replacement_row = conn.execute(
+        "SELECT 1 FROM theme_membership WHERE theme_id = ? AND ticker = ? LIMIT 1",
+        [theme_id, replacement],
+    ).fetchone()
+    if replacement_row is not None:
+        raise ValueError(f"{replacement} is already assigned to this theme.")
+
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        conn.execute(
+            "DELETE FROM theme_membership WHERE theme_id = ? AND ticker = ?",
+            [theme_id, current],
+        )
+        conn.execute(
+            "INSERT INTO theme_membership(theme_id, ticker) VALUES (?, ?)",
+            [theme_id, replacement],
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    return {
+        "theme_id": int(theme_id),
+        "removed_ticker": current,
+        "added_ticker": replacement,
+    }
+
+
 def set_ticker_theme_assignments(conn, ticker: str, theme_ids: list[int]) -> dict[str, int | str]:
     normalized_ticker = _normalize_ticker(ticker)
     normalized_theme_ids = sorted({int(theme_id) for theme_id in theme_ids if theme_id is not None})

@@ -40,7 +40,7 @@ from src.symbol_hygiene import (
     symbol_hygiene_queue,
 )
 from src.theme_selection import set_theme_selection_state
-from src.theme_service import get_theme_members, seed_if_needed, update_theme
+from src.theme_service import get_theme_members, replace_ticker_in_theme, seed_if_needed, update_theme
 
 st.set_page_config(page_title="Health", layout="wide")
 st.title("Health & Operations")
@@ -439,6 +439,30 @@ with themes_tab:
                 member_view["symbol_hygiene_status"] = member_view["symbol_hygiene_status"].fillna("—")
                 st.caption("Member ticker failure context. Tickers with the most recent failures are listed first.")
                 st.dataframe(member_view, width="stretch", hide_index=True)
+
+                with st.form(f"health_theme_replace_ticker_{theme_id}"):
+                    st.write("Correct member ticker")
+                    current_member = st.selectbox(
+                        "Current ticker",
+                        options=members,
+                        help="Pick the existing member ticker to replace within this theme only.",
+                    )
+                    replacement_member = st.text_input(
+                        "Replacement ticker",
+                        help="Required. Replacement is normalized to uppercase and only updates this theme membership.",
+                    )
+                    replace_submitted = st.form_submit_button("Replace ticker in this theme")
+
+                if replace_submitted:
+                    try:
+                        with get_conn() as conn:
+                            result = replace_ticker_in_theme(conn, theme_id, current_member, replacement_member)
+                        st.success(
+                            f"Removed {result['removed_ticker']} from {theme_name} and added {result['added_ticker']}."
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not replace ticker in this theme. {exc}")
             else:
                 st.info("This theme currently has no member tickers.")
 

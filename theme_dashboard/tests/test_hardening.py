@@ -38,7 +38,7 @@ from src.symbol_hygiene import (
     symbol_hygiene_queue,
 )
 from src.suggestions_service import list_suggestions, review_suggestion
-from src.theme_service import refresh_active_ticker_universe, seed_if_needed
+from src.theme_service import refresh_active_ticker_universe, replace_ticker_in_theme, seed_if_needed
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
 from src.eod_refresh import has_eod_run_for_date, run_scheduled_eod_refresh
@@ -878,6 +878,39 @@ class TestTickerLookup(unittest.TestCase):
 
 
 class TestTickerAssignmentEditing(unittest.TestCase):
+    def test_replace_ticker_in_theme_swaps_membership_for_selected_theme_only(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into theme_membership values (1, 'CRSPR')")
+        conn.execute("insert into theme_membership values (2, 'CRSPR')")
+
+        result = replace_ticker_in_theme(conn, 1, " crspr ", " crsp ")
+        theme_one = conn.execute(
+            "select ticker from theme_membership where theme_id = 1 order by ticker"
+        ).fetchall()
+        theme_two = conn.execute(
+            "select ticker from theme_membership where theme_id = 2 order by ticker"
+        ).fetchall()
+
+        self.assertEqual(result["removed_ticker"], "CRSPR")
+        self.assertEqual(result["added_ticker"], "CRSP")
+        self.assertEqual(theme_one, [("CRSP",)])
+        self.assertEqual(theme_two, [("CRSPR",)])
+        conn.close()
+
+    def test_replace_ticker_in_theme_rejects_duplicate_or_unchanged_replacement(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into theme_membership values (1, 'CRSPR')")
+        conn.execute("insert into theme_membership values (1, 'CRSP')")
+
+        with self.assertRaisesRegex(ValueError, "already assigned to this theme"):
+            replace_ticker_in_theme(conn, 1, "CRSPR", "CRSP")
+
+        with self.assertRaisesRegex(ValueError, "must be different"):
+            replace_ticker_in_theme(conn, 1, "CRSPR", "crspr")
+        conn.close()
+
     def test_set_ticker_theme_assignments_requires_at_least_one_theme(self):
         conn = duckdb.connect(":memory:")
         conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
