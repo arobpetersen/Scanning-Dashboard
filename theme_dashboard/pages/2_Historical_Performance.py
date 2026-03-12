@@ -19,14 +19,14 @@ TABLE_HELP = {
     "rank_end": "Theme rank at the end of the selected lookback window.",
     "rank_change": "Start rank minus end rank. Positive values mean rank improved.",
     "momentum_score": "Composite momentum metric combining performance, breadth, and rank change.",
-    "delta_composite": "Change in composite score from window start to end. Positive means strengthening.",
+    "delta_composite": "Change in confidence-adjusted composite score from window start to end. Positive means strengthening.",
     "delta_breadth": "Change in positive-breadth participation. Positive means more constituents are contributing.",
     "delta_avg_1w": "Change in average 1-week return over the window.",
     "delta_avg_1m": "Change in average 1-month return over the window.",
     "delta_avg_3m": "Change in average 3-month return over the window.",
     "delta_ticker_count": "Change in constituent count over the selected window.",
-    "composite_score_start": "Composite score at the beginning of the selected window.",
-    "composite_score_end": "Composite score at the end of the selected window.",
+    "composite_score_start": "Confidence-adjusted composite score at the beginning of the selected window.",
+    "composite_score_end": "Confidence-adjusted composite score at the end of the selected window.",
     "avg_1w": "Average 1-week return snapshot value for this theme.",
     "avg_1m": "Average 1-month return snapshot value for this theme.",
     "avg_3m": "Average 3-month return snapshot value for this theme.",
@@ -551,6 +551,7 @@ with st.expander("Metric Guide"):
     st.markdown(
         """
 - **Momentum Score**: Composite metric combining performance changes, breadth change, and rank movement.
+- **Composite Score**: Base weighted return score (`0.25*avg_1w + 0.50*avg_1m + 0.25*avg_3m`) multiplied by a small-theme confidence factor `min(1, sqrt(ticker_count / 8))`.
 - **Breadth (positive_1m_breadth_pct)**: Percent of theme constituents with positive 1M contribution; higher means participation is broader.
 - **Rank / Rank Change**: Rank is cross-theme standing (1 is strongest). Rank change is start rank minus end rank.
 - **Delta Composite**: Change in composite score between start and end snapshots; positive implies improving momentum.

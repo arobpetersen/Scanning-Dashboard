@@ -42,6 +42,7 @@ from src.theme_service import refresh_active_ticker_universe, replace_ticker_in_
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
 from src.eod_refresh import has_eod_run_for_date, run_scheduled_eod_refresh
+from src.rankings import _compute_theme_metrics, theme_confidence_factor
 
 
 class TestLeaderboardUtils(unittest.TestCase):
@@ -200,6 +201,38 @@ class TestLeaderboardUtils(unittest.TestCase):
         tech = out[out["category"] == "Tech"]
         self.assertEqual(tech["theme"].tolist(), ["Alpha", "Beta"])
         self.assertIn("Gamma", out[out["category"] == "Gamma"]["theme"].tolist())
+
+
+class TestThemeConfidenceAdjustment(unittest.TestCase):
+    def test_theme_confidence_factor_has_no_penalty_at_threshold(self):
+        self.assertEqual(theme_confidence_factor(8), 1.0)
+        self.assertEqual(theme_confidence_factor(12), 1.0)
+
+    def test_theme_confidence_factor_softly_penalizes_small_themes(self):
+        self.assertEqual(theme_confidence_factor(2), 0.5)
+        self.assertAlmostEqual(theme_confidence_factor(4), 0.70710678, places=6)
+
+    def test_compute_theme_metrics_applies_small_theme_confidence_adjustment(self):
+        raw = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "Small", "category": "Tech", "is_active": True, "ticker": "A", "perf_1w": 10.0, "perf_1m": 10.0, "perf_3m": 10.0},
+                {"theme_id": 1, "theme": "Small", "category": "Tech", "is_active": True, "ticker": "B", "perf_1w": 10.0, "perf_1m": 10.0, "perf_3m": 10.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "C", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "D", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "E", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "F", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "G", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "H", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "I", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "J", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+            ]
+        )
+
+        out = _compute_theme_metrics(raw).sort_values("composite_score", ascending=False).reset_index(drop=True)
+
+        self.assertEqual(out.iloc[0]["theme"], "Broad")
+        self.assertEqual(float(out[out["theme"] == "Small"]["composite_score"].iloc[0]), 5.0)
+        self.assertEqual(float(out[out["theme"] == "Broad"]["composite_score"].iloc[0]), 9.0)
 
 
 class TestBoundarySelection(unittest.TestCase):

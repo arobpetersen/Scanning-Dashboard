@@ -435,7 +435,9 @@ The output now reports:
 - `positive_1w_breadth_pct = percent(perf_1w > 0)`
 - `positive_1m_breadth_pct = percent(perf_1m > 0)`
 - `positive_3m_breadth_pct = percent(perf_3m > 0)`
-- `composite_score = 0.25*avg_1w + 0.50*avg_1m + 0.25*avg_3m`
+- `base_composite_score = 0.25*avg_1w + 0.50*avg_1m + 0.25*avg_3m`
+- `confidence_factor = min(1, sqrt(ticker_count / 8))`
+- `composite_score = base_composite_score * confidence_factor`
 
 Weights are configured in `src/config.py`.
 
