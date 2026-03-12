@@ -70,21 +70,95 @@ class TestLeaderboardUtils(unittest.TestCase):
         self.assertIn("currently 1 available", msg)
         self.assertIn("two same-day imports may still be insufficient", msg)
 
-    def test_category_leaderboard_groups_and_falls_back_to_theme_name(self):
-        leaderboard = pd.DataFrame(
+    def test_category_leaderboard_groups_full_window_and_falls_back_to_theme_name(self):
+        history = pd.DataFrame(
             [
-                {"rank": 1, "theme": "AI Infra", "category": "Tech", "performance": 8.0, "momentum_score": 5.0, "breadth_1m": 70.0},
-                {"rank": 2, "theme": "Semis", "category": "Tech", "performance": 6.0, "momentum_score": 4.0, "breadth_1m": 60.0},
-                {"rank": 3, "theme": "Oil Services", "category": "", "performance": 7.0, "momentum_score": 3.0, "breadth_1m": 50.0},
+                {"snapshot_time": "2026-03-01", "theme": "AI Infra", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 50.0},
+                {"snapshot_time": "2026-03-08", "theme": "AI Infra", "category": "Tech", "avg_1w": 8.0, "positive_1m_breadth_pct": 70.0},
+                {"snapshot_time": "2026-03-01", "theme": "Semis", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0},
+                {"snapshot_time": "2026-03-08", "theme": "Semis", "category": "Tech", "avg_1w": 6.0, "positive_1m_breadth_pct": 60.0},
+                {"snapshot_time": "2026-03-01", "theme": "Oil Services", "category": "", "avg_1w": 1.0, "positive_1m_breadth_pct": 30.0},
+                {"snapshot_time": "2026-03-08", "theme": "Oil Services", "category": "", "avg_1w": 7.0, "positive_1m_breadth_pct": 50.0},
             ]
         )
+        summary = pd.DataFrame(
+            [
+                {"theme": "AI Infra", "momentum_score": 5.0, "rank_change": 2},
+                {"theme": "Semis", "momentum_score": 4.0, "rank_change": 1},
+                {"theme": "Oil Services", "momentum_score": 3.0, "rank_change": 1},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary, "source_preference": "live"}
 
-        out = build_category_leaderboard(leaderboard, top_k=10)
+        out, msg = build_category_leaderboard(momentum, "avg_1w", top_k=10)
 
+        self.assertIsNone(msg)
         self.assertEqual(out.iloc[0]["category"], "Tech")
-        self.assertEqual(int(out.iloc[0]["theme_count"]), 2)
+        self.assertEqual(int(out.iloc[0]["contributing_themes"]), 2)
         self.assertEqual(float(out.iloc[0]["performance"]), 7.0)
+        self.assertEqual(float(out.iloc[0]["momentum_score"]), 4.5)
+        self.assertEqual(float(out.iloc[0]["breadth_1m"]), 65.0)
+        self.assertEqual(out.iloc[0]["top_themes"], "AI Infra, Semis")
         self.assertIn("Oil Services", out["category"].tolist())
+
+    def test_category_leaderboard_uses_full_eligible_theme_universe_not_top_theme_sample(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme": "Alpha", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0},
+                {"snapshot_time": "2026-03-08", "theme": "Alpha", "category": "Tech", "avg_1w": 10.0, "positive_1m_breadth_pct": 80.0},
+                {"snapshot_time": "2026-03-01", "theme": "Beta", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0},
+                {"snapshot_time": "2026-03-08", "theme": "Beta", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0},
+                {"snapshot_time": "2026-03-01", "theme": "Gamma", "category": "Energy", "avg_1w": 1.0, "positive_1m_breadth_pct": 70.0},
+                {"snapshot_time": "2026-03-08", "theme": "Gamma", "category": "Energy", "avg_1w": 9.0, "positive_1m_breadth_pct": 70.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme": "Alpha", "momentum_score": 5.0, "rank_change": 2},
+                {"theme": "Beta", "momentum_score": 0.0, "rank_change": 0},
+                {"theme": "Gamma", "momentum_score": 4.0, "rank_change": 1},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary, "source_preference": "live"}
+
+        theme_ranked, msg = build_window_leaderboard(momentum, "avg_1w", top_k=2)
+        self.assertIsNone(msg)
+        self.assertEqual(theme_ranked["theme"].tolist(), ["Alpha", "Gamma"])
+
+        category_ranked, category_msg = build_category_leaderboard(momentum, "avg_1w", top_k=10)
+        self.assertIsNone(category_msg)
+        self.assertEqual(category_ranked.iloc[0]["category"], "Energy")
+        self.assertEqual(float(category_ranked.iloc[0]["performance"]), 9.0)
+        self.assertEqual(category_ranked.iloc[0]["top_themes"], "Gamma")
+
+    def test_category_leaderboard_top_theme_preview_truncates_cleanly(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme": "A", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "A", "category": "Tech", "avg_1w": 9.0, "positive_1m_breadth_pct": 90.0},
+                {"snapshot_time": "2026-03-01", "theme": "B", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "B", "category": "Tech", "avg_1w": 8.0, "positive_1m_breadth_pct": 80.0},
+                {"snapshot_time": "2026-03-01", "theme": "C", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "C", "category": "Tech", "avg_1w": 7.0, "positive_1m_breadth_pct": 70.0},
+                {"snapshot_time": "2026-03-01", "theme": "D", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "D", "category": "Tech", "avg_1w": 6.0, "positive_1m_breadth_pct": 60.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme": "A", "momentum_score": 9.0, "rank_change": 4},
+                {"theme": "B", "momentum_score": 8.0, "rank_change": 3},
+                {"theme": "C", "momentum_score": 7.0, "rank_change": 2},
+                {"theme": "D", "momentum_score": 6.0, "rank_change": 1},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary, "source_preference": "live"}
+
+        out, msg = build_category_leaderboard(momentum, "avg_1w", top_k=10)
+
+        self.assertIsNone(msg)
+        self.assertEqual(out.iloc[0]["top_themes"], "A, B, C")
+        self.assertNotIn("+", out.iloc[0]["top_themes"])
 
 
 class TestBoundarySelection(unittest.TestCase):

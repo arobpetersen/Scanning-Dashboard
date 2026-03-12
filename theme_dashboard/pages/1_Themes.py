@@ -123,9 +123,16 @@ def _render_leaderboard(title: str, key_prefix: str, leaderboard_df, label_by_id
 def _render_category_leaderboard(title: str, leaderboard_df) -> None:
     st.markdown(f"**{title}**")
     st.dataframe(
-        leaderboard_df[["rank", "category", "theme_count", "performance", "momentum_score", "breadth_1m"]],
+        leaderboard_df[["rank", "category", "top_themes", "contributing_themes", "performance", "momentum_score", "breadth_1m"]],
         width="stretch",
         hide_index=True,
+    )
+    st.caption(
+        "Category rows are built by grouping the full eligible theme set for the selected window by category. "
+        "`performance`, `momentum_score`, and `breadth_1m` are category-level averages across those grouped theme rows. "
+        "`top_themes` previews the strongest underlying themes in that category for the same window. "
+        "`contributing_themes` is the number of grouped theme rows included in the category summary and is informational; "
+        "sorting is driven primarily by performance, then momentum and breadth, with `contributing_themes` only as a lower-priority tie-breaker."
     )
 
 
@@ -157,26 +164,35 @@ with explore_tab:
     lb1, lb1_msg = _build_leaderboard(momentum_1w, "avg_1w", "performance")
     lb2, lb2_msg = _build_leaderboard(momentum_1m, "avg_1m", "performance")
     leaderboard_mode = st.radio("Top table view", ["Themes", "Categories"], horizontal=True, key="themes_leaderboard_mode")
-    category_lb1 = build_category_leaderboard(lb1, top_k=10) if lb1 is not None else None
-    category_lb2 = build_category_leaderboard(lb2, top_k=10) if lb2 is not None else None
+    category_lb1, category_lb1_msg = build_category_leaderboard(momentum_1w, "avg_1w", top_k=10)
+    category_lb2, category_lb2_msg = build_category_leaderboard(momentum_1m, "avg_1m", top_k=10)
 
     c1, c2 = st.columns(2)
     with c1:
         if lb1 is None:
             st.warning(f"Top 10 Themes - 1W: {lb1_msg}")
         elif leaderboard_mode == "Categories":
-            _render_category_leaderboard("Top Categories - 1W", category_lb1)
+            if category_lb1.empty:
+                st.warning(f"Top Categories — 1W: {category_lb1_msg}")
+            else:
+                _render_category_leaderboard("Top Categories — 1W", category_lb1)
         else:
             _render_leaderboard("Top 10 Themes - 1W", "top_1w", lb1, label_by_id)
     with c2:
         if lb2 is None:
             st.warning(f"Top 10 Themes - 1M: {lb2_msg}")
         elif leaderboard_mode == "Categories":
-            _render_category_leaderboard("Top Categories - 1M", category_lb2)
+            if category_lb2.empty:
+                st.warning(f"Top Categories — 1M: {category_lb2_msg}")
+            else:
+                _render_category_leaderboard("Top Categories — 1M", category_lb2)
         else:
             _render_leaderboard("Top 10 Themes - 1M", "top_1m", lb2, label_by_id)
     if leaderboard_mode == "Categories":
-        st.caption("Category mode summarizes the currently displayed theme leaderboard rows. Switch back to Themes mode to click a row into the detail view.")
+        st.caption(
+            "Category mode ranks categories from the full eligible theme set for the selected window, then shows the top category rows. "
+            "Switch back to Themes mode to click a row into the detail view."
+        )
 
     st.divider()
 
