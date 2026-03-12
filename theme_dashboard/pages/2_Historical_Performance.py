@@ -162,19 +162,33 @@ with ov3:
     _render_overview_panel("Top Themes — 3M", leaders_3m, "avg_3m", msg_3m, "ov_3m")
 
 st.divider()
-st.subheader("Analysis Workspace (reactive controls)")
-st.caption("All controls below affect this section only.")
+st.subheader("Theme Movement Analysis")
+st.caption(
+    "Use this section to understand which themes are improving, weakening, or rotating over the selected window. "
+    "This is a movement/rotation workflow, not a simple current-strength leaderboard."
+)
 
-window_label = st.selectbox("Lookback window", ["1 week", "1 month", "3 months", "Custom"], index=1)
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    window_label = st.selectbox("Lookback window", ["1 week", "1 month", "3 months", "Custom"], index=1)
+with c2:
+    analysis_top_n = st.slider("Top N analyzed", min_value=5, max_value=50, value=20, step=5)
+with c3:
+    metric = st.selectbox(
+        "Chart metric",
+        ["composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct", "ticker_count"],
+        index=0,
+    )
+with c4:
+    display_mode = st.selectbox("Chart display", ["raw metric", "indexed (100=start)", "rank movement"], index=0)
+
 lookback_days = {"1 week": 7, "1 month": 30, "3 months": 90}.get(window_label, 30)
 if window_label == "Custom":
     lookback_days = st.number_input("Custom lookback days", min_value=3, max_value=365, value=45)
 
-analysis_top_n = st.slider("Top N analyzed", min_value=5, max_value=50, value=20, step=5)
-metric = st.selectbox(
-    "Comparison metric",
-    ["composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct", "ticker_count"],
-    index=0,
+st.caption(
+    "The movement leaderboard below is always ranked by momentum score for the selected window. "
+    "The chart controls only change how the chart/filtering view is built."
 )
 
 with get_conn() as conn:
@@ -202,19 +216,25 @@ rotation = compute_theme_rotation(summary, analysis_top_n, momentum["new_leaders
 with get_conn() as conn:
     inflections = compute_theme_inflections(conn, int(lookback_days), top_n=analysis_top_n)
 
-m1, m2, m3, m4, m5 = st.columns(5)
+m1, m2, m3, m4 = st.columns(4)
 m1.metric("Themes in window", int(summary.shape[0]))
 m2.metric("New leaders", len(momentum["new_leaders"]))
 m3.metric("Dropped leaders", len(momentum["dropped_leaders"]))
-m4.metric("Avg momentum score", f"{summary['momentum_score'].mean():.2f}")
-m5.metric("Rotation intensity", f"{rotation['rotation_intensity']['rotation_intensity_score']:.1f}")
+m4.metric("Rotation intensity", f"{rotation['rotation_intensity']['rotation_intensity_score']:.1f}")
 
-st.subheader("Theme Momentum Leaderboard")
+st.subheader("Most Improving Themes In This Window")
 # Explicit reactive sort: strongest momentum first, then composite delta and rank improvement.
 leaders_tbl = summary.sort_values(["momentum_score", "delta_composite", "rank_change"], ascending=[False, False, False]).head(10).copy()
 leaders_tbl["rank"] = leaders_tbl.index + 1
-st.caption("Reactive leaderboard for the selected analysis window and controls (sorted by momentum score).")
-leaders_tbl = leaders_tbl[["rank", "theme", "momentum_score", "delta_composite", "rank_change"]]
+st.caption(
+    "Ranks themes by momentum score first, then confidence-adjusted composite improvement, then rank improvement. "
+    "This is a change leaderboard: it highlights themes improving the most over the selected window, not simply the strongest themes right now."
+)
+show_leaderboard_advanced = st.checkbox("Show advanced movement fields", value=False, key="historical_show_leaderboard_advanced")
+leaders_cols = ["rank", "theme", "rank_change", "delta_composite", "momentum_score"]
+if show_leaderboard_advanced:
+    leaders_cols.extend(["delta_avg_1m", "delta_breadth"])
+leaders_tbl = leaders_tbl[leaders_cols]
 leaders_event = st.dataframe(
     leaders_tbl,
     width="stretch",
@@ -229,20 +249,18 @@ if leader_idx is not None and 0 <= leader_idx < len(leaders_tbl):
     if st.button(f"Open `{picked_theme}` in Themes detail", key="open_historical_momentum_theme"):
         _open_theme_in_themes(picked_theme, theme_id_by_name, theme_label_by_name, "historical_table")
 
-st.subheader("Top-N Theme Movement")
-fc1, fc2, fc3 = st.columns(3)
-with fc1:
-    category_filter = st.selectbox("Category filter", ["all"] + sorted(history["category"].dropna().unique().tolist()))
-with fc2:
-    search_filter = st.text_input("Theme search", value="")
-with fc3:
-    display_mode = st.selectbox("Display mode", ["raw metric", "indexed (100=start)", "rank movement"], index=0)
+with st.expander("Advanced chart controls", expanded=False):
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        category_filter = st.selectbox("Category filter", ["all"] + sorted(history["category"].dropna().unique().tolist()))
+    with fc2:
+        search_filter = st.text_input("Theme search", value="")
 
-fc4, fc5 = st.columns(2)
-with fc4:
-    smoothing = st.selectbox("Smoothing", ["none", "3 period rolling", "5 period rolling"], index=0)
-with fc5:
-    chart_series_count = st.slider("Themes shown in chart", min_value=2, max_value=12, value=5)
+    fc3, fc4 = st.columns(2)
+    with fc3:
+        smoothing = st.selectbox("Smoothing", ["none", "3 period rolling", "5 period rolling"], index=0)
+    with fc4:
+        chart_series_count = st.slider("Themes shown in chart", min_value=2, max_value=12, value=5)
 
 filtered_history = history.copy()
 if category_filter != "all":
@@ -258,12 +276,13 @@ if not analysis_leaders:
     st.stop()
 
 default_chart_themes = analysis_leaders[: min(chart_series_count, len(analysis_leaders))]
-watchlist = st.multiselect("Pinned watchlist themes", options=analysis_leaders, default=[])
-chart_themes = st.multiselect(
-    "Themes to display",
-    options=analysis_leaders,
-    default=sorted(set(default_chart_themes + watchlist), key=lambda x: analysis_leaders.index(x))[:12],
-)
+with st.expander("Advanced theme selection", expanded=False):
+    watchlist = st.multiselect("Pinned watchlist themes", options=analysis_leaders, default=[])
+    chart_themes = st.multiselect(
+        "Themes to display",
+        options=analysis_leaders,
+        default=sorted(set(default_chart_themes + watchlist), key=lambda x: analysis_leaders.index(x))[:12],
+    )
 
 if not chart_themes:
     st.warning("Select at least one theme to display in chart.")
@@ -283,7 +302,7 @@ if len(valid_themes) < len(chart_themes):
     trend = trend[trend["theme"].isin(valid_themes)]
 
 if len(valid_themes) > 8:
-    st.caption("Showing many lines can reduce readability; consider narrowing to ~5-8 themes.")
+    st.caption("Showing many lines can reduce readability; consider narrowing to roughly 5-8 themes.")
 
 if display_mode == "rank movement":
     trend["display_value"] = trend["rank"]
@@ -333,6 +352,13 @@ chart = (
     )
     .properties(height=420)
 )
+st.subheader("Movement Chart")
+if display_mode == "rank movement":
+    st.caption("This chart plots cross-theme rank over time for the selected themes. Lower values are stronger.")
+elif display_mode == "indexed (100=start)":
+    st.caption(f"This chart rebases `{metric}` to 100 at the start of the selected window so relative movement is easier to compare.")
+else:
+    st.caption(f"This chart plots the raw `{metric}` snapshot values over time for the selected themes.")
 st.altair_chart(chart, width="stretch")
 
 st.caption(f"Analyzed top N={analysis_top_n}; displaying {trend['theme'].nunique()} theme lines.")
