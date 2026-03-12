@@ -47,6 +47,8 @@ def main() -> int:
         "historical_backfill",
         f"run_id={result.get('run_id')}",
         f"status={result.get('status')}",
+        f"ticker_rows_written={result.get('ticker_history_rows_written', 0)}",
+        f"ticker_rows_skipped={result.get('ticker_history_rows_skipped', 0)}",
         f"written={result.get('snapshot_rows_written', 0)}",
         f"skipped={result.get('snapshot_rows_skipped', 0)}",
         f"failed_tickers={','.join(result.get('failed_tickers', [])) if result.get('failed_tickers') else 'none'}",

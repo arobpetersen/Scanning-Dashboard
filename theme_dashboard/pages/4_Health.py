@@ -149,8 +149,8 @@ with ops_tab:
     if not reconstruction_runs.empty:
         st.subheader("Historical reconstruction runs")
         st.caption(
-            "Reconstructed daily history is additive and used for deeper movement analysis only. "
-            "It uses current governed membership applied to historical market data and is never treated as true captured point-in-time composition."
+            "Reconstructed history runs now log both stored ticker-day history and downstream reconstructed theme refresh results. "
+            "This layer is additive, used for deeper movement analysis only, and never treated as true captured point-in-time composition."
         )
         st.dataframe(reconstruction_runs, width="stretch", hide_index=True)
 

@@ -8,6 +8,7 @@ from src.historical_backfill import reconstruct_theme_history_range
 from src.momentum_engine import compute_theme_momentum
 from src.queries import theme_history_window
 from src.rankings import compute_theme_rankings
+from src.ticker_history import persist_ticker_daily_history, ticker_daily_history_rows
 
 
 class TestHistoricalBackfill(unittest.TestCase):
@@ -29,6 +30,7 @@ class TestHistoricalBackfill(unittest.TestCase):
             provenance_source_label="historical_backfill",
         )
         row_count_after_first = int(conn.execute("select count(*) from reconstructed_theme_snapshots").fetchone()[0])
+        ticker_history_count_after_first = int(conn.execute("select count(*) from ticker_daily_history").fetchone()[0])
 
         second = reconstruct_theme_history_range(
             conn,
@@ -38,11 +40,73 @@ class TestHistoricalBackfill(unittest.TestCase):
             provenance_source_label="historical_backfill",
         )
         row_count_after_second = int(conn.execute("select count(*) from reconstructed_theme_snapshots").fetchone()[0])
+        ticker_history_count_after_second = int(conn.execute("select count(*) from ticker_daily_history").fetchone()[0])
 
         self.assertGreater(int(first["snapshot_rows_written"]), 0)
+        self.assertGreater(int(first["ticker_history_rows_written"]), 0)
         self.assertEqual(int(second["snapshot_rows_written"]), 0)
         self.assertGreater(int(second["snapshot_rows_skipped"]), 0)
+        self.assertEqual(int(second["ticker_history_rows_written"]), 0)
+        self.assertGreater(int(second["ticker_history_rows_skipped"]), 0)
         self.assertEqual(row_count_after_first, row_count_after_second)
+        self.assertEqual(ticker_history_count_after_first, ticker_history_count_after_second)
+        conn.close()
+
+    def test_ticker_daily_history_write_is_idempotent_and_replaceable(self):
+        conn = self._conn()
+        history = pd.DataFrame(
+            [
+                {
+                    "ticker": "NVDA",
+                    "snapshot_date": "2026-03-10",
+                    "open": 100.0,
+                    "high": 110.0,
+                    "low": 95.0,
+                    "close": 105.0,
+                    "volume": 1000.0,
+                    "vwap": 103.0,
+                    "trade_count": 50,
+                }
+            ]
+        )
+
+        first = persist_ticker_daily_history(
+            conn,
+            history,
+            ticker="NVDA",
+            provenance_source_label="ticker_intake_backfill",
+            market_data_source="live",
+            run_id=1,
+            replace_existing=False,
+        )
+        second = persist_ticker_daily_history(
+            conn,
+            history,
+            ticker="NVDA",
+            provenance_source_label="ticker_intake_backfill",
+            market_data_source="live",
+            run_id=2,
+            replace_existing=False,
+        )
+        updated = history.copy()
+        updated.loc[0, "close"] = 111.0
+        third = persist_ticker_daily_history(
+            conn,
+            updated,
+            ticker="NVDA",
+            provenance_source_label="ticker_intake_backfill",
+            market_data_source="live",
+            run_id=3,
+            replace_existing=True,
+        )
+
+        stored = ticker_daily_history_rows(conn, tickers=["NVDA"], provenance_source_label="ticker_intake_backfill")
+
+        self.assertEqual(first, {"rows_written": 1, "rows_skipped": 0})
+        self.assertEqual(second, {"rows_written": 0, "rows_skipped": 1})
+        self.assertEqual(third, {"rows_written": 1, "rows_skipped": 0})
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(float(stored.iloc[0]["close"]), 111.0)
         conn.close()
 
     def test_theme_history_window_uses_mixed_captured_and_reconstructed_history(self):
@@ -98,6 +162,7 @@ class TestHistoricalBackfill(unittest.TestCase):
         )
         first_count = int(conn.execute("select count(*) from reconstructed_theme_snapshots where provenance_source_label='ticker_intake_backfill'").fetchone()[0])
         first_ticker_count = int(conn.execute("select max(ticker_count) from reconstructed_theme_snapshots where provenance_source_label='ticker_intake_backfill'").fetchone()[0])
+        first_history_count = int(conn.execute("select count(*) from ticker_daily_history where provenance_source_label='ticker_intake_backfill'").fetchone()[0])
 
         conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'BBB')")
         second = reconstruct_theme_history_range(
@@ -112,12 +177,16 @@ class TestHistoricalBackfill(unittest.TestCase):
         )
         second_count = int(conn.execute("select count(*) from reconstructed_theme_snapshots where provenance_source_label='ticker_intake_backfill'").fetchone()[0])
         second_ticker_count = int(conn.execute("select max(ticker_count) from reconstructed_theme_snapshots where provenance_source_label='ticker_intake_backfill'").fetchone()[0])
+        second_history_count = int(conn.execute("select count(*) from ticker_daily_history where provenance_source_label='ticker_intake_backfill'").fetchone()[0])
 
         self.assertGreater(int(first["snapshot_rows_written"]), 0)
         self.assertGreater(int(second["snapshot_rows_written"]), 0)
+        self.assertGreater(int(first["ticker_history_rows_written"]), 0)
+        self.assertGreater(int(second["ticker_history_rows_written"]), 0)
         self.assertEqual(first_count, second_count)
         self.assertEqual(first_ticker_count, 1)
         self.assertEqual(second_ticker_count, 2)
+        self.assertGreaterEqual(second_history_count, first_history_count)
         conn.close()
 
     def test_current_rankings_ignore_reconstructed_history(self):

@@ -75,13 +75,22 @@ class MockProvider(ProviderBase):
         price = float(base_price)
         for idx, ts in enumerate(dates):
             cycle = ((idx % 10) - 5) / 5.0
-            price = max(1.0, price * (1.0 + drift + wave_scale * cycle))
+            open_price = max(1.0, price)
+            close_price = max(1.0, price * (1.0 + drift + wave_scale * cycle))
+            high_price = max(open_price, close_price) * 1.01
+            low_price = min(open_price, close_price) * 0.99
+            price = close_price
             rows.append(
                 {
                     "ticker": normalized,
                     "snapshot_date": ts.date(),
-                    "close": round(price, 4),
+                    "open": round(open_price, 4),
+                    "high": round(high_price, 4),
+                    "low": round(low_price, 4),
+                    "close": round(close_price, 4),
                     "volume": float(volume_base + (idx % 15) * 5000),
+                    "vwap": round((open_price + high_price + low_price + close_price) / 4.0, 4),
+                    "trade_count": int(1000 + (idx % 20) * 25),
                 }
             )
 

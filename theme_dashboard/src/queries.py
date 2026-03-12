@@ -490,6 +490,8 @@ def row_counts(conn) -> pd.DataFrame:
         SELECT 'symbol_refresh_status', COUNT(*) FROM symbol_refresh_status
         UNION ALL
         SELECT 'theme_suggestions', COUNT(*) FROM theme_suggestions
+        UNION ALL
+        SELECT 'ticker_daily_history', COUNT(*) FROM ticker_daily_history
         """
     ).df()
 
@@ -732,6 +734,8 @@ def historical_reconstruction_runs(conn, limit: int = 20) -> pd.DataFrame:
             end_date,
             ticker_count,
             theme_count,
+            ticker_history_rows_written,
+            ticker_history_rows_skipped,
             snapshot_rows_written,
             snapshot_rows_skipped,
             failed_tickers,

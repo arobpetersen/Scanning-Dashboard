@@ -6,6 +6,7 @@ import pandas as pd
 
 from .fetch_data import get_provider
 from .rankings import _compute_theme_metrics
+from .ticker_history import persist_ticker_daily_history
 
 HISTORICAL_LOOKBACK_BUFFER_DAYS = 120
 
@@ -126,6 +127,7 @@ def reconstruct_theme_history_range(
     provenance_source_label: str = "historical_backfill",
     run_kind: str = "historical_backfill",
     replace_existing: bool = False,
+    persist_ticker_history: bool = True,
 ) -> dict[str, object]:
     requested_start = _normalize_date(start_date)
     requested_end = _normalize_date(end_date)
@@ -139,6 +141,8 @@ def reconstruct_theme_history_range(
         return {
             "run_id": None,
             "status": "no_scope",
+            "ticker_history_rows_written": 0,
+            "ticker_history_rows_skipped": 0,
             "snapshot_rows_written": 0,
             "snapshot_rows_skipped": 0,
             "failed_tickers": [],
@@ -162,6 +166,8 @@ def reconstruct_theme_history_range(
     fetch_start = requested_start - timedelta(days=HISTORICAL_LOOKBACK_BUFFER_DAYS)
     ticker_history_frames: list[pd.DataFrame] = []
     failed_tickers: list[str] = []
+    ticker_history_rows_written = 0
+    ticker_history_rows_skipped = 0
 
     try:
         for ticker in scoped_tickers:
@@ -170,6 +176,18 @@ def reconstruct_theme_history_range(
                 if history.empty:
                     failed_tickers.append(ticker)
                     continue
+                if persist_ticker_history:
+                    ticker_history_result = persist_ticker_daily_history(
+                        conn,
+                        history,
+                        ticker=ticker,
+                        provenance_source_label=provenance_source_label,
+                        market_data_source=provider.name,
+                        run_id=run_id,
+                        replace_existing=replace_existing,
+                    )
+                    ticker_history_rows_written += int(ticker_history_result["rows_written"])
+                    ticker_history_rows_skipped += int(ticker_history_result["rows_skipped"])
                 ticker_history_frames.append(history)
             except Exception:
                 failed_tickers.append(ticker)
@@ -183,6 +201,8 @@ def reconstruct_theme_history_range(
                 status="success",
                 ticker_count=len(scoped_tickers),
                 theme_count=len(scoped_theme_ids),
+                ticker_history_rows_written=ticker_history_rows_written,
+                ticker_history_rows_skipped=ticker_history_rows_skipped,
                 snapshot_rows_written=0,
                 snapshot_rows_skipped=0,
                 failed_tickers=",".join(failed_tickers) if failed_tickers else None,
@@ -190,6 +210,8 @@ def reconstruct_theme_history_range(
             return {
                 "run_id": run_id,
                 "status": "success",
+                "ticker_history_rows_written": ticker_history_rows_written,
+                "ticker_history_rows_skipped": ticker_history_rows_skipped,
                 "snapshot_rows_written": 0,
                 "snapshot_rows_skipped": 0,
                 "failed_tickers": failed_tickers,
@@ -277,6 +299,8 @@ def reconstruct_theme_history_range(
             status="partial" if failed_tickers else "success",
             ticker_count=len(scoped_tickers),
             theme_count=len(scoped_theme_ids),
+            ticker_history_rows_written=ticker_history_rows_written,
+            ticker_history_rows_skipped=ticker_history_rows_skipped,
             snapshot_rows_written=rows_written,
             snapshot_rows_skipped=rows_skipped,
             failed_tickers=",".join(failed_tickers) if failed_tickers else None,
@@ -284,6 +308,8 @@ def reconstruct_theme_history_range(
         return {
             "run_id": run_id,
             "status": "partial" if failed_tickers else "success",
+            "ticker_history_rows_written": ticker_history_rows_written,
+            "ticker_history_rows_skipped": ticker_history_rows_skipped,
             "snapshot_rows_written": rows_written,
             "snapshot_rows_skipped": rows_skipped,
             "failed_tickers": failed_tickers,
@@ -298,6 +324,8 @@ def reconstruct_theme_history_range(
             status="failed",
             ticker_count=len(scoped_tickers),
             theme_count=len(scoped_theme_ids),
+            ticker_history_rows_written=ticker_history_rows_written,
+            ticker_history_rows_skipped=ticker_history_rows_skipped,
             snapshot_rows_written=0,
             snapshot_rows_skipped=0,
             failed_tickers=",".join(failed_tickers) if failed_tickers else None,

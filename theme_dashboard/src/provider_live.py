@@ -121,8 +121,13 @@ class LiveProvider(ProviderBase):
                 {
                     "ticker": ticker,
                     "snapshot_date": snapshot_date,
+                    "open": float(result["o"]) if result.get("o") is not None else None,
+                    "high": float(result["h"]) if result.get("h") is not None else None,
+                    "low": float(result["l"]) if result.get("l") is not None else None,
                     "close": float(result["c"]),
                     "volume": float(result["v"]) if result.get("v") is not None else None,
+                    "vwap": float(result["vw"]) if result.get("vw") is not None else None,
+                    "trade_count": int(result["n"]) if result.get("n") is not None else None,
                 }
             )
         history = pd.DataFrame(rows)

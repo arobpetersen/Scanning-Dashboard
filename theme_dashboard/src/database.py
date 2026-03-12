@@ -106,10 +106,32 @@ CREATE TABLE IF NOT EXISTS historical_reconstruction_runs (
     target_theme_ids VARCHAR,
     ticker_count BIGINT NOT NULL DEFAULT 0,
     theme_count BIGINT NOT NULL DEFAULT 0,
+    ticker_history_rows_written BIGINT NOT NULL DEFAULT 0,
+    ticker_history_rows_skipped BIGINT NOT NULL DEFAULT 0,
     snapshot_rows_written BIGINT NOT NULL DEFAULT 0,
     snapshot_rows_skipped BIGINT NOT NULL DEFAULT 0,
     failed_tickers VARCHAR,
     error_message VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS ticker_daily_history (
+    run_id BIGINT,
+    ticker VARCHAR NOT NULL,
+    trading_date DATE NOT NULL,
+    open DOUBLE,
+    high DOUBLE,
+    low DOUBLE,
+    close DOUBLE,
+    volume DOUBLE,
+    vwap DOUBLE,
+    trade_count BIGINT,
+    provenance_class VARCHAR NOT NULL DEFAULT 'reconstructed',
+    provenance_source_label VARCHAR NOT NULL,
+    market_data_source VARCHAR NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (ticker, trading_date, market_data_source, provenance_source_label),
+    CHECK (length(trim(ticker)) > 0)
 );
 
 CREATE TABLE IF NOT EXISTS reconstructed_theme_snapshots (
@@ -191,6 +213,8 @@ CREATE INDEX IF NOT EXISTS idx_theme_snapshots_theme_id ON theme_snapshots(theme
 CREATE INDEX IF NOT EXISTS idx_reconstructed_theme_snapshots_theme_id ON reconstructed_theme_snapshots(theme_id);
 CREATE INDEX IF NOT EXISTS idx_reconstructed_theme_snapshots_date ON reconstructed_theme_snapshots(snapshot_date);
 CREATE INDEX IF NOT EXISTS idx_historical_reconstruction_runs_status ON historical_reconstruction_runs(status);
+CREATE INDEX IF NOT EXISTS idx_ticker_daily_history_ticker ON ticker_daily_history(ticker);
+CREATE INDEX IF NOT EXISTS idx_ticker_daily_history_date ON ticker_daily_history(trading_date);
 CREATE INDEX IF NOT EXISTS idx_refresh_failures_run_id ON refresh_failures(run_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_failures_category ON refresh_failures(failure_category);
 CREATE INDEX IF NOT EXISTS idx_refresh_run_tickers_run_id ON refresh_run_tickers(run_id);
@@ -284,6 +308,8 @@ def init_db() -> None:
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
         conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
         conn.execute("ALTER TABLE theme_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
+        conn.execute("ALTER TABLE historical_reconstruction_runs ADD COLUMN IF NOT EXISTS ticker_history_rows_written BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE historical_reconstruction_runs ADD COLUMN IF NOT EXISTS ticker_history_rows_skipped BIGINT DEFAULT 0")
         conn.execute("UPDATE ticker_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''")
         conn.execute("UPDATE theme_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''")
         conn.execute("UPDATE theme_suggestions SET priority='medium' WHERE priority IS NULL OR trim(priority)=''")
