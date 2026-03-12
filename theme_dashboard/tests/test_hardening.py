@@ -14,6 +14,8 @@ from src.leaderboard_utils import build_window_leaderboard
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
 from src.queries import (
     latest_ticker_snapshots,
+    ticker_lookup_memberships,
+    ticker_lookup_summary,
     theme_health_overview,
     theme_history_last_n_snapshots,
     theme_history_window,
@@ -330,6 +332,145 @@ class TestMetricFormattingAndReturnSafety(unittest.TestCase):
 
     def test_live_calc_return_returns_none_when_history_insufficient(self):
         self.assertIsNone(LiveProvider._calc_return([1, 2, 3], 5))
+
+
+class TestTickerLookup(unittest.TestCase):
+    def test_ticker_lookup_reports_assigned_membership(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership values (1, 'NVDA')")
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-10 22:00:00')")
+        conn.execute(
+            "insert into ticker_snapshots values (1, 'NVDA', 120, 1, 2, 3, 1000000000, 5000000, null, null, null, '2026-03-10 21:00:00', 'live')"
+        )
+
+        summary = ticker_lookup_summary(conn, " nvda ")
+        memberships = ticker_lookup_memberships(conn, "nvda")
+
+        self.assertEqual(summary.iloc[0]["lookup_status"], "In DB and assigned")
+        self.assertTrue(bool(summary.iloc[0]["exists_in_theme_membership"]))
+        self.assertTrue(bool(summary.iloc[0]["exists_in_ticker_snapshots"]))
+        self.assertEqual(memberships.iloc[0]["theme_name"], "AI")
+        conn.close()
+
+    def test_ticker_lookup_reports_snapshots_only(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-10 22:00:00')")
+        conn.execute(
+            "insert into ticker_snapshots values (1, 'PLTR', 25, 1, 2, 3, 25000000000, 10000000, null, null, null, '2026-03-10 21:00:00', 'live')"
+        )
+
+        summary = ticker_lookup_summary(conn, "PLTR")
+
+        self.assertEqual(summary.iloc[0]["lookup_status"], "Seen in snapshots only")
+        self.assertFalse(bool(summary.iloc[0]["exists_in_theme_membership"]))
+        self.assertTrue(bool(summary.iloc[0]["exists_in_ticker_snapshots"]))
+        conn.close()
+
+    def test_ticker_lookup_reports_not_found(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        summary = ticker_lookup_summary(conn, "ZZZZ")
+        memberships = ticker_lookup_memberships(conn, "ZZZZ")
+
+        self.assertEqual(summary.iloc[0]["lookup_status"], "Not found")
+        self.assertTrue(memberships.empty)
+        conn.close()
 
 
 class TestThemeSeedBackfill(unittest.TestCase):

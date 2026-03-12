@@ -2,9 +2,9 @@ import streamlit as st
 
 from src.database import get_conn, init_db
 from src.leaderboard_utils import build_window_leaderboard
-from src.metric_formatting import display_or_dash, format_theme_ticker_table
+from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.momentum_engine import compute_theme_momentum
-from src.queries import theme_snapshot_history, theme_ticker_metrics
+from src.queries import ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
 from src.theme_selection import describe_selection_source, resolve_theme_selection, should_apply_selection_token
 from src.theme_service import (
     add_ticker,
@@ -320,3 +320,49 @@ with manage_tab:
                     st.error(f"Remove ticker failed: {exc}")
 
     st.dataframe(members, width="stretch")
+
+    st.divider()
+    st.subheader("Ticker Lookup")
+    st.caption("Read-only lookup to check database presence, theme assignment, and recent snapshot context before manual additions.")
+    lookup_raw = st.text_input("Ticker symbol", key="manage_ticker_lookup", placeholder="e.g. NVDA")
+    lookup_ticker = lookup_raw.strip().upper()
+
+    if not lookup_ticker:
+        st.info("Enter a ticker to inspect membership and snapshot presence.")
+    else:
+        with get_conn() as conn:
+            lookup = ticker_lookup_summary(conn, lookup_ticker)
+            memberships = ticker_lookup_memberships(conn, lookup_ticker)
+
+        if lookup.empty:
+            st.warning("Ticker lookup did not return any rows.")
+        else:
+            row = lookup.iloc[0]
+            st.write(f"**Status:** `{row['lookup_status']}` for `{lookup_ticker}`")
+            l1, l2, l3, l4 = st.columns(4)
+            l1.metric("Assigned themes", int(row.get("assigned_theme_count") or 0))
+            l2.metric("In membership", "yes" if bool(row.get("exists_in_theme_membership")) else "no")
+            l3.metric("In snapshots", "yes" if bool(row.get("exists_in_ticker_snapshots")) else "no")
+            l4.metric("Seen elsewhere", "yes" if bool(row.get("exists_in_refresh_run_tickers") or row.get("exists_in_symbol_refresh_status")) else "no")
+
+            detail = {
+                "ticker": lookup_ticker,
+                "latest_snapshot_time": short_timestamp(row.get("latest_snapshot_time")) or display_or_dash(None),
+                "latest_snapshot_source": row.get("latest_snapshot_source") or "n/a",
+                "latest_price": format_price(row.get("latest_price")) or display_or_dash(None),
+                "latest_market_cap": human_readable_number(row.get("latest_market_cap")) or display_or_dash(None),
+                "latest_avg_volume": human_readable_number(row.get("latest_avg_volume")) or display_or_dash(None),
+            }
+            st.dataframe([detail], width="stretch", hide_index=True)
+
+            if not memberships.empty:
+                st.caption("Assigned themes")
+                st.dataframe(
+                    memberships[["theme_name", "category", "is_active"]],
+                    width="stretch",
+                    hide_index=True,
+                )
+            elif str(row.get("lookup_status")) == "Not found":
+                st.warning(f"`{lookup_ticker}` was not found in theme membership, ticker snapshots, refresh-run tickers, or symbol status.")
+            else:
+                st.info(f"`{lookup_ticker}` is present in the database but is not currently assigned to any theme.")

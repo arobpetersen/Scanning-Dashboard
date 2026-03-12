@@ -595,6 +595,98 @@ def latest_ticker_snapshots(conn) -> pd.DataFrame:
     ).df()
 
 
+def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
+    normalized = (ticker or "").strip().upper()
+    if not normalized:
+        return pd.DataFrame()
+
+    ticker_source_expr = _ticker_snapshot_source_expr(conn)
+    return conn.execute(
+        f"""
+        WITH membership AS (
+            SELECT COUNT(*) AS membership_count
+            FROM theme_membership
+            WHERE ticker = ?
+        ),
+        snapshots AS (
+            SELECT
+                COUNT(*) AS snapshot_count,
+                MAX(s.run_id) AS latest_snapshot_run_id
+            FROM ticker_snapshots s
+            WHERE s.ticker = ?
+        ),
+        latest_snapshot AS (
+            SELECT
+                s.price AS latest_price,
+                s.market_cap AS latest_market_cap,
+                s.avg_volume AS latest_avg_volume,
+                r.finished_at AS latest_snapshot_time,
+                {ticker_source_expr} AS latest_snapshot_source
+            FROM ticker_snapshots s
+            LEFT JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE s.ticker = ?
+              AND (r.run_id IS NULL OR r.status IN ('success', 'partial'))
+            QUALIFY ROW_NUMBER() OVER (ORDER BY s.run_id DESC) = 1
+        ),
+        refresh_seen AS (
+            SELECT COUNT(*) AS refresh_run_count
+            FROM refresh_run_tickers
+            WHERE ticker = ?
+        ),
+        symbol_seen AS (
+            SELECT COUNT(*) AS symbol_status_count
+            FROM symbol_refresh_status
+            WHERE ticker = ?
+        )
+        SELECT
+            ? AS ticker,
+            CAST(m.membership_count > 0 AS BOOLEAN) AS exists_in_theme_membership,
+            CAST(s.snapshot_count > 0 AS BOOLEAN) AS exists_in_ticker_snapshots,
+            CAST(r.refresh_run_count > 0 AS BOOLEAN) AS exists_in_refresh_run_tickers,
+            CAST(ss.symbol_status_count > 0 AS BOOLEAN) AS exists_in_symbol_refresh_status,
+            COALESCE(m.membership_count, 0) AS assigned_theme_count,
+            ls.latest_snapshot_time,
+            ls.latest_snapshot_source,
+            ls.latest_price,
+            ls.latest_market_cap,
+            ls.latest_avg_volume,
+            CASE
+              WHEN COALESCE(m.membership_count, 0) > 0 THEN 'In DB and assigned'
+              WHEN COALESCE(s.snapshot_count, 0) > 0 THEN 'Seen in snapshots only'
+              WHEN COALESCE(r.refresh_run_count, 0) > 0 OR COALESCE(ss.symbol_status_count, 0) > 0 THEN 'In DB but unassigned'
+              ELSE 'Not found'
+            END AS lookup_status
+        FROM membership m
+        CROSS JOIN snapshots s
+        CROSS JOIN refresh_seen r
+        CROSS JOIN symbol_seen ss
+        LEFT JOIN latest_snapshot ls ON TRUE
+        """,
+        [normalized, normalized, normalized, normalized, normalized, normalized],
+    ).df()
+
+
+def ticker_lookup_memberships(conn, ticker: str) -> pd.DataFrame:
+    normalized = (ticker or "").strip().upper()
+    if not normalized:
+        return pd.DataFrame()
+    return conn.execute(
+        """
+        SELECT
+            m.ticker,
+            t.id AS theme_id,
+            t.name AS theme_name,
+            t.category,
+            t.is_active
+        FROM theme_membership m
+        JOIN themes t ON t.id = m.theme_id
+        WHERE m.ticker = ?
+        ORDER BY t.name
+        """,
+        [normalized],
+    ).df()
+
+
 def themes_dimension(conn) -> pd.DataFrame:
     return conn.execute(
         """
