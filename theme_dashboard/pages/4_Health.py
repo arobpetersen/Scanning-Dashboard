@@ -20,10 +20,32 @@ from src.metric_formatting import short_timestamp
 from src.queries import baseline_status, last_refresh_run, refresh_history, row_counts, snapshot_counts, source_audit_status, theme_health_overview
 from src.suggestions_service import suggestion_status_counts
 from src.symbol_hygiene import approve_suppression, reject_keep_active, reset_failure_history, symbol_hygiene_queue
+from src.theme_selection import set_theme_selection_state
 from src.theme_service import seed_if_needed
 
 st.set_page_config(page_title="Health", layout="wide")
 st.title("Health & Operations")
+
+
+def _extract_selected_row(event) -> int | None:
+    selection = {}
+    if isinstance(event, dict):
+        selection = event.get("selection", {}) or {}
+    elif hasattr(event, "selection"):
+        selection = event.selection
+
+    rows = selection.get("rows", []) if isinstance(selection, dict) else getattr(selection, "rows", [])
+    for row in rows or []:
+        if row is not None:
+            return int(row)
+
+    cells = selection.get("cells", []) if isinstance(selection, dict) else getattr(selection, "cells", [])
+    for cell in cells or []:
+        if isinstance(cell, dict) and cell.get("row") is not None:
+            return int(cell["row"])
+        if hasattr(cell, "row") and getattr(cell, "row", None) is not None:
+            return int(getattr(cell, "row"))
+    return None
 
 init_db()
 with get_conn() as conn:
@@ -238,4 +260,20 @@ with themes_tab:
             lambda v: short_timestamp(v) or "—"
         )
         st.caption("`latest_snapshot_time` uses the preferred current-view theme source, matching live-preferred Health diagnostics.")
-        st.dataframe(health_view, width="stretch")
+        health_event = st.dataframe(
+            health_view,
+            width="stretch",
+            on_select="rerun",
+            selection_mode="single-row",
+            key="health_theme_table",
+        )
+        picked_idx = _extract_selected_row(health_event)
+        if picked_idx is not None and 0 <= picked_idx < len(view):
+            picked = view.reset_index(drop=True).iloc[picked_idx]
+            theme_id = int(picked["theme_id"])
+            theme_name = str(picked["theme_name"])
+            theme_label = f"{theme_name} ({picked['category']})"
+            if st.button(f"Open `{theme_name}` in Themes detail", key="open_health_theme_detail"):
+                st.session_state["manage_theme"] = f"{theme_name} [{theme_id}]"
+                set_theme_selection_state(st.session_state, theme_id, theme_label, "health_theme")
+                st.switch_page("pages/1_Themes.py")

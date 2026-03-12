@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 
+SELECTED_THEME_ID_KEY = "selected_theme_id"
+SELECTED_THEME_LABEL_KEY = "explore_theme"
+SELECTED_THEME_SOURCE_KEY = "selected_theme_source"
+
+
 SELECTION_SOURCE_LABELS = {
     "top_1w": "Top 10 1W",
     "top_1m": "Top 10 1M",
     "manual_dropdown": "Manual dropdown",
     "default": "Default theme",
+    "historical_overview": "Historical overview",
+    "historical_signal": "Historical signal",
+    "historical_table": "Historical table",
+    "health_theme": "Health theme",
 }
 
 
@@ -33,3 +42,9 @@ def should_apply_selection_token(selection_token: str | None, last_applied_token
     if not token:
         return False
     return token != str(last_applied_token or "").strip()
+
+
+def set_theme_selection_state(session_state, theme_id: int, label: str, source: str) -> None:
+    session_state[SELECTED_THEME_ID_KEY] = int(theme_id)
+    session_state[SELECTED_THEME_LABEL_KEY] = str(label)
+    session_state[SELECTED_THEME_SOURCE_KEY] = str(source)

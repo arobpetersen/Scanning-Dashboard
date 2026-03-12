@@ -1,11 +1,19 @@
 import streamlit as st
 
 from src.database import get_conn, init_db
-from src.leaderboard_utils import build_category_leaderboard, build_window_leaderboard
+from src.leaderboard_utils import build_category_leaderboard, build_category_theme_breakdown, build_window_leaderboard
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.momentum_engine import compute_theme_momentum
 from src.queries import ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
-from src.theme_selection import describe_selection_source, resolve_theme_selection, should_apply_selection_token
+from src.theme_selection import (
+    SELECTED_THEME_ID_KEY,
+    SELECTED_THEME_LABEL_KEY,
+    SELECTED_THEME_SOURCE_KEY,
+    describe_selection_source,
+    resolve_theme_selection,
+    set_theme_selection_state,
+    should_apply_selection_token,
+)
 from src.theme_service import (
     add_ticker,
     create_theme,
@@ -29,12 +37,6 @@ with get_conn() as conn:
 if themes.empty:
     st.info("No themes found.")
     st.stop()
-
-
-SELECTED_THEME_ID_KEY = "selected_theme_id"
-SELECTED_THEME_LABEL_KEY = "explore_theme"
-SELECTED_THEME_SOURCE_KEY = "selected_theme_source"
-
 
 def _handled_selection_key(source: str) -> str:
     return f"{source}_handled_selection_token"
@@ -84,9 +86,7 @@ def _build_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tu
 
 
 def _set_theme_selection(theme_id: int, label: str, source: str) -> None:
-    st.session_state[SELECTED_THEME_ID_KEY] = int(theme_id)
-    st.session_state[SELECTED_THEME_LABEL_KEY] = label
-    st.session_state[SELECTED_THEME_SOURCE_KEY] = source
+    set_theme_selection_state(st.session_state, theme_id, label, source)
 
 
 def _apply_dropdown_selection(id_by_label: dict[str, int]) -> None:
@@ -136,6 +136,27 @@ def _render_category_leaderboard(title: str, leaderboard_df) -> None:
     )
 
 
+def _render_category_theme_drill(title: str, breakdown_df) -> None:
+    if breakdown_df.empty:
+        return
+
+    with st.expander(f"Underlying themes — {title}", expanded=False):
+        category_options = breakdown_df["category"].dropna().astype(str).tolist()
+        picked_category = st.selectbox(
+            f"Inspect category ({title})",
+            options=category_options,
+            key=f"category_drill_{title}",
+        )
+        category_rows = breakdown_df[breakdown_df["category"] == picked_category].copy().reset_index(drop=True)
+        category_rows["rank"] = category_rows.index + 1
+        st.dataframe(
+            category_rows[["rank", "theme", "performance", "momentum_score", "breadth_1m"]],
+            width="stretch",
+            hide_index=True,
+        )
+        st.caption("These are the underlying eligible themes for the selected category/window, sorted by the same theme-level metrics used to build the category summary.")
+
+
 explore_tab, manage_tab = st.tabs(["Explore", "Manage"])
 
 with explore_tab:
@@ -166,6 +187,8 @@ with explore_tab:
     leaderboard_mode = st.radio("Top table view", ["Themes", "Categories"], horizontal=True, key="themes_leaderboard_mode")
     category_lb1, category_lb1_msg = build_category_leaderboard(momentum_1w, "avg_1w", top_k=10)
     category_lb2, category_lb2_msg = build_category_leaderboard(momentum_1m, "avg_1m", top_k=10)
+    category_breakdown_1w, _ = build_category_theme_breakdown(momentum_1w, "avg_1w")
+    category_breakdown_1m, _ = build_category_theme_breakdown(momentum_1m, "avg_1m")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -176,6 +199,7 @@ with explore_tab:
                 st.warning(f"Top Categories — 1W: {category_lb1_msg}")
             else:
                 _render_category_leaderboard("Top Categories — 1W", category_lb1)
+                _render_category_theme_drill("1W", category_breakdown_1w)
         else:
             _render_leaderboard("Top 10 Themes - 1W", "top_1w", lb1, label_by_id)
     with c2:
@@ -186,6 +210,7 @@ with explore_tab:
                 st.warning(f"Top Categories — 1M: {category_lb2_msg}")
             else:
                 _render_category_leaderboard("Top Categories — 1M", category_lb2)
+                _render_category_theme_drill("1M", category_breakdown_1m)
         else:
             _render_leaderboard("Top 10 Themes - 1M", "top_1m", lb2, label_by_id)
     if leaderboard_mode == "Categories":

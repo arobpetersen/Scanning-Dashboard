@@ -1,6 +1,14 @@
 import unittest
 
-from src.theme_selection import describe_selection_source, resolve_theme_selection, should_apply_selection_token
+from src.theme_selection import (
+    SELECTED_THEME_ID_KEY,
+    SELECTED_THEME_LABEL_KEY,
+    SELECTED_THEME_SOURCE_KEY,
+    describe_selection_source,
+    resolve_theme_selection,
+    set_theme_selection_state,
+    should_apply_selection_token,
+)
 
 
 class TestThemeSelection(unittest.TestCase):
@@ -30,6 +38,15 @@ class TestThemeSelection(unittest.TestCase):
         self.assertTrue(should_apply_selection_token("top_1w:12", None))
         self.assertFalse(should_apply_selection_token("top_1w:12", "top_1w:12"))
         self.assertFalse(should_apply_selection_token(None, "top_1w:12"))
+
+    def test_set_theme_selection_state_updates_shared_keys(self):
+        session_state = {}
+
+        set_theme_selection_state(session_state, 7, "AI (Tech)", "historical_table")
+
+        self.assertEqual(session_state[SELECTED_THEME_ID_KEY], 7)
+        self.assertEqual(session_state[SELECTED_THEME_LABEL_KEY], "AI (Tech)")
+        self.assertEqual(session_state[SELECTED_THEME_SOURCE_KEY], "historical_table")
 
 
 if __name__ == "__main__":

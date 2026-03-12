@@ -8,6 +8,7 @@ from src.leaderboard_utils import build_window_leaderboard
 from src.momentum_engine import compute_theme_momentum
 from src.queries import theme_snapshot_history
 from src.rotation_engine import compute_theme_rotation
+from src.theme_selection import set_theme_selection_state
 from src.theme_service import list_themes, seed_if_needed
 
 
@@ -64,6 +65,35 @@ def _signal_reason_text(row: pd.Series) -> str:
     )
 
 
+def _extract_selected_row(event) -> int | None:
+    selection = {}
+    if isinstance(event, dict):
+        selection = event.get("selection", {}) or {}
+    elif hasattr(event, "selection"):
+        selection = event.selection
+
+    rows = selection.get("rows", []) if isinstance(selection, dict) else getattr(selection, "rows", [])
+    for row in rows or []:
+        if row is not None:
+            return int(row)
+
+    cells = selection.get("cells", []) if isinstance(selection, dict) else getattr(selection, "cells", [])
+    for cell in cells or []:
+        if isinstance(cell, dict) and cell.get("row") is not None:
+            return int(cell["row"])
+        if hasattr(cell, "row") and getattr(cell, "row", None) is not None:
+            return int(getattr(cell, "row"))
+    return None
+
+
+def _open_theme_in_themes(theme_name: str, id_by_name: dict[str, int], label_by_name: dict[str, str], source: str) -> None:
+    if theme_name not in id_by_name:
+        st.warning(f"Unable to open `{theme_name}` in Themes because it is not present in the current theme registry.")
+        return
+    set_theme_selection_state(st.session_state, id_by_name[theme_name], label_by_name[theme_name], source)
+    st.switch_page("pages/1_Themes.py")
+
+
 def _build_overview_leaders(momentum: dict, perf_col: str, top_k: int = 10) -> tuple[pd.DataFrame, str | None]:
     # Centralized helper keeps window ranking rules consistent across Themes and Historical pages.
     return build_window_leaderboard(momentum, perf_col, top_k=top_k)
@@ -108,6 +138,8 @@ init_db()
 with get_conn() as conn:
     seed_if_needed(conn)
     themes = list_themes(conn, active_only=False)
+theme_label_by_name = {str(r["name"]): f"{r['name']} ({r['category']})" for _, r in themes.iterrows()}
+theme_id_by_name = {str(r["name"]): int(r["id"]) for _, r in themes.iterrows()}
 
 # Fixed multi-window overview is intentionally independent of lower analysis controls.
 with get_conn() as conn:
@@ -183,7 +215,19 @@ leaders_tbl = summary.sort_values(["momentum_score", "delta_composite", "rank_ch
 leaders_tbl["rank"] = leaders_tbl.index + 1
 st.caption("Reactive leaderboard for the selected analysis window and controls (sorted by momentum score).")
 leaders_tbl = leaders_tbl[["rank", "theme", "momentum_score", "delta_composite", "rank_change"]]
-st.dataframe(leaders_tbl, width="stretch", column_config=_config_for_columns(leaders_tbl.columns.tolist()))
+leaders_event = st.dataframe(
+    leaders_tbl,
+    width="stretch",
+    column_config=_config_for_columns(leaders_tbl.columns.tolist()),
+    on_select="rerun",
+    selection_mode="single-row",
+    key="historical_momentum_leaderboard",
+)
+leader_idx = _extract_selected_row(leaders_event)
+if leader_idx is not None and 0 <= leader_idx < len(leaders_tbl):
+    picked_theme = str(leaders_tbl.iloc[leader_idx]["theme"])
+    if st.button(f"Open `{picked_theme}` in Themes detail", key="open_historical_momentum_theme"):
+        _open_theme_in_themes(picked_theme, theme_id_by_name, theme_label_by_name, "historical_table")
 
 st.subheader("Top-N Theme Movement")
 fc1, fc2, fc3 = st.columns(3)
@@ -311,7 +355,21 @@ else:
         "delta_avg_1m",
         "delta_breadth",
     ]
-    st.dataframe(inflections["signals"][signal_cols].head(30), width="stretch", hide_index=True, column_config=_config_for_columns(signal_cols))
+    signal_df = inflections["signals"][signal_cols].head(30).reset_index(drop=True)
+    signal_event = st.dataframe(
+        signal_df,
+        width="stretch",
+        hide_index=True,
+        column_config=_config_for_columns(signal_cols),
+        on_select="rerun",
+        selection_mode="single-row",
+        key="historical_signal_table",
+    )
+    signal_idx = _extract_selected_row(signal_event)
+    if signal_idx is not None and 0 <= signal_idx < len(signal_df):
+        picked_theme = str(signal_df.iloc[signal_idx]["theme"])
+        if st.button(f"Open signal theme `{picked_theme}` in Themes detail", key="open_historical_signal_theme"):
+            _open_theme_in_themes(picked_theme, theme_id_by_name, theme_label_by_name, "historical_signal")
     st.caption(f"Showing top {min(30, len(inflections['signals']))} signals by priority and momentum.")
 
 st.subheader("Rotation Signals")
@@ -431,11 +489,20 @@ detail_cols = [
     "delta_ticker_count",
     "momentum_score",
 ]
-st.dataframe(
-    summary[detail_cols],
+detail_df = summary[detail_cols].reset_index(drop=True)
+detail_event = st.dataframe(
+    detail_df,
     width="stretch",
     column_config=_config_for_columns(detail_cols),
+    on_select="rerun",
+    selection_mode="single-row",
+    key="historical_detail_table",
 )
+detail_idx = _extract_selected_row(detail_event)
+if detail_idx is not None and 0 <= detail_idx < len(detail_df):
+    picked_theme = str(detail_df.iloc[detail_idx]["theme"])
+    if st.button(f"Open detail theme `{picked_theme}` in Themes detail", key="open_historical_detail_theme"):
+        _open_theme_in_themes(picked_theme, theme_id_by_name, theme_label_by_name, "historical_table")
 
 st.subheader("Single Theme History")
 if themes.empty:

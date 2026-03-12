@@ -97,6 +97,30 @@ def build_category_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -
     return aggregated[["rank", "category", "top_themes", "contributing_themes", "performance", "momentum_score", "breadth_1m"]], None
 
 
+def build_category_theme_breakdown(momentum: dict, perf_col: str) -> tuple[pd.DataFrame, str | None]:
+    """Return full eligible underlying themes for category drill views."""
+    history, summary, msg = _validate_window_leaderboard_inputs(momentum)
+    if msg:
+        return pd.DataFrame(), msg
+
+    latest = history.sort_values("snapshot_time").groupby("theme", as_index=False).tail(1)
+    breakdown = latest[["theme", "category", perf_col, "positive_1m_breadth_pct"]].merge(
+        summary[["theme", "momentum_score", "rank_change"]],
+        on="theme",
+        how="left",
+    )
+    breakdown = breakdown.rename(columns={perf_col: "performance", "positive_1m_breadth_pct": "breadth_1m"})
+    breakdown["category"] = breakdown["category"].fillna("").astype(str).str.strip()
+    breakdown.loc[breakdown["category"] == "", "category"] = breakdown["theme"]
+    breakdown = breakdown.sort_values(
+        ["category", "performance", "momentum_score", "breadth_1m", "theme"],
+        ascending=[True, False, False, False, True],
+    ).reset_index(drop=True)
+    for metric_col in ("performance", "momentum_score", "breadth_1m"):
+        breakdown[metric_col] = breakdown[metric_col].round(2)
+    return breakdown[["category", "theme", "performance", "momentum_score", "breadth_1m", "rank_change"]], None
+
+
 def _format_top_theme_preview(themes: list[str], preview_limit: int = 3) -> str:
     unique_themes: list[str] = []
     for theme in themes:

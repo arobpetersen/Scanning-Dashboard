@@ -10,7 +10,7 @@ import pandas as pd
 from src.fetch_data import run_refresh
 from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
-from src.leaderboard_utils import build_category_leaderboard, build_window_leaderboard
+from src.leaderboard_utils import build_category_leaderboard, build_category_theme_breakdown, build_window_leaderboard
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
 from src.queries import (
     latest_ticker_snapshots,
@@ -159,6 +159,33 @@ class TestLeaderboardUtils(unittest.TestCase):
         self.assertIsNone(msg)
         self.assertEqual(out.iloc[0]["top_themes"], "A, B, C")
         self.assertNotIn("+", out.iloc[0]["top_themes"])
+
+    def test_category_theme_breakdown_returns_ranked_underlying_themes(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme": "Alpha", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "Alpha", "category": "Tech", "avg_1w": 9.0, "positive_1m_breadth_pct": 90.0},
+                {"snapshot_time": "2026-03-01", "theme": "Beta", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "Beta", "category": "Tech", "avg_1w": 7.0, "positive_1m_breadth_pct": 70.0},
+                {"snapshot_time": "2026-03-01", "theme": "Gamma", "category": "", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "Gamma", "category": "", "avg_1w": 8.0, "positive_1m_breadth_pct": 80.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme": "Alpha", "momentum_score": 5.0, "rank_change": 2},
+                {"theme": "Beta", "momentum_score": 4.0, "rank_change": 1},
+                {"theme": "Gamma", "momentum_score": 4.5, "rank_change": 1},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary, "source_preference": "live"}
+
+        out, msg = build_category_theme_breakdown(momentum, "avg_1w")
+
+        self.assertIsNone(msg)
+        tech = out[out["category"] == "Tech"]
+        self.assertEqual(tech["theme"].tolist(), ["Alpha", "Beta"])
+        self.assertIn("Gamma", out[out["category"] == "Gamma"]["theme"].tolist())
 
 
 class TestBoundarySelection(unittest.TestCase):
