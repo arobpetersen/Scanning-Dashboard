@@ -10,8 +10,14 @@ import pandas as pd
 from src.fetch_data import run_refresh
 from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
-from src.leaderboard_utils import build_category_leaderboard, build_category_theme_breakdown, build_window_leaderboard
+from src.leaderboard_utils import (
+    build_category_leaderboard,
+    build_category_theme_breakdown,
+    build_current_leadership_table,
+    build_window_leaderboard,
+)
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
+from src.momentum_engine import compute_theme_momentum
 from src.queries import (
     latest_ticker_snapshots,
     ticker_lookup_memberships,
@@ -42,6 +48,7 @@ from src.theme_service import refresh_active_ticker_universe, replace_ticker_in_
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
 from src.eod_refresh import has_eod_run_for_date, run_scheduled_eod_refresh
+from src.rankings import _compute_theme_metrics, theme_confidence_factor
 
 
 class TestLeaderboardUtils(unittest.TestCase):
@@ -201,6 +208,87 @@ class TestLeaderboardUtils(unittest.TestCase):
         self.assertEqual(tech["theme"].tolist(), ["Alpha", "Beta"])
         self.assertIn("Gamma", out[out["category"] == "Gamma"]["theme"].tolist())
 
+    def test_current_leadership_table_uses_composite_strength_and_quality_context(self):
+        rankings = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Broad Tech",
+                    "category": "Tech",
+                    "is_active": True,
+                    "composite_score": 12.0,
+                    "avg_1w": 4.0,
+                    "avg_1m": 8.0,
+                    "avg_3m": 6.0,
+                    "positive_1m_breadth_pct": 72.0,
+                    "ticker_count": 10,
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Narrow Spike",
+                    "category": "Spec",
+                    "is_active": True,
+                    "composite_score": 11.5,
+                    "avg_1w": 10.0,
+                    "avg_1m": 9.0,
+                    "avg_3m": 2.0,
+                    "positive_1m_breadth_pct": 30.0,
+                    "ticker_count": 3,
+                },
+                {
+                    "theme_id": 3,
+                    "theme": "Turning Up",
+                    "category": "Macro",
+                    "is_active": True,
+                    "composite_score": 10.0,
+                    "avg_1w": 3.0,
+                    "avg_1m": 6.0,
+                    "avg_3m": 5.0,
+                    "positive_1m_breadth_pct": 55.0,
+                    "ticker_count": 6,
+                },
+            ]
+        )
+
+        out = build_current_leadership_table(rankings, top_k=10)
+
+        self.assertEqual(out["theme"].tolist(), ["Broad Tech", "Narrow Spike", "Turning Up"])
+        self.assertEqual(out.iloc[0]["leadership_quality"], "Broad leader")
+        self.assertEqual(out.iloc[1]["leadership_quality"], "Narrow leader")
+        self.assertEqual(out.iloc[2]["leadership_quality"], "Emerging leader")
+
+
+class TestThemeConfidenceAdjustment(unittest.TestCase):
+    def test_theme_confidence_factor_has_no_penalty_at_threshold(self):
+        self.assertEqual(theme_confidence_factor(8), 1.0)
+        self.assertEqual(theme_confidence_factor(12), 1.0)
+
+    def test_theme_confidence_factor_softly_penalizes_small_themes(self):
+        self.assertEqual(theme_confidence_factor(2), 0.5)
+        self.assertAlmostEqual(theme_confidence_factor(4), 0.70710678, places=6)
+
+    def test_compute_theme_metrics_applies_small_theme_confidence_adjustment(self):
+        raw = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "Small", "category": "Tech", "is_active": True, "ticker": "A", "perf_1w": 10.0, "perf_1m": 10.0, "perf_3m": 10.0},
+                {"theme_id": 1, "theme": "Small", "category": "Tech", "is_active": True, "ticker": "B", "perf_1w": 10.0, "perf_1m": 10.0, "perf_3m": 10.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "C", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "D", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "E", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "F", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "G", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "H", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "I", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "J", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+            ]
+        )
+
+        out = _compute_theme_metrics(raw).sort_values("composite_score", ascending=False).reset_index(drop=True)
+
+        self.assertEqual(out.iloc[0]["theme"], "Broad")
+        self.assertEqual(float(out[out["theme"] == "Small"]["composite_score"].iloc[0]), 5.0)
+        self.assertEqual(float(out[out["theme"] == "Broad"]["composite_score"].iloc[0]), 9.0)
+
 
 class TestBoundarySelection(unittest.TestCase):
     def test_theme_history_window_uses_boundary_snapshot(self):
@@ -238,6 +326,45 @@ class TestBoundarySelection(unittest.TestCase):
 
         out = theme_history_window(conn, 7)
         self.assertEqual(int(out["snapshot_time"].nunique()), 2)
+        conn.close()
+
+    def test_compute_theme_momentum_reports_effective_boundary_window_meta(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'A', 'Cat')")
+        conn.execute("insert into themes values (2, 'B', 'Cat')")
+
+        for run_id, ts in [(1, "2026-03-01"), (2, "2026-03-08")]:
+            conn.execute(
+                "insert into theme_snapshots values (?, ?, 1, 10, 1, 1, 1, 50, 1, 'live')",
+                [run_id, ts],
+            )
+            conn.execute(
+                "insert into theme_snapshots values (?, ?, 2, 10, 1, 1, 1, 50, 1, 'live')",
+                [run_id, ts],
+            )
+
+        out = compute_theme_momentum(conn, 30)
+        self.assertEqual(int(out["meta"]["boundary_snapshot_count"]), 2)
+        self.assertEqual(str(pd.to_datetime(out["meta"]["window_start"]).date()), "2026-03-01")
+        self.assertEqual(str(pd.to_datetime(out["meta"]["window_end"]).date()), "2026-03-08")
+        self.assertTrue(out["meta"]["collapsed_to_available_history"])
         conn.close()
 
     def test_top_theme_movers_uses_preferred_source_boundary_window(self):

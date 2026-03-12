@@ -3,6 +3,18 @@ from __future__ import annotations
 import pandas as pd
 
 
+def _leadership_quality_label(row: pd.Series) -> str:
+    breadth = row.get("positive_1m_breadth_pct")
+    breadth_value = float(breadth) if breadth is not None and not pd.isna(breadth) else None
+    ticker_count = int(row.get("ticker_count") or 0)
+
+    if breadth_value is not None and breadth_value >= 60 and ticker_count >= 8:
+        return "Broad leader"
+    if ticker_count < 5 or (breadth_value is not None and breadth_value < 45):
+        return "Narrow leader"
+    return "Emerging leader"
+
+
 def _validate_window_leaderboard_inputs(momentum: dict) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
     history = momentum.get("history", pd.DataFrame())
     if history.empty:
@@ -48,6 +60,40 @@ def build_window_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -> 
     )
     ranked["rank"] = ranked.index + 1
     return ranked[["rank", "theme", perf_col, "momentum_score", "rank_change"]], None
+
+
+def build_current_leadership_table(rankings: pd.DataFrame, top_k: int = 12) -> pd.DataFrame:
+    if rankings.empty:
+        return pd.DataFrame()
+
+    leadership = rankings.copy()
+    if "is_active" in leadership.columns:
+        leadership = leadership[leadership["is_active"] == True].copy()
+    if leadership.empty:
+        return pd.DataFrame()
+
+    leadership = leadership.sort_values(
+        ["composite_score", "positive_1m_breadth_pct", "ticker_count", "theme"],
+        ascending=[False, False, False, True],
+    ).head(top_k).reset_index(drop=True)
+    leadership["rank"] = leadership.index + 1
+    leadership["leadership_quality"] = leadership.apply(_leadership_quality_label, axis=1)
+    leadership = leadership.rename(columns={"positive_1m_breadth_pct": "breadth_1m"})
+    return leadership[
+        [
+            "rank",
+            "theme_id",
+            "theme",
+            "category",
+            "composite_score",
+            "avg_1w",
+            "avg_1m",
+            "avg_3m",
+            "breadth_1m",
+            "ticker_count",
+            "leadership_quality",
+        ]
+    ]
 
 
 def build_category_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -> tuple[pd.DataFrame, str | None]:

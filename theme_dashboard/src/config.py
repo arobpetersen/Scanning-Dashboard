@@ -36,6 +36,8 @@ COMPOSITE_WEIGHTS = {
     "perf_3m": 0.25,
 }
 
+THEME_CONFIDENCE_FULL_COUNT = 8
+
 
 def massive_api_key() -> str | None:
     value = os.getenv(MASSIVE_API_KEY_ENV, "").strip()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .config import COMPOSITE_WEIGHTS
+from .config import COMPOSITE_WEIGHTS, THEME_CONFIDENCE_FULL_COUNT
 from .queries import preferred_theme_snapshot_source
 
 
@@ -18,6 +18,12 @@ METRIC_COLUMNS = [
 ]
 
 
+def theme_confidence_factor(ticker_count: int | float) -> float:
+    if pd.isna(ticker_count) or float(ticker_count) <= 0:
+        return 0.0
+    return min(1.0, (float(ticker_count) / float(THEME_CONFIDENCE_FULL_COUNT)) ** 0.5)
+
+
 def _compute_theme_metrics(raw: pd.DataFrame) -> pd.DataFrame:
     grouped = raw.groupby(["theme_id", "theme", "category", "is_active"], dropna=False)
     out = grouped.agg(
@@ -30,11 +36,12 @@ def _compute_theme_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         positive_3m_breadth_pct=("perf_3m", lambda s: (s.dropna().gt(0).mean() * 100) if len(s.dropna()) else 0),
     ).reset_index()
 
-    out["composite_score"] = (
+    base_score = (
         COMPOSITE_WEIGHTS["perf_1w"] * out["avg_1w"].fillna(0)
         + COMPOSITE_WEIGHTS["perf_1m"] * out["avg_1m"].fillna(0)
         + COMPOSITE_WEIGHTS["perf_3m"] * out["avg_3m"].fillna(0)
     )
+    out["composite_score"] = base_score * out["ticker_count"].apply(theme_confidence_factor)
 
     out[METRIC_COLUMNS[1:]] = out[METRIC_COLUMNS[1:]].round(2)
     return out
