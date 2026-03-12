@@ -172,6 +172,61 @@ def remove_ticker(conn, theme_id: int, ticker: str) -> None:
     )
 
 
+def set_ticker_theme_assignments(conn, ticker: str, theme_ids: list[int]) -> dict[str, int | str]:
+    normalized_ticker = _normalize_ticker(ticker)
+    normalized_theme_ids = sorted({int(theme_id) for theme_id in theme_ids if theme_id is not None})
+    if not normalized_theme_ids:
+        raise ValueError("Select at least one theme assignment.")
+
+    placeholders = ", ".join(["?"] * len(normalized_theme_ids))
+    existing_theme_rows = conn.execute(
+        f"""
+        SELECT id
+        FROM themes
+        WHERE id IN ({placeholders})
+        """,
+        normalized_theme_ids,
+    ).fetchall()
+    existing_theme_ids = {int(row[0]) for row in existing_theme_rows}
+    missing_theme_ids = [theme_id for theme_id in normalized_theme_ids if theme_id not in existing_theme_ids]
+    if missing_theme_ids:
+        raise ValueError(f"Unknown theme id(s): {', '.join(str(theme_id) for theme_id in missing_theme_ids)}")
+
+    current_theme_ids = {
+        int(row[0])
+        for row in conn.execute(
+            "SELECT theme_id FROM theme_membership WHERE ticker = ?",
+            [normalized_ticker],
+        ).fetchall()
+    }
+    to_add = [theme_id for theme_id in normalized_theme_ids if theme_id not in current_theme_ids]
+    to_remove = [theme_id for theme_id in current_theme_ids if theme_id not in normalized_theme_ids]
+
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        for theme_id in to_add:
+            conn.execute(
+                "INSERT OR IGNORE INTO theme_membership(theme_id, ticker) VALUES (?, ?)",
+                [theme_id, normalized_ticker],
+            )
+        for theme_id in to_remove:
+            conn.execute(
+                "DELETE FROM theme_membership WHERE theme_id = ? AND ticker = ?",
+                [theme_id, normalized_ticker],
+            )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    return {
+        "ticker": normalized_ticker,
+        "assigned_theme_count": len(normalized_theme_ids),
+        "added_count": len(to_add),
+        "removed_count": len(to_remove),
+    }
+
+
 def active_ticker_universe(conn) -> list[str]:
     rows = conn.execute(
         """

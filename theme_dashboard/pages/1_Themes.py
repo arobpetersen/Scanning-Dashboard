@@ -13,6 +13,7 @@ from src.theme_service import (
     get_theme_members,
     list_themes,
     remove_ticker,
+    set_ticker_theme_assignments,
     seed_if_needed,
     update_theme,
 )
@@ -323,12 +324,12 @@ with manage_tab:
 
     st.divider()
     st.subheader("Ticker Lookup")
-    st.caption("Read-only lookup to check database presence, theme assignment, and recent snapshot context before manual additions.")
+    st.caption("Search one ticker at a time to inspect database presence, current assignments, and recent snapshot context.")
     lookup_raw = st.text_input("Ticker symbol", key="manage_ticker_lookup", placeholder="e.g. NVDA")
     lookup_ticker = lookup_raw.strip().upper()
 
     if not lookup_ticker:
-        st.info("Enter a ticker to inspect membership and snapshot presence.")
+        st.info("Enter a ticker to inspect membership, snapshot presence, and next manual action.")
     else:
         with get_conn() as conn:
             lookup = ticker_lookup_summary(conn, lookup_ticker)
@@ -366,3 +367,59 @@ with manage_tab:
                 st.warning(f"`{lookup_ticker}` was not found in theme membership, ticker snapshots, refresh-run tickers, or symbol status.")
             else:
                 st.info(f"`{lookup_ticker}` is present in the database but is not currently assigned to any theme.")
+
+            if str(row.get("lookup_status")) == "Not found":
+                st.caption("Next action: add this ticker with at least one theme assignment to create a managed membership record.")
+            elif bool(row.get("exists_in_theme_membership")):
+                st.caption("Next action: edit the ticker's current theme assignments below.")
+            else:
+                st.caption("Next action: assign this existing ticker to one or more themes below.")
+
+            theme_options = {
+                f"{theme_row['name']} ({theme_row['category']})": int(theme_row["id"])
+                for _, theme_row in themes.iterrows()
+            }
+            selected_theme_ids = set(memberships["theme_id"].astype(int).tolist()) if not memberships.empty else set()
+            selected_theme_labels = [label for label, theme_id in theme_options.items() if theme_id in selected_theme_ids]
+            action_label = "Add ticker" if str(row.get("lookup_status")) == "Not found" else "Update ticker"
+
+            st.markdown("**Ticker intake / edit**")
+            st.caption(
+                "Required: `ticker` and at least one theme assignment. "
+                "Optional manual fields are not stored yet. Provider market data shown above remains read-only context."
+            )
+            with st.form("ticker_intake_edit_form"):
+                form_ticker = st.text_input("Ticker (required)", value=lookup_ticker)
+                form_theme_labels = st.multiselect(
+                    "Theme assignments (required)",
+                    list(theme_options.keys()),
+                    default=selected_theme_labels,
+                )
+                form_submitted = st.form_submit_button(action_label)
+
+            if form_submitted:
+                normalized_form_ticker = form_ticker.strip().upper()
+                if not normalized_form_ticker:
+                    st.error("Ticker is required.")
+                elif not form_theme_labels:
+                    st.error("Select at least one theme assignment.")
+                else:
+                    chosen_theme_ids = [int(theme_options[label]) for label in form_theme_labels]
+                    try:
+                        with get_conn() as conn:
+                            result = set_ticker_theme_assignments(conn, normalized_form_ticker, chosen_theme_ids)
+                        if int(result["added_count"]) == 0 and int(result["removed_count"]) == 0:
+                            st.info(
+                                f"No membership changes were needed for `{result['ticker']}`. "
+                                f"It is already assigned to {int(result['assigned_theme_count'])} theme(s)."
+                            )
+                        else:
+                            st.success(
+                                f"Saved `{result['ticker']}`: "
+                                f"{int(result['added_count'])} assignment(s) added, "
+                                f"{int(result['removed_count'])} removed."
+                            )
+                        st.session_state["manage_ticker_lookup"] = normalized_form_ticker
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Ticker save failed: {exc}")

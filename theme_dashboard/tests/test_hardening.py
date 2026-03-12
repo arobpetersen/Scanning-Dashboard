@@ -25,6 +25,7 @@ from src.queries import (
 )
 from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success
 from src.theme_service import seed_if_needed
+from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
 from src.eod_refresh import has_eod_run_for_date, run_scheduled_eod_refresh
 
@@ -470,6 +471,46 @@ class TestTickerLookup(unittest.TestCase):
 
         self.assertEqual(summary.iloc[0]["lookup_status"], "Not found")
         self.assertTrue(memberships.empty)
+        conn.close()
+
+
+class TestTickerAssignmentEditing(unittest.TestCase):
+    def test_set_ticker_theme_assignments_requires_at_least_one_theme(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
+
+        with self.assertRaisesRegex(ValueError, "Select at least one theme assignment"):
+            set_ticker_theme_assignments(conn, "nvda", [])
+        conn.close()
+
+    def test_set_ticker_theme_assignments_upserts_without_duplicates(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into themes values (2, 'Robotics', 'Tech', true)")
+        conn.execute("insert into theme_membership values (1, 'NVDA')")
+
+        first = set_ticker_theme_assignments(conn, " nvda ", [1, 2, 2])
+        members = conn.execute(
+            "select theme_id, ticker from theme_membership where ticker='NVDA' order by theme_id"
+        ).fetchall()
+
+        self.assertEqual(first["ticker"], "NVDA")
+        self.assertEqual(int(first["added_count"]), 1)
+        self.assertEqual(int(first["removed_count"]), 0)
+        self.assertEqual(members, [(1, "NVDA"), (2, "NVDA")])
+
+        second = set_ticker_theme_assignments(conn, "NVDA", [2])
+        members_after = conn.execute(
+            "select theme_id, ticker from theme_membership where ticker='NVDA' order by theme_id"
+        ).fetchall()
+
+        self.assertEqual(int(second["added_count"]), 0)
+        self.assertEqual(int(second["removed_count"]), 1)
+        self.assertEqual(members_after, [(2, "NVDA")])
         conn.close()
 
 
