@@ -53,6 +53,19 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
     window_end = boundary_times.iloc[-1] if not boundary_times.empty else None
     effective_window_days = int((window_end - window_start).days) if window_start is not None and window_end is not None else None
     collapsed_to_available_history = bool(effective_window_days is not None and effective_window_days < int(lookback_days))
+    provenance_classes = sorted(set(history["provenance_class"].dropna().astype(str).tolist())) if "provenance_class" in history.columns else []
+    provenance_mix = (
+        "mixed"
+        if len(provenance_classes) > 1
+        else (f"{provenance_classes[0]}-only" if provenance_classes else "unknown")
+    )
+    boundary_rows = history[pd.to_datetime(history["snapshot_time"]).isin([window_start, window_end])].copy()
+    boundary_classes = sorted(set(boundary_rows["provenance_class"].dropna().astype(str).tolist())) if "provenance_class" in boundary_rows.columns else []
+    boundary_provenance_mix = (
+        "mixed"
+        if len(boundary_classes) > 1
+        else (f"{boundary_classes[0]}-only" if boundary_classes else "unknown")
+    )
 
     history = history.sort_values(["theme", "snapshot_time"]).copy()
     history["rank"] = history.groupby("snapshot_time")["composite_score"].rank(method="dense", ascending=False)
@@ -104,5 +117,7 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
             "boundary_snapshot_count": int(boundary_times.nunique()),
             "effective_window_days": effective_window_days,
             "collapsed_to_available_history": collapsed_to_available_history,
+            "provenance_mix": provenance_mix,
+            "boundary_provenance_mix": boundary_provenance_mix,
         },
     }

@@ -266,6 +266,7 @@ def set_ticker_theme_assignments(conn, ticker: str, theme_ids: list[int]) -> dic
         "assigned_theme_count": len(normalized_theme_ids),
         "added_count": len(to_add),
         "removed_count": len(to_remove),
+        "affected_theme_ids": sorted(set(to_add + to_remove + normalized_theme_ids)),
     }
 
 

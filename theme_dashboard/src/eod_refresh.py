@@ -4,6 +4,7 @@ from datetime import UTC, datetime, time
 from zoneinfo import ZoneInfo
 
 from .fetch_data import run_refresh
+from .historical_backfill import run_daily_historical_append
 from .theme_service import active_ticker_universe
 
 EASTERN_TZ = ZoneInfo("America/New_York")
@@ -46,6 +47,24 @@ def has_eod_run_for_date(conn, as_of_et: datetime) -> bool:
     return False
 
 
+def has_historical_append_for_date(conn, as_of_et: datetime, provenance_source_label: str = "daily_historical_append") -> bool:
+    if conn.execute("SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'historical_reconstruction_runs'").fetchone()[0] == 0:
+        return False
+    target_date = as_of_et.date()
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM historical_reconstruction_runs
+        WHERE status IN ('success', 'partial')
+          AND provenance_source_label = ?
+          AND start_date = ?
+          AND end_date = ?
+        """,
+        [provenance_source_label, target_date, target_date],
+    ).fetchone()
+    return bool(row and int(row[0]) > 0)
+
+
 def run_scheduled_eod_refresh(conn, provider_name: str = "live", force: bool = False) -> int | None:
     now_et = current_et()
     if not force:
@@ -64,4 +83,21 @@ def run_scheduled_eod_refresh(conn, provider_name: str = "live", force: bool = F
         tickers=tickers,
         scope_type="scheduled_eod",
         scope_theme_name=None,
+    )
+
+
+def run_scheduled_historical_append(conn, provider_name: str = "live", force: bool = False) -> dict[str, object] | None:
+    now_et = current_et()
+    target_date = now_et.date()
+    if not force:
+        if not is_trading_day(now_et) or not reached_eod_window(now_et):
+            return None
+        if has_historical_append_for_date(conn, now_et):
+            return None
+
+    return run_daily_historical_append(
+        conn,
+        provider_name=provider_name,
+        target_date=target_date,
+        replace_existing=False,
     )
