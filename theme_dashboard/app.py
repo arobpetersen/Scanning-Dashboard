@@ -7,8 +7,9 @@ from src.database import get_conn, init_db
 from src.fetch_data import RefreshBlockedError, run_refresh
 from src.queries import last_refresh_run, synthetic_data_active
 from src.rankings import compute_theme_rankings
+from src.symbol_hygiene import refresh_eligible_tickers
 from src.suggestions_service import suggestion_status_counts
-from src.theme_service import active_ticker_universe, get_theme_members, list_themes, seed_if_needed
+from src.theme_service import active_ticker_universe, get_theme_members, list_themes, refresh_active_ticker_universe, seed_if_needed
 
 st.set_page_config(page_title="Theme Ops Dashboard", layout="wide")
 st.title("Theme Operations Dashboard")
@@ -42,7 +43,9 @@ elif scope_mode == "Custom ticker list":
     selected_tickers = sorted(set([p.strip().upper() for p in raw.replace("\n", " ").replace(",", " ").split(" ") if p.strip()]))
 
 with get_conn() as conn:
-    resolved_tickers = active_ticker_universe(conn) if scope_mode == active_scope_label else sorted(set(selected_tickers or []))
+    requested_tickers = active_ticker_universe(conn) if scope_mode == active_scope_label else sorted(set(selected_tickers or []))
+    resolved_tickers = refresh_active_ticker_universe(conn) if scope_mode == active_scope_label else sorted(set(selected_tickers or []))
+    eligible_tickers, suppressed_scope_tickers = refresh_eligible_tickers(conn, requested_tickers)
     last_run = last_refresh_run(conn)
     rankings = compute_theme_rankings(conn)
     sugg_counts = suggestion_status_counts(conn)
@@ -65,7 +68,7 @@ m1.metric("Themes", int(rankings.shape[0]) if not rankings.empty else 0)
 m2.metric("Active themes", int((rankings["is_active"] == True).sum()) if not rankings.empty else 0)
 m3.metric("Pending suggestions", pending)
 m4.metric("Obsolete suggestions", obsolete)
-m5.metric("Scope tickers", len(resolved_tickers))
+m5.metric("Refresh-eligible tickers", len(eligible_tickers))
 
 st.subheader("Refresh Control")
 rc1, rc2 = st.columns([2, 3])
@@ -74,7 +77,12 @@ with rc1:
     st.write(f"**Scope:** {scope_mode}")
     if selected_theme_name:
         st.write(f"**Theme:** {selected_theme_name}")
-    st.write(f"**Tickers in scope:** {len(resolved_tickers)}")
+    st.write(f"**Requested scope tickers:** {len(requested_tickers)}")
+    st.write(f"**Refresh-eligible tickers:** {len(eligible_tickers)}")
+    if suppressed_scope_tickers:
+        st.caption(
+            f"{len(suppressed_scope_tickers)} ticker(s) are currently refresh-suppressed and excluded from active refresh scope."
+        )
     if st.button("Run refresh now", type="primary"):
         pb = st.progress(0)
         status = st.empty()
@@ -126,7 +134,11 @@ with rc2:
     else:
         st.info("No runs yet.")
     with st.expander("Resolved ticker universe"):
+        st.write("Refresh-eligible tickers")
         st.code(", ".join(resolved_tickers) if resolved_tickers else "(none)")
+        if suppressed_scope_tickers:
+            st.write("Refresh-suppressed tickers excluded from this run")
+            st.code(", ".join(sorted(suppressed_scope_tickers)))
 
 st.subheader("Current Rankings")
 if rankings.empty:

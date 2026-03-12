@@ -238,3 +238,18 @@ def active_ticker_universe(conn) -> list[str]:
         """
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def refresh_active_ticker_universe(conn) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT m.ticker
+        FROM theme_membership m
+        JOIN themes t ON t.id = m.theme_id
+        LEFT JOIN symbol_refresh_status s ON s.ticker = m.ticker
+        WHERE t.is_active = TRUE
+          AND COALESCE(s.status, 'active') <> 'refresh_suppressed'
+        ORDER BY m.ticker
+        """
+    ).fetchall()
+    return [r[0] for r in rows]

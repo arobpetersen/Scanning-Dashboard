@@ -23,9 +23,9 @@ from src.queries import (
     ticker_history_last_n_snapshots,
     top_theme_movers,
 )
-from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success, sort_symbol_hygiene_queue, symbol_hygiene_queue
+from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success, filter_symbol_hygiene_queue, sort_symbol_hygiene_queue, symbol_hygiene_queue
 from src.suggestions_service import review_suggestion
-from src.theme_service import seed_if_needed
+from src.theme_service import refresh_active_ticker_universe, seed_if_needed
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
 from src.eod_refresh import has_eod_run_for_date, run_scheduled_eod_refresh
@@ -510,6 +510,21 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
         self.assertEqual(by_confidence.iloc[0]["ticker"], "AAA")
         self.assertEqual(by_rolling.iloc[0]["ticker"], "BBB")
 
+    def test_filter_symbol_hygiene_queue_hides_resolved_suppressions_by_default(self):
+        queue = pd.DataFrame(
+            [
+                {"ticker": "AAA", "status": "inactive_candidate", "suggested_status": "refresh_suppressed"},
+                {"ticker": "BBB", "status": "watch", "suggested_status": None},
+                {"ticker": "CCC", "status": "refresh_suppressed", "suggested_status": None},
+            ]
+        )
+
+        pending = filter_symbol_hygiene_queue(queue, "Pending review")
+        resolved = filter_symbol_hygiene_queue(queue, "Suppressed / resolved")
+
+        self.assertEqual(pending["ticker"].tolist(), ["AAA", "BBB"])
+        self.assertEqual(resolved["ticker"].tolist(), ["CCC"])
+
 
 class TestMetricFormattingAndReturnSafety(unittest.TestCase):
     def test_human_readable_number(self):
@@ -720,6 +735,42 @@ class TestTickerAssignmentEditing(unittest.TestCase):
         self.assertEqual(int(second["added_count"]), 0)
         self.assertEqual(int(second["removed_count"]), 1)
         self.assertEqual(members_after, [(2, "NVDA")])
+        conn.close()
+
+
+class TestRefreshUniverseSemantics(unittest.TestCase):
+    def test_refresh_active_ticker_universe_excludes_suppressed_symbols(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership values (1, 'NVDA')")
+        conn.execute("insert into theme_membership values (1, 'PLTR')")
+        conn.execute(
+            "insert into symbol_refresh_status(ticker, status, consecutive_failure_count, rolling_failure_count) values ('PLTR', 'refresh_suppressed', 5, 8)"
+        )
+
+        out = refresh_active_ticker_universe(conn)
+
+        self.assertEqual(out, ["NVDA"])
         conn.close()
 
 

@@ -21,6 +21,7 @@ from src.queries import baseline_status, last_refresh_run, refresh_history, row_
 from src.suggestions_service import suggestion_status_counts
 from src.symbol_hygiene import (
     approve_suppression,
+    filter_symbol_hygiene_queue,
     hygiene_decision_context,
     reject_keep_active,
     reset_failure_history,
@@ -32,6 +33,17 @@ from src.theme_service import get_theme_members, seed_if_needed, update_theme
 
 st.set_page_config(page_title="Health", layout="wide")
 st.title("Health & Operations")
+
+feedback = st.session_state.pop("symbol_hygiene_feedback", None)
+if feedback:
+    level = str(feedback.get("level") or "info")
+    message = str(feedback.get("message") or "")
+    if level == "success":
+        st.success(message)
+    elif level == "warning":
+        st.warning(message)
+    else:
+        st.error(message)
 
 
 def _extract_selected_row(event) -> int | None:
@@ -175,6 +187,12 @@ with ops_tab:
     if queue.empty:
         st.success("No flagged/suppressed/watch symbols currently in queue.")
     else:
+        queue_view = st.selectbox(
+            "Queue view",
+            ["Pending review", "Suppressed / resolved", "All"],
+            index=0,
+            help="Pending review focuses on actionable items. Suppressed / resolved shows symbols already moved out of active refresh.",
+        )
         queue_sort = st.selectbox(
             "Queue sort",
             [
@@ -186,11 +204,20 @@ with ops_tab:
             index=0,
             help="Prioritize the review queue by confidence, data staleness, or failure streak intensity.",
         )
+        queue = filter_symbol_hygiene_queue(queue, queue_view)
         queue = sort_symbol_hygiene_queue(queue, queue_sort)
         st.caption(
             "Suppression is a refresh-control decision, not a delete action. "
             "Preferred policy: keep symbol lineage/history in DuckDB, suppress high-confidence non-viable symbols from active refresh, and review theme membership separately."
         )
+        if queue_view == "Pending review":
+            st.caption("Default view shows actionable review items. Already suppressed symbols move to `Suppressed / resolved` after approval.")
+        elif queue_view == "Suppressed / resolved":
+            st.caption("This view shows symbols already removed from active refresh. They remain in DuckDB for lineage/history and can be reviewed separately from theme membership.")
+
+        if queue.empty:
+            st.success("No symbols match the current queue view.")
+        
         for _, row in queue.iterrows():
             ticker = str(row["ticker"])
             decision = hygiene_decision_context(row)
@@ -223,8 +250,21 @@ with ops_tab:
                     key=f"approve_{ticker}",
                     help="Suppress this symbol from future refresh runs while keeping its database lineage/history and current memberships intact.",
                 ):
-                    with get_conn() as conn:
-                        approve_suppression(conn, ticker)
+                    try:
+                        with get_conn() as conn:
+                            approve_suppression(conn, ticker)
+                        st.session_state["symbol_hygiene_feedback"] = {
+                            "level": "success",
+                            "message": (
+                                f"Suppression approved for `{ticker}`. "
+                                "It is now excluded from active refresh and removed from the default Pending review queue."
+                            ),
+                        }
+                    except Exception as exc:
+                        st.session_state["symbol_hygiene_feedback"] = {
+                            "level": "error",
+                            "message": f"Approve suppression failed for `{ticker}`: {exc}",
+                        }
                     st.rerun()
                 if a2.button(
                     "Reject / keep active",

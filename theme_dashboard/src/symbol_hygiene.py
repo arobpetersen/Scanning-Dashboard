@@ -223,6 +223,19 @@ def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
     ).df()
 
 
+def filter_symbol_hygiene_queue(queue: pd.DataFrame, queue_view: str) -> pd.DataFrame:
+    if queue.empty:
+        return queue
+
+    out = queue.copy()
+    if queue_view == "Pending review":
+        mask = out["suggested_status"].notna() | out["status"].isin([INACTIVE_CANDIDATE, WATCH])
+        out = out[mask & (out["status"] != REFRESH_SUPPRESSED)]
+    elif queue_view == "Suppressed / resolved":
+        out = out[out["status"] == REFRESH_SUPPRESSED]
+    return out.reset_index(drop=True)
+
+
 def sort_symbol_hygiene_queue(queue: pd.DataFrame, sort_mode: str) -> pd.DataFrame:
     if queue.empty:
         return queue
