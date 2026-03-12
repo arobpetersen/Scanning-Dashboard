@@ -27,6 +27,14 @@ def _empty_result() -> dict:
         "new_leaders": [],
         "dropped_leaders": [],
         "source_preference": None,
+        "meta": {
+            "requested_lookback_days": None,
+            "window_start": None,
+            "window_end": None,
+            "boundary_snapshot_count": 0,
+            "effective_window_days": None,
+            "collapsed_to_available_history": False,
+        },
     }
 
 
@@ -39,6 +47,12 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
     if "snapshot_source" in history.columns and not history["snapshot_source"].dropna().empty:
         sources = sorted(set(history["snapshot_source"].dropna().astype(str).tolist()))
         source_preference = sources[0] if len(sources) == 1 else ", ".join(sources)
+
+    boundary_times = pd.to_datetime(history["snapshot_time"]).dropna().drop_duplicates().sort_values()
+    window_start = boundary_times.iloc[0] if not boundary_times.empty else None
+    window_end = boundary_times.iloc[-1] if not boundary_times.empty else None
+    effective_window_days = int((window_end - window_start).days) if window_start is not None and window_end is not None else None
+    collapsed_to_available_history = bool(effective_window_days is not None and effective_window_days < int(lookback_days))
 
     history = history.sort_values(["theme", "snapshot_time"]).copy()
     history["rank"] = history.groupby("snapshot_time")["composite_score"].rank(method="dense", ascending=False)
@@ -83,4 +97,12 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
         "new_leaders": entered,
         "dropped_leaders": dropped,
         "source_preference": source_preference,
+        "meta": {
+            "requested_lookback_days": int(lookback_days),
+            "window_start": window_start,
+            "window_end": window_end,
+            "boundary_snapshot_count": int(boundary_times.nunique()),
+            "effective_window_days": effective_window_days,
+            "collapsed_to_available_history": collapsed_to_available_history,
+        },
     }

@@ -215,6 +215,17 @@ summary = momentum["window_summary"]
 rotation = compute_theme_rotation(summary, analysis_top_n, momentum["new_leaders"], momentum["dropped_leaders"])
 with get_conn() as conn:
     inflections = compute_theme_inflections(conn, int(lookback_days), top_n=analysis_top_n)
+window_meta = momentum.get("meta", {})
+
+w1, w2, w3 = st.columns(3)
+w1.metric("Window start", str(pd.to_datetime(window_meta.get("window_start")).strftime("%Y-%m-%d")) if window_meta.get("window_start") is not None else "—")
+w2.metric("Window end", str(pd.to_datetime(window_meta.get("window_end")).strftime("%Y-%m-%d")) if window_meta.get("window_end") is not None else "—")
+w3.metric("Boundary snapshots", int(window_meta.get("boundary_snapshot_count") or 0))
+if window_meta.get("collapsed_to_available_history"):
+    st.info(
+        f"Selected {int(window_meta.get('requested_lookback_days') or 0)}d lookback currently resolves to an effective "
+        f"{int(window_meta.get('effective_window_days') or 0)}d boundary window because older snapshots are not yet available."
+    )
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Themes in window", int(summary.shape[0]))
@@ -269,7 +280,8 @@ if search_filter.strip():
     filtered_history = filtered_history[filtered_history["theme"].str.contains(search_filter.strip(), case=False, na=False)]
 
 latest = filtered_history.sort_values("snapshot_time").groupby("theme", as_index=False).tail(1)
-analysis_leaders = latest.sort_values(metric, ascending=False).head(analysis_top_n)["theme"].tolist()
+movement_leaders = summary.sort_values(["momentum_score", "delta_composite", "rank_change"], ascending=[False, False, False])["theme"].tolist()
+analysis_leaders = [theme for theme in movement_leaders if theme in latest["theme"].tolist()][:analysis_top_n]
 
 if not analysis_leaders:
     st.warning("No themes match current filter for this lookback window.")
@@ -361,7 +373,11 @@ else:
     st.caption(f"This chart plots the raw `{metric}` snapshot values over time for the selected themes.")
 st.altair_chart(chart, width="stretch")
 
-st.caption(f"Analyzed top N={analysis_top_n}; displaying {trend['theme'].nunique()} theme lines.")
+st.caption(
+    f"Analyzed top N={analysis_top_n}; displaying {trend['theme'].nunique()} movement-selected theme lines "
+    f"from {pd.to_datetime(window_meta.get('window_start')).strftime('%Y-%m-%d') if window_meta.get('window_start') is not None else '—'} "
+    f"to {pd.to_datetime(window_meta.get('window_end')).strftime('%Y-%m-%d') if window_meta.get('window_end') is not None else '—'}."
+)
 
 st.subheader("Theme Signals (Inflection Feed)")
 st.caption("Deterministic high-confidence events derived from momentum + rotation metrics for the selected analysis window.")

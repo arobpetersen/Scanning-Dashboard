@@ -1,9 +1,15 @@
 import streamlit as st
 
 from src.database import get_conn, init_db
-from src.leaderboard_utils import build_category_leaderboard, build_category_theme_breakdown, build_window_leaderboard
+from src.leaderboard_utils import (
+    build_category_leaderboard,
+    build_category_theme_breakdown,
+    build_current_leadership_table,
+    build_window_leaderboard,
+)
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.momentum_engine import compute_theme_momentum
+from src.rankings import compute_theme_rankings
 from src.queries import ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
 from src.theme_selection import (
     SELECTED_THEME_ID_KEY,
@@ -164,6 +170,47 @@ def _render_category_theme_drill(title: str, breakdown_df) -> None:
         st.caption("These are the underlying eligible themes for the selected category/window, sorted by the same theme-level metrics used to build the category summary.")
 
 
+def _render_current_leadership(leadership_df, label_by_id: dict[int, str]) -> None:
+    st.subheader("Current Market Leadership")
+    st.caption(
+        "Ranks active themes by current confidence-adjusted composite strength. "
+        "Breadth, constituent count, and the leadership label help distinguish broad current leadership from narrower spikes."
+    )
+    event = st.dataframe(
+        leadership_df[
+            [
+                "rank",
+                "theme",
+                "category",
+                "composite_score",
+                "avg_1w",
+                "avg_1m",
+                "avg_3m",
+                "breadth_1m",
+                "ticker_count",
+                "leadership_quality",
+            ]
+        ],
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-cell",
+        key="current_leadership_table",
+    )
+    row_idx = _extract_selected_row(event)
+    if row_idx is not None and 0 <= row_idx < len(leadership_df):
+        picked_theme_id = int(leadership_df.iloc[row_idx]["theme_id"])
+        picked_label = label_by_id.get(
+            picked_theme_id,
+            f"{leadership_df.iloc[row_idx]['theme']} ({leadership_df.iloc[row_idx]['category']})",
+        )
+        selection_token = f"current_leadership:{picked_theme_id}"
+        handled_key = _handled_selection_key("current_leadership")
+        if should_apply_selection_token(selection_token, st.session_state.get(handled_key)):
+            _set_theme_selection(picked_theme_id, picked_label, "current_leadership")
+            st.session_state[handled_key] = selection_token
+
+
 explore_tab, manage_tab = st.tabs(["Explore", "Manage"])
 
 with explore_tab:
@@ -186,11 +233,21 @@ with explore_tab:
         st.session_state[SELECTED_THEME_SOURCE_KEY] = "default"
 
     with get_conn() as conn:
+        current_rankings = compute_theme_rankings(conn)
         momentum_1w = compute_theme_momentum(conn, 7, top_n=20)
         momentum_1m = compute_theme_momentum(conn, 30, top_n=20)
+    leadership_df = build_current_leadership_table(current_rankings, top_k=12)
+
+    if leadership_df.empty:
+        st.info("No active theme leadership data is available yet.")
+    else:
+        _render_current_leadership(leadership_df, label_by_id)
 
     lb1, lb1_msg = _build_leaderboard(momentum_1w, "avg_1w", "performance")
     lb2, lb2_msg = _build_leaderboard(momentum_1m, "avg_1m", "performance")
+    st.divider()
+    st.subheader("Theme Movement Snapshots")
+    st.caption("These tables rank performance within the selected 1W and 1M windows. Use them to spot short-term movement and rotation rather than current broad leadership.")
     leaderboard_mode = st.radio("Top table view", ["Themes", "Categories"], horizontal=True, key="themes_leaderboard_mode")
     show_advanced_leaderboard = st.checkbox(
         "Show advanced leaderboard context",

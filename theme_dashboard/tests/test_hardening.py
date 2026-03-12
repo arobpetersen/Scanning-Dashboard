@@ -10,8 +10,14 @@ import pandas as pd
 from src.fetch_data import run_refresh
 from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
-from src.leaderboard_utils import build_category_leaderboard, build_category_theme_breakdown, build_window_leaderboard
+from src.leaderboard_utils import (
+    build_category_leaderboard,
+    build_category_theme_breakdown,
+    build_current_leadership_table,
+    build_window_leaderboard,
+)
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
+from src.momentum_engine import compute_theme_momentum
 from src.queries import (
     latest_ticker_snapshots,
     ticker_lookup_memberships,
@@ -202,6 +208,55 @@ class TestLeaderboardUtils(unittest.TestCase):
         self.assertEqual(tech["theme"].tolist(), ["Alpha", "Beta"])
         self.assertIn("Gamma", out[out["category"] == "Gamma"]["theme"].tolist())
 
+    def test_current_leadership_table_uses_composite_strength_and_quality_context(self):
+        rankings = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Broad Tech",
+                    "category": "Tech",
+                    "is_active": True,
+                    "composite_score": 12.0,
+                    "avg_1w": 4.0,
+                    "avg_1m": 8.0,
+                    "avg_3m": 6.0,
+                    "positive_1m_breadth_pct": 72.0,
+                    "ticker_count": 10,
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Narrow Spike",
+                    "category": "Spec",
+                    "is_active": True,
+                    "composite_score": 11.5,
+                    "avg_1w": 10.0,
+                    "avg_1m": 9.0,
+                    "avg_3m": 2.0,
+                    "positive_1m_breadth_pct": 30.0,
+                    "ticker_count": 3,
+                },
+                {
+                    "theme_id": 3,
+                    "theme": "Turning Up",
+                    "category": "Macro",
+                    "is_active": True,
+                    "composite_score": 10.0,
+                    "avg_1w": 3.0,
+                    "avg_1m": 6.0,
+                    "avg_3m": 5.0,
+                    "positive_1m_breadth_pct": 55.0,
+                    "ticker_count": 6,
+                },
+            ]
+        )
+
+        out = build_current_leadership_table(rankings, top_k=10)
+
+        self.assertEqual(out["theme"].tolist(), ["Broad Tech", "Narrow Spike", "Turning Up"])
+        self.assertEqual(out.iloc[0]["leadership_quality"], "Broad leader")
+        self.assertEqual(out.iloc[1]["leadership_quality"], "Narrow leader")
+        self.assertEqual(out.iloc[2]["leadership_quality"], "Emerging leader")
+
 
 class TestThemeConfidenceAdjustment(unittest.TestCase):
     def test_theme_confidence_factor_has_no_penalty_at_threshold(self):
@@ -271,6 +326,45 @@ class TestBoundarySelection(unittest.TestCase):
 
         out = theme_history_window(conn, 7)
         self.assertEqual(int(out["snapshot_time"].nunique()), 2)
+        conn.close()
+
+    def test_compute_theme_momentum_reports_effective_boundary_window_meta(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'A', 'Cat')")
+        conn.execute("insert into themes values (2, 'B', 'Cat')")
+
+        for run_id, ts in [(1, "2026-03-01"), (2, "2026-03-08")]:
+            conn.execute(
+                "insert into theme_snapshots values (?, ?, 1, 10, 1, 1, 1, 50, 1, 'live')",
+                [run_id, ts],
+            )
+            conn.execute(
+                "insert into theme_snapshots values (?, ?, 2, 10, 1, 1, 1, 50, 1, 'live')",
+                [run_id, ts],
+            )
+
+        out = compute_theme_momentum(conn, 30)
+        self.assertEqual(int(out["meta"]["boundary_snapshot_count"]), 2)
+        self.assertEqual(str(pd.to_datetime(out["meta"]["window_start"]).date()), "2026-03-01")
+        self.assertEqual(str(pd.to_datetime(out["meta"]["window_end"]).date()), "2026-03-08")
+        self.assertTrue(out["meta"]["collapsed_to_available_history"])
         conn.close()
 
     def test_top_theme_movers_uses_preferred_source_boundary_window(self):
