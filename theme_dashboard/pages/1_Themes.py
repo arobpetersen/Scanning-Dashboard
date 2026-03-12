@@ -82,7 +82,7 @@ def _build_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tu
     latest = momentum["history"].sort_values("snapshot_time").groupby("theme", as_index=False).tail(1)
     ranked = ranked.merge(latest[["theme", "theme_id", "category", "positive_1m_breadth_pct"]], on="theme", how="left")
     ranked = ranked.rename(columns={metric_col: metric_label, "positive_1m_breadth_pct": "breadth_1m"})
-    return ranked[["rank", "theme_id", "theme", "category", metric_label, "momentum_score", "breadth_1m"]], None
+    return ranked[["rank", "theme_id", "theme", "category", metric_label, "momentum_score", "rank_change", "breadth_1m"]], None
 
 
 def _set_theme_selection(theme_id: int, label: str, source: str) -> None:
@@ -95,10 +95,17 @@ def _apply_dropdown_selection(id_by_label: dict[str, int]) -> None:
         _set_theme_selection(int(id_by_label[str(label)]), str(label), "manual_dropdown")
 
 
-def _render_leaderboard(title: str, key_prefix: str, leaderboard_df, label_by_id: dict[int, str]):
+def _render_leaderboard(title: str, key_prefix: str, leaderboard_df, label_by_id: dict[int, str], show_advanced: bool):
     st.markdown(f"**{title}**")
+    st.caption(
+        "Ranked by performance first, then momentum score, then rank improvement. "
+        "Breadth is contextual only and does not determine rank."
+    )
+    visible_cols = ["rank", "theme", "category", "performance", "momentum_score"]
+    if show_advanced:
+        visible_cols.extend(["rank_change", "breadth_1m"])
     event = st.dataframe(
-        leaderboard_df[["rank", "theme", "category", "performance", "momentum_score", "breadth_1m"]],
+        leaderboard_df[visible_cols],
         width="stretch",
         hide_index=True,
         on_select="rerun",
@@ -185,6 +192,12 @@ with explore_tab:
     lb1, lb1_msg = _build_leaderboard(momentum_1w, "avg_1w", "performance")
     lb2, lb2_msg = _build_leaderboard(momentum_1m, "avg_1m", "performance")
     leaderboard_mode = st.radio("Top table view", ["Themes", "Categories"], horizontal=True, key="themes_leaderboard_mode")
+    show_advanced_leaderboard = st.checkbox(
+        "Show advanced leaderboard context",
+        value=False,
+        key="themes_leaderboard_advanced",
+        help="Adds secondary context columns beyond the default performance-first leaderboard view.",
+    )
     category_lb1, category_lb1_msg = build_category_leaderboard(momentum_1w, "avg_1w", top_k=10)
     category_lb2, category_lb2_msg = build_category_leaderboard(momentum_1m, "avg_1m", top_k=10)
     category_breakdown_1w, _ = build_category_theme_breakdown(momentum_1w, "avg_1w")
@@ -201,7 +214,7 @@ with explore_tab:
                 _render_category_leaderboard("Top Categories — 1W", category_lb1)
                 _render_category_theme_drill("1W", category_breakdown_1w)
         else:
-            _render_leaderboard("Top 10 Themes - 1W", "top_1w", lb1, label_by_id)
+            _render_leaderboard("Top 10 Themes - 1W", "top_1w", lb1, label_by_id, show_advanced_leaderboard)
     with c2:
         if lb2 is None:
             st.warning(f"Top 10 Themes - 1M: {lb2_msg}")
@@ -212,7 +225,7 @@ with explore_tab:
                 _render_category_leaderboard("Top Categories — 1M", category_lb2)
                 _render_category_theme_drill("1M", category_breakdown_1m)
         else:
-            _render_leaderboard("Top 10 Themes - 1M", "top_1m", lb2, label_by_id)
+            _render_leaderboard("Top 10 Themes - 1M", "top_1m", lb2, label_by_id, show_advanced_leaderboard)
     if leaderboard_mode == "Categories":
         st.caption(
             "Category mode ranks categories from the full eligible theme set for the selected window, then shows the top category rows. "
