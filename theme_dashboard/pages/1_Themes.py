@@ -5,7 +5,7 @@ from src.leaderboard_utils import build_window_leaderboard
 from src.metric_formatting import display_or_dash, format_theme_ticker_table
 from src.momentum_engine import compute_theme_momentum
 from src.queries import theme_snapshot_history, theme_ticker_metrics
-from src.theme_selection import describe_selection_source, resolve_theme_selection
+from src.theme_selection import describe_selection_source, resolve_theme_selection, should_apply_selection_token
 from src.theme_service import (
     add_ticker,
     create_theme,
@@ -33,6 +33,10 @@ if themes.empty:
 SELECTED_THEME_ID_KEY = "selected_theme_id"
 SELECTED_THEME_LABEL_KEY = "explore_theme"
 SELECTED_THEME_SOURCE_KEY = "selected_theme_source"
+
+
+def _handled_selection_key(source: str) -> str:
+    return f"{source}_handled_selection_token"
 
 
 def _extract_selected_row(event) -> int | None:
@@ -108,7 +112,11 @@ def _render_leaderboard(title: str, key_prefix: str, leaderboard_df, label_by_id
             picked_theme_id,
             f"{leaderboard_df.iloc[row_idx]['theme']} ({leaderboard_df.iloc[row_idx]['category']})",
         )
-        _set_theme_selection(picked_theme_id, picked_label, key_prefix)
+        selection_token = f"{key_prefix}:{picked_theme_id}"
+        handled_key = _handled_selection_key(key_prefix)
+        if should_apply_selection_token(selection_token, st.session_state.get(handled_key)):
+            _set_theme_selection(picked_theme_id, picked_label, key_prefix)
+            st.session_state[handled_key] = selection_token
 
 
 explore_tab, manage_tab = st.tabs(["Explore", "Manage"])

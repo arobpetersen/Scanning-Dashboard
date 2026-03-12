@@ -1,6 +1,6 @@
 import unittest
 
-from src.theme_selection import describe_selection_source, resolve_theme_selection
+from src.theme_selection import describe_selection_source, resolve_theme_selection, should_apply_selection_token
 
 
 class TestThemeSelection(unittest.TestCase):
@@ -25,6 +25,11 @@ class TestThemeSelection(unittest.TestCase):
     def test_describe_selection_source(self):
         self.assertEqual(describe_selection_source("top_1w"), "Top 10 1W")
         self.assertEqual(describe_selection_source("manual_dropdown"), "Manual dropdown")
+
+    def test_should_apply_selection_token_only_for_new_token(self):
+        self.assertTrue(should_apply_selection_token("top_1w:12", None))
+        self.assertFalse(should_apply_selection_token("top_1w:12", "top_1w:12"))
+        self.assertFalse(should_apply_selection_token(None, "top_1w:12"))
 
 
 if __name__ == "__main__":

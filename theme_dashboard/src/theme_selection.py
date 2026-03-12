@@ -26,3 +26,10 @@ def resolve_theme_selection(
 
 def describe_selection_source(source: str | None) -> str:
     return SELECTION_SOURCE_LABELS.get(str(source or ""), "Theme selector")
+
+
+def should_apply_selection_token(selection_token: str | None, last_applied_token: str | None) -> bool:
+    token = str(selection_token or "").strip()
+    if not token:
+        return False
+    return token != str(last_applied_token or "").strip()
