@@ -46,6 +46,10 @@ st.set_page_config(page_title="Health", layout="wide")
 st.title("Health & Operations")
 
 
+def _display_placeholder(value) -> str:
+    return "-" if value is None or value != value else str(value)
+
+
 def _extract_selected_row(event) -> int | None:
     selection = {}
     if isinstance(event, dict):
@@ -407,8 +411,19 @@ with themes_tab:
             key="health_theme_table",
         )
         picked_idx = _extract_selected_row(health_event)
-        if picked_idx is not None and 0 <= picked_idx < len(view):
-            picked = view.reset_index(drop=True).iloc[picked_idx]
+        view_reset = view.reset_index(drop=True)
+        selected_theme_id = st.session_state.get("health_selected_theme_id")
+        if picked_idx is not None and 0 <= picked_idx < len(view_reset):
+            selected_theme_id = int(view_reset.iloc[picked_idx]["theme_id"])
+            st.session_state["health_selected_theme_id"] = selected_theme_id
+
+        picked = None
+        if selected_theme_id is not None:
+            matching = view_reset[view_reset["theme_id"] == int(selected_theme_id)]
+            if not matching.empty:
+                picked = matching.iloc[0]
+
+        if picked is not None:
             theme_id = int(picked["theme_id"])
             theme_name = str(picked["theme_name"])
             theme_label = f"{theme_name} ({picked['category']})"
@@ -426,17 +441,11 @@ with themes_tab:
             if members:
                 failed_count = int(member_rows["last_failure_at"].notna().sum()) if "last_failure_at" in member_rows.columns else 0
                 st.metric("Members with recent failures", failed_count)
-                member_view = member_rows.copy().astype(
-                    {
-                        "last_failure_category": "object",
-                        "consecutive_failure_count": "object",
-                        "symbol_hygiene_status": "object",
-                    }
-                )
-                member_view["last_failure_category"] = member_view["last_failure_category"].fillna("—")
-                member_view["last_failure_at"] = member_view["last_failure_at"].apply(lambda v: short_timestamp(v) or "—")
-                member_view["consecutive_failure_count"] = member_view["consecutive_failure_count"].fillna("—")
-                member_view["symbol_hygiene_status"] = member_view["symbol_hygiene_status"].fillna("—")
+                member_view = member_rows.copy()
+                member_view["last_failure_category"] = member_view["last_failure_category"].map(_display_placeholder)
+                member_view["last_failure_at"] = member_view["last_failure_at"].apply(lambda v: short_timestamp(v) or "-")
+                member_view["consecutive_failure_count"] = member_view["consecutive_failure_count"].map(_display_placeholder)
+                member_view["symbol_hygiene_status"] = member_view["symbol_hygiene_status"].map(_display_placeholder)
                 st.caption("Member ticker failure context. Tickers with the most recent failures are listed first.")
                 st.dataframe(member_view, width="stretch", hide_index=True)
 
@@ -457,6 +466,7 @@ with themes_tab:
                     try:
                         with get_conn() as conn:
                             result = replace_ticker_in_theme(conn, theme_id, current_member, replacement_member)
+                        st.session_state["health_selected_theme_id"] = theme_id
                         st.success(
                             f"Removed {result['removed_ticker']} from {theme_name} and added {result['added_ticker']}."
                         )
@@ -499,6 +509,7 @@ with themes_tab:
                     try:
                         with get_conn() as conn:
                             update_theme(conn, theme_id, edit_name, edit_category, edit_active)
+                        st.session_state["health_selected_theme_id"] = theme_id
                         st.success(f"Updated theme `{intended_name}`.")
                         st.rerun()
                     except Exception as exc:
