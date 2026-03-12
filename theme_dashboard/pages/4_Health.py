@@ -47,6 +47,43 @@ def _extract_selected_row(event) -> int | None:
             return int(getattr(cell, "row"))
     return None
 
+
+def _hygiene_recommendation(row) -> tuple[str, str, str]:
+    status = str(row.get("status") or "")
+    suggested = str(row.get("suggested_status") or "")
+    category = str(row.get("last_failure_category") or "")
+    consecutive = int(row.get("consecutive_failure_count") or 0)
+
+    if status == "refresh_suppressed":
+        return (
+            "Keep suppressed",
+            "high",
+            "Refreshes are already suppressed. This preserves lineage/history while keeping the symbol out of active refresh.",
+        )
+    if suggested == "refresh_suppressed" and category == "NO_CANDLES" and consecutive >= 5:
+        return (
+            "Approve suppression",
+            "high",
+            "Repeated NO_CANDLES failures have reached a strong threshold. Suppress from active refresh; review theme membership separately.",
+        )
+    if suggested == "refresh_suppressed" and category == "NO_CANDLES" and consecutive >= 3:
+        return (
+            "Approve suppression",
+            "medium",
+            "Repeated NO_CANDLES failures suggest this symbol may no longer provide usable data. Suppression is preferred to deletion.",
+        )
+    if status == "watch":
+        return (
+            "Keep active / watch",
+            "medium",
+            "Operational issue pattern exists, but evidence is not strong enough for suppression. Continue refresh with monitoring.",
+        )
+    return (
+        "Review manually",
+        "low",
+        "Use failure streaks and data recency as context. Suppression controls refresh eligibility; it does not delete DB lineage or theme history.",
+    )
+
 init_db()
 with get_conn() as conn:
     seed_if_needed(conn)
@@ -167,34 +204,63 @@ with ops_tab:
     if queue.empty:
         st.success("No flagged/suppressed/watch symbols currently in queue.")
     else:
-        st.caption("Review context and actions are inline per symbol for fast triage.")
+        st.caption(
+            "Suppression is a refresh-control decision, not a delete action. "
+            "Preferred policy: keep symbol lineage/history in DuckDB, suppress high-confidence non-viable symbols from active refresh, and review theme membership separately."
+        )
         for _, row in queue.iterrows():
             ticker = str(row["ticker"])
+            recommendation, confidence, recommendation_help = _hygiene_recommendation(row)
+            last_market_data = short_timestamp(row.get("last_market_data_at")) or "none"
+            days_since_valid = row.get("days_since_last_valid_data")
+            days_since_valid_text = "unknown" if days_since_valid is None else f"{int(days_since_valid)}d"
             with st.container(border=True):
-                c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1.1, 0.9, 0.9, 1.2, 1.1, 1.8])
+                c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1.1, 1.2, 1.3, 0.9, 1.1, 1.4])
                 c1.write(f"**{ticker}**")
                 c2.write(f"cat: `{row.get('last_failure_category') or 'n/a'}`")
-                c3.write(f"consec: `{int(row.get('consecutive_failure_count') or 0)}`")
-                c4.write(f"rolling: `{int(row.get('rolling_failure_count') or 0)}`")
-                c5.write(f"last success: `{row.get('last_success_at') or 'never'}`")
-                c6.write(f"status: `{row.get('status')}`")
-                c7.write(f"suggested: `{row.get('suggested_status') or 'none'}`")
-                st.caption(str(row.get("suggested_reason") or ""))
+                c3.write(f"status: `{row.get('status')}`")
+                c4.write(f"recommended: `{recommendation}`")
+                c5.write(f"confidence: `{confidence}`")
+                c6.write(f"last valid data: `{last_market_data}`")
+                c7.write(f"days since valid: `{days_since_valid_text}`")
+                st.caption(
+                    f"consecutive={int(row.get('consecutive_failure_count') or 0)} | "
+                    f"rolling={int(row.get('rolling_failure_count') or 0)} | "
+                    f"last success={row.get('last_success_at') or 'never'} | "
+                    f"suggested_status={row.get('suggested_status') or 'none'}"
+                )
+                st.caption(str(row.get("suggested_reason") or recommendation_help))
 
                 a1, a2, a3, a4 = st.columns(4)
-                if a1.button("Approve suppression", key=f"approve_{ticker}"):
+                if a1.button(
+                    "Approve suppression",
+                    key=f"approve_{ticker}",
+                    help="Suppress this symbol from future refresh runs while keeping its database lineage/history and current memberships intact.",
+                ):
                     with get_conn() as conn:
                         approve_suppression(conn, ticker)
                     st.rerun()
-                if a2.button("Reject / keep active", key=f"reject_{ticker}"):
+                if a2.button(
+                    "Reject / keep active",
+                    key=f"reject_{ticker}",
+                    help="Clear the suppression recommendation and keep the symbol eligible for active refresh. This does not remove it from the database.",
+                ):
                     with get_conn() as conn:
                         reject_keep_active(conn, ticker)
                     st.rerun()
-                if a3.button("Return to watch", key=f"watch_{ticker}"):
+                if a3.button(
+                    "Return to watch",
+                    key=f"watch_{ticker}",
+                    help="Reset the failure streak and place the symbol in watch mode for continued monitoring without suppressing it.",
+                ):
                     with get_conn() as conn:
                         reset_failure_history(conn, ticker, to_watch=True)
                     st.rerun()
-                if a4.button("Reset history", key=f"reset_{ticker}"):
+                if a4.button(
+                    "Reset history",
+                    key=f"reset_{ticker}",
+                    help="Clear recorded failure history and return the symbol to active status. Use when prior failures are no longer decision-relevant.",
+                ):
                     with get_conn() as conn:
                         reset_failure_history(conn, ticker, to_watch=False)
                     st.rerun()

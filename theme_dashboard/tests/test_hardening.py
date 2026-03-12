@@ -23,7 +23,7 @@ from src.queries import (
     ticker_history_last_n_snapshots,
     top_theme_movers,
 )
-from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success
+from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success, symbol_hygiene_queue
 from src.theme_service import seed_if_needed
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
@@ -416,6 +416,57 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
         self.assertEqual(recovered[0], "active")
         self.assertEqual(int(recovered[1]), 0)
         self.assertIsNone(recovered[2])
+        conn.close()
+
+    def test_symbol_hygiene_queue_includes_last_valid_market_data_context(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp default current_timestamp
+            )
+            """
+        )
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, suggested_status, suggested_reason, last_failure_category,
+                consecutive_failure_count, rolling_failure_count, last_failure_at, last_success_at, last_run_id
+            )
+            values ('XYZ', 'inactive_candidate', 'refresh_suppressed', 'Repeated no candles.', 'NO_CANDLES', 4, 4, '2026-03-11 22:00:00', '2026-03-01 22:00:00', 7)
+            """
+        )
+        conn.execute("insert into refresh_runs values (7, 'success', '2026-03-01 22:00:00')")
+        conn.execute(
+            "insert into ticker_snapshots values (7, 'XYZ', 10, 1, 2, 3, 1000000, 10000, null, null, null, '2026-02-28 21:00:00', 'live')"
+        )
+
+        out = symbol_hygiene_queue(conn, limit=50)
+
+        self.assertEqual(str(out.iloc[0]["last_market_data_at"]), "2026-02-28 21:00:00")
+        self.assertGreaterEqual(int(out.iloc[0]["days_since_last_valid_data"]), 0)
         conn.close()
 
 

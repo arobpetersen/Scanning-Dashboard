@@ -141,6 +141,15 @@ def apply_refresh_failure(conn, ticker: str, run_id: int, error_message: str) ->
 def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
     return conn.execute(
         """
+        WITH latest_market_data AS (
+            SELECT
+                ts.ticker,
+                MAX(ts.last_updated) AS last_market_data_at
+            FROM ticker_snapshots ts
+            JOIN refresh_runs r ON r.run_id = ts.run_id
+            WHERE r.status IN ('success', 'partial')
+            GROUP BY ts.ticker
+        )
         SELECT
             s.ticker,
             s.status,
@@ -151,8 +160,14 @@ def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
             s.rolling_failure_count,
             s.last_success_at,
             s.last_failure_at,
-            s.last_run_id
+            s.last_run_id,
+            lmd.last_market_data_at,
+            CASE
+              WHEN lmd.last_market_data_at IS NULL THEN NULL
+              ELSE DATE_DIFF('day', CAST(lmd.last_market_data_at AS DATE), CURRENT_DATE)
+            END AS days_since_last_valid_data
         FROM symbol_refresh_status s
+        LEFT JOIN latest_market_data lmd ON lmd.ticker = s.ticker
         WHERE s.suggested_status IS NOT NULL
            OR s.status IN ('inactive_candidate', 'refresh_suppressed', 'watch')
         ORDER BY
