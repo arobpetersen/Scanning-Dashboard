@@ -5,7 +5,7 @@ import duckdb
 import pandas as pd
 
 from src.database import SCHEMA_SQL
-from src.historical_backfill import reconstruct_theme_history_range
+from src.historical_backfill import rebuild_recent_reconstructed_history, reconstruct_theme_history_range
 from src.momentum_engine import compute_theme_momentum
 from src.queries import (
     classify_ticker_history_readiness,
@@ -465,6 +465,155 @@ class TestHistoricalBackfill(unittest.TestCase):
 
         self.assertGreater(int(result["snapshot_rows_written"]), 0)
         self.assertEqual(stored, [(1,)])
+        conn.close()
+
+    def test_targeted_recent_rebuild_replaces_only_reconstructed_rows_in_scope(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'Meme Stocks', 'Spec', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'GOOD')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'BBIG')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'NVDA')")
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, consecutive_failure_count, rolling_failure_count, updated_at
+            ) values ('BBIG', 'refresh_suppressed', 1, 1, CURRENT_TIMESTAMP)
+            """
+        )
+        conn.execute(
+            """
+            insert into theme_snapshots(
+                run_id, snapshot_time, theme_id, ticker_count,
+                avg_1w, avg_1m, avg_3m,
+                positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                composite_score, snapshot_source
+            ) values
+            (1, '2026-03-12 22:00:00', 1, 2, 5, 6, 7, 50, 60, 70, 8, 'live')
+            """
+        )
+        conn.execute(
+            """
+            insert into reconstructed_theme_snapshots(
+                run_id, snapshot_date, snapshot_time, theme_id, ticker_count,
+                avg_1w, avg_1m, avg_3m,
+                positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                composite_score, provenance_class, provenance_source_label, market_data_source, membership_basis
+            ) values
+            (100, '2026-03-10', '2026-03-10 00:00:00', 1, 2, 75, 90, 95, 100, 100, 100, 80, 'reconstructed', 'historical_backfill', 'live', 'current_governed_membership'),
+            (101, '2026-03-10', '2026-03-10 00:00:00', 2, 1, 4, 5, 6, 70, 80, 90, 7, 'reconstructed', 'historical_backfill', 'live', 'current_governed_membership')
+            """
+        )
+
+        dates = pd.bdate_range("2026-01-05", periods=70)
+        good_history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 100 + idx, "volume": 100000 + idx} for idx, ts in enumerate(dates)]
+        )
+        bad_history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 1 + idx, "volume": 500 + idx} for idx, ts in enumerate(dates)]
+        )
+        nvda_history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 300 + idx, "volume": 200000 + idx} for idx, ts in enumerate(dates)]
+        )
+        persist_ticker_daily_history(conn, good_history, ticker="GOOD", provenance_source_label="daily_historical_append", market_data_source="live")
+        persist_ticker_daily_history(conn, bad_history, ticker="BBIG", provenance_source_label="daily_historical_append", market_data_source="live")
+        persist_ticker_daily_history(conn, nvda_history, ticker="NVDA", provenance_source_label="daily_historical_append", market_data_source="live")
+
+        result = rebuild_recent_reconstructed_history(conn, tickers=["BBIG"])
+        meme_row = conn.execute(
+            """
+            select ticker_count, avg_1w
+            from reconstructed_theme_snapshots
+            where theme_id = 1 and provenance_source_label = 'historical_backfill' and snapshot_date = '2026-03-10'
+            """
+        ).fetchone()
+        ai_row = conn.execute(
+            """
+            select ticker_count, avg_1w
+            from reconstructed_theme_snapshots
+            where theme_id = 2 and provenance_source_label = 'historical_backfill' and snapshot_date = '2026-03-10'
+            """
+        ).fetchone()
+        captured_row = conn.execute(
+            """
+            select ticker_count, avg_1w
+            from theme_snapshots
+            where theme_id = 1 and snapshot_time = '2026-03-12 22:00:00'
+            """
+        ).fetchone()
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["affected_theme_ids"], [1])
+        self.assertEqual(int(result["rows_replaced"]), 1)
+        self.assertGreater(int(result["rows_written"]), 0)
+        self.assertEqual(int(meme_row[0]), 1)
+        self.assertLess(float(meme_row[1]), 10.0)
+        self.assertEqual(ai_row, (1, 4.0))
+        self.assertEqual(captured_row, (2, 5.0))
+        conn.close()
+
+    def test_targeted_recent_rebuild_reintroduces_restored_ticker(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'Meme Stocks', 'Spec', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'GOOD')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'BBIG')")
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, consecutive_failure_count, rolling_failure_count, updated_at
+            ) values ('BBIG', 'refresh_suppressed', 1, 1, CURRENT_TIMESTAMP)
+            """
+        )
+        conn.execute(
+            """
+            insert into reconstructed_theme_snapshots(
+                run_id, snapshot_date, snapshot_time, theme_id, ticker_count,
+                avg_1w, avg_1m, avg_3m,
+                positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                composite_score, provenance_class, provenance_source_label, market_data_source, membership_basis
+            ) values
+            (100, '2026-03-10', '2026-03-10 00:00:00', 1, 1, 4, 5, 6, 100, 100, 100, 5, 'reconstructed', 'historical_backfill', 'live', 'current_governed_membership')
+            """
+        )
+
+        dates = pd.bdate_range("2026-01-05", periods=70)
+        good_history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 100 + idx, "volume": 100000 + idx} for idx, ts in enumerate(dates)]
+        )
+        bad_history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 1 + idx, "volume": 500 + idx} for idx, ts in enumerate(dates)]
+        )
+        persist_ticker_daily_history(conn, good_history, ticker="GOOD", provenance_source_label="daily_historical_append", market_data_source="live")
+        persist_ticker_daily_history(conn, bad_history, ticker="BBIG", provenance_source_label="daily_historical_append", market_data_source="live")
+
+        first = rebuild_recent_reconstructed_history(conn, tickers=["BBIG"])
+        first_row = conn.execute(
+            """
+            select ticker_count
+            from reconstructed_theme_snapshots
+            where theme_id = 1 and provenance_source_label = 'historical_backfill' and snapshot_date = '2026-03-10'
+            """
+        ).fetchone()
+        conn.execute(
+            """
+            update symbol_refresh_status
+            set status = 'active', suggested_status = null, suggested_reason = null, last_failure_category = null
+            where ticker = 'BBIG'
+            """
+        )
+        second = rebuild_recent_reconstructed_history(conn, tickers=["BBIG"])
+        second_row = conn.execute(
+            """
+            select ticker_count
+            from reconstructed_theme_snapshots
+            where theme_id = 1 and provenance_source_label = 'historical_backfill' and snapshot_date = '2026-03-10'
+            """
+        ).fetchone()
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(int(first_row[0]), 1)
+        self.assertEqual(second["status"], "success")
+        self.assertEqual(int(second_row[0]), 2)
         conn.close()
 
     def test_captured_history_still_wins_over_ticker_history_derived_on_same_date(self):

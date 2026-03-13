@@ -16,6 +16,10 @@ from src.config import (
 from src.database import get_conn, init_db
 from src.failure_classification import categorize_failure_message
 from src.fetch_data import mark_stale_running_runs
+from src.historical_backfill import (
+    SUPPRESSION_REBUILD_LOOKBACK_DAYS,
+    rebuild_recent_reconstructed_history,
+)
 from src.metric_formatting import short_timestamp
 from src.queries import (
     baseline_status,
@@ -497,6 +501,11 @@ with themes_tab:
                         options=["Suppress from calculations", "Return to active calculations"],
                         help="Suppressed tickers stay visible in membership and health views, but are excluded from refresh, ranking, and movement calculations.",
                     )
+                    rebuild_after_suppression = st.checkbox(
+                        f"Rebuild recent reconstructed history for affected themes ({SUPPRESSION_REBUILD_LOOKBACK_DAYS}d)",
+                        value=True,
+                        help="Rewrites only recent reconstructed rows for affected themes. Captured history is untouched.",
+                    )
                     suppression_submitted = st.form_submit_button("Apply member calculation action")
 
                 if suppression_submitted:
@@ -518,11 +527,59 @@ with themes_tab:
                                     f"Returned `{suppression_member}` to active calculations. "
                                     "Theme membership was left unchanged."
                                 )
+                            rebuild_result = None
+                            if rebuild_after_suppression:
+                                rebuild_result = rebuild_recent_reconstructed_history(conn, tickers=[suppression_member])
                         st.session_state["health_selected_theme_id"] = theme_id
-                        st.success(success_message)
+                        if rebuild_result is not None:
+                            rebuild_bits = (
+                                f" Rebuilt recent reconstructed history for {len(rebuild_result.get('affected_theme_ids', []))} affected theme(s) "
+                                f"over {rebuild_result.get('window_start')} to {rebuild_result.get('window_end')} "
+                                f"| replaced={int(rebuild_result.get('rows_replaced') or 0)} "
+                                f"| written={int(rebuild_result.get('rows_written') or 0)}."
+                            )
+                        else:
+                            rebuild_bits = ""
+                        st.success(f"{success_message}{rebuild_bits}")
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Could not update ticker calculation suppression. {exc}")
+
+                with st.form(f"health_theme_member_rebuild_{theme_id}"):
+                    st.write("Manual recent reconstructed-history rebuild")
+                    rebuild_member = st.selectbox(
+                        "Ticker to rebuild around",
+                        options=members,
+                        help="Scopes the rebuild to themes currently containing this ticker.",
+                    )
+                    rebuild_submitted = st.form_submit_button(
+                        f"Rebuild recent reconstructed history ({SUPPRESSION_REBUILD_LOOKBACK_DAYS}d)"
+                    )
+
+                if rebuild_submitted:
+                    try:
+                        with get_conn() as conn:
+                            rebuild_result = rebuild_recent_reconstructed_history(conn, tickers=[rebuild_member])
+                        st.session_state["health_selected_theme_id"] = theme_id
+                        status = str(rebuild_result.get("status") or "unknown")
+                        if status in {"no_scope", "no_ticker_history", "no_reconstructed_scope", "no_history_rows", "no_op"}:
+                            st.info(
+                                f"Rebuild result for `{rebuild_member}`: {status}. "
+                                f"Affected themes={len(rebuild_result.get('affected_theme_ids', []))}, "
+                                f"replaced={int(rebuild_result.get('rows_replaced') or 0)}, "
+                                f"written={int(rebuild_result.get('rows_written') or 0)}."
+                            )
+                        else:
+                            st.success(
+                                f"Rebuilt recent reconstructed history for `{rebuild_member}` "
+                                f"over {rebuild_result.get('window_start')} to {rebuild_result.get('window_end')} "
+                                f"| labels={', '.join(rebuild_result.get('labels_rebuilt') or []) or 'none'} "
+                                f"| replaced={int(rebuild_result.get('rows_replaced') or 0)} "
+                                f"| written={int(rebuild_result.get('rows_written') or 0)}."
+                            )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Recent reconstructed-history rebuild failed. {exc}")
 
                 with st.form(f"health_theme_replace_ticker_{theme_id}"):
                     st.write("Correct member ticker")
