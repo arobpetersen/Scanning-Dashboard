@@ -230,10 +230,13 @@ if window_meta.get("collapsed_to_available_history"):
         f"Selected {int(window_meta.get('requested_lookback_days') or 0)}d lookback currently resolves to an effective "
         f"{int(window_meta.get('effective_window_days') or 0)}d boundary window because older snapshots are not yet available."
     )
-if str(window_meta.get("provenance_mix") or "").startswith("reconstructed") or window_meta.get("provenance_mix") == "mixed":
+if any(
+    token in str(window_meta.get("provenance_mix") or "")
+    for token in ["reconstructed", "mixed", "ticker_history_derived"]
+):
     st.caption(
-        "Reconstructed history applies current governed membership to historical market data. "
-        "It improves boundary depth but is not a true point-in-time membership record."
+        "Historical movement windows may use captured theme history, reconstructed theme history, or recent ticker-history-derived reconstruction. "
+        "Non-captured history applies current governed membership to historical market data and is not a true point-in-time membership record."
     )
 
 m1, m2, m3, m4 = st.columns(4)

@@ -293,6 +293,111 @@ class TestHistoricalBackfill(unittest.TestCase):
         self.assertEqual(classify_ticker_history_readiness(24, 10.0, target_trading_days=30), "near ready")
         self.assertEqual(classify_ticker_history_readiness(30, 75.0, target_trading_days=30), "ready")
 
+    def test_recent_theme_history_prefers_ticker_daily_history_when_coverage_is_sufficient(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'BBB')")
+
+        dates = pd.bdate_range("2026-01-05", periods=70)
+        for ticker, base in [("AAA", 100), ("BBB", 120)]:
+            history = pd.DataFrame(
+                [{"snapshot_date": ts.date(), "close": base + idx, "volume": 1000 + idx} for idx, ts in enumerate(dates)]
+            )
+            persist_ticker_daily_history(conn, history, ticker=ticker, provenance_source_label="daily_historical_append", market_data_source="live")
+
+        history = theme_history_window(conn, 30)
+        momentum = compute_theme_momentum(conn, 30)
+
+        self.assertFalse(history.empty)
+        self.assertIn("ticker_history_derived", set(history["provenance_class"].astype(str)))
+        self.assertEqual(momentum["meta"]["provenance_mix"], "ticker_history_derived-only")
+        conn.close()
+
+    def test_recent_theme_history_falls_back_when_ticker_history_coverage_is_insufficient(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'BBB')")
+        conn.execute(
+            """
+            insert into reconstructed_theme_snapshots(
+                run_id, snapshot_date, snapshot_time, theme_id, ticker_count,
+                avg_1w, avg_1m, avg_3m,
+                positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                composite_score, provenance_class, provenance_source_label, market_data_source, membership_basis
+            ) values
+            (101, '2026-03-10', '2026-03-10 00:00:00', 1, 2, 1, 2, 3, 50, 60, 70, 2, 'reconstructed', 'historical_backfill', 'live', 'current_governed_membership'),
+            (102, '2026-03-11', '2026-03-11 00:00:00', 1, 2, 2, 3, 4, 55, 65, 75, 3, 'reconstructed', 'historical_backfill', 'live', 'current_governed_membership')
+            """
+        )
+
+        sparse_dates = pd.bdate_range("2026-03-01", periods=5)
+        history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 100 + idx, "volume": 1000 + idx} for idx, ts in enumerate(sparse_dates)]
+        )
+        persist_ticker_daily_history(conn, history, ticker="AAA", provenance_source_label="ticker_intake_backfill", market_data_source="live")
+
+        out = theme_history_window(conn, 30)
+
+        self.assertFalse(out.empty)
+        self.assertNotIn("ticker_history_derived", set(out["provenance_class"].astype(str)))
+        self.assertEqual(set(out["provenance_class"].astype(str)), {"reconstructed"})
+        conn.close()
+
+    def test_suppressed_tickers_do_not_block_recent_ticker_history_reconstruction(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'Biotech', 'Health', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'CRSP')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'CRSPR')")
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, consecutive_failure_count, rolling_failure_count, updated_at
+            ) values ('CRSPR', 'refresh_suppressed', 5, 8, CURRENT_TIMESTAMP)
+            """
+        )
+
+        dates = pd.bdate_range("2026-01-05", periods=70)
+        history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 50 + idx, "volume": 1000 + idx} for idx, ts in enumerate(dates)]
+        )
+        persist_ticker_daily_history(conn, history, ticker="CRSP", provenance_source_label="daily_historical_append", market_data_source="live")
+
+        out = theme_history_window(conn, 30)
+
+        self.assertFalse(out.empty)
+        self.assertIn("ticker_history_derived", set(out["provenance_class"].astype(str)))
+        conn.close()
+
+    def test_captured_history_still_wins_over_ticker_history_derived_on_same_date(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAA')")
+        conn.execute(
+            """
+            insert into theme_snapshots(
+                run_id, snapshot_time, theme_id, ticker_count,
+                avg_1w, avg_1m, avg_3m,
+                positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                composite_score, snapshot_source
+            ) values
+            (1, '2026-03-11 22:00:00', 1, 1, 1, 2, 3, 40, 50, 60, 10, 'live')
+            """
+        )
+        dates = pd.bdate_range("2026-01-05", periods=70)
+        history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 100 + idx, "volume": 1000 + idx} for idx, ts in enumerate(dates)]
+        )
+        persist_ticker_daily_history(conn, history, ticker="AAA", provenance_source_label="daily_historical_append", market_data_source="live")
+
+        out = theme_history_window(conn, 30)
+        same_day = out[pd.to_datetime(out["snapshot_time"]).dt.date.astype(str) == "2026-03-11"]
+
+        self.assertFalse(same_day.empty)
+        self.assertEqual(str(same_day.iloc[0]["provenance_class"]), "captured")
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

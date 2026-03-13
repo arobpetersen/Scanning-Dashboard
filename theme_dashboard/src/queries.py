@@ -2,6 +2,13 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .config import COMPOSITE_WEIGHTS, THEME_CONFIDENCE_FULL_COUNT
+
+
+RECENT_TICKER_HISTORY_DERIVED_CALENDAR_DAYS = 45
+TICKER_HISTORY_BUFFER_DAYS = 120
+TICKER_HISTORY_ELIGIBLE_COVERAGE_THRESHOLD = 0.6
+
 
 CORE_TABLES = [
     "themes",
@@ -58,7 +65,7 @@ def _ticker_snapshot_source_expr(conn) -> str:
 
 
 def _historical_theme_snapshot_union(conn) -> pd.DataFrame:
-    preferred_source = preferred_theme_snapshot_source(conn)
+    preferred_source = preferred_theme_snapshot_source(conn) or _preferred_ticker_history_source(conn)
     if not preferred_source:
         return pd.DataFrame()
     positive_1w_expr = "ts.positive_1w_breadth_pct" if _table_has_column(conn, "theme_snapshots", "positive_1w_breadth_pct") else "NULL"
@@ -120,13 +127,18 @@ def _historical_theme_snapshot_union(conn) -> pd.DataFrame:
             [preferred_source],
         ).df()
 
-    combined = pd.concat([captured, reconstructed], ignore_index=True) if not reconstructed.empty else captured
+    ticker_history_derived = _recent_ticker_history_theme_history(conn, preferred_source)
+
+    frames = [frame for frame in [captured, ticker_history_derived, reconstructed] if not frame.empty]
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if combined.empty:
         return combined
 
     combined["snapshot_time"] = pd.to_datetime(combined["snapshot_time"])
     combined["snapshot_date"] = pd.to_datetime(combined["snapshot_date"]).dt.date
-    combined["_precedence"] = combined["provenance_class"].map({"captured": 0, "reconstructed": 1}).fillna(9)
+    combined["_precedence"] = combined["provenance_class"].map(
+        {"captured": 0, "ticker_history_derived": 1, "reconstructed": 2}
+    ).fillna(9)
     combined = (
         combined.sort_values(["theme_id", "snapshot_date", "_precedence", "snapshot_time"], ascending=[True, True, True, False])
         .drop_duplicates(subset=["theme_id", "snapshot_date"], keep="first")
@@ -135,6 +147,203 @@ def _historical_theme_snapshot_union(conn) -> pd.DataFrame:
         .reset_index(drop=True)
     )
     return combined
+
+
+def _preferred_ticker_history_source(conn) -> str | None:
+    if not _table_exists(conn, "ticker_daily_history"):
+        return None
+    row = conn.execute(
+        """
+        SELECT market_data_source
+        FROM ticker_daily_history
+        ORDER BY CASE WHEN market_data_source = 'live' THEN 0 ELSE 1 END,
+                 trading_date DESC,
+                 updated_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
+def _theme_confidence_factor_for_history(ticker_count: int | float) -> float:
+    if pd.isna(ticker_count) or float(ticker_count) <= 0:
+        return 0.0
+    return min(1.0, (float(ticker_count) / float(THEME_CONFIDENCE_FULL_COUNT)) ** 0.5)
+
+
+def _compute_ticker_history_perf(history: pd.DataFrame) -> pd.DataFrame:
+    if history.empty:
+        return pd.DataFrame(columns=["ticker", "trading_date", "close", "perf_1w", "perf_1m", "perf_3m"])
+
+    enriched = history.sort_values(["ticker", "trading_date"]).copy()
+    enriched["trading_date"] = pd.to_datetime(enriched["trading_date"]).dt.date
+    grouped = enriched.groupby("ticker")["close"]
+    enriched["perf_1w"] = ((grouped.transform(lambda s: s / s.shift(5))) - 1.0) * 100.0
+    enriched["perf_1m"] = ((grouped.transform(lambda s: s / s.shift(21))) - 1.0) * 100.0
+    enriched["perf_3m"] = ((grouped.transform(lambda s: s / s.shift(63))) - 1.0) * 100.0
+    return enriched
+
+
+def _recent_ticker_history_theme_history(conn, market_data_source: str) -> pd.DataFrame:
+    if not market_data_source or not _table_exists(conn, "ticker_daily_history"):
+        return pd.DataFrame()
+
+    latest_row = conn.execute(
+        """
+        SELECT MAX(trading_date)
+        FROM ticker_daily_history
+        WHERE market_data_source = ?
+        """,
+        [market_data_source],
+    ).fetchone()
+    max_trading_date = latest_row[0] if latest_row and latest_row[0] else None
+    if max_trading_date is None:
+        return pd.DataFrame()
+
+    recent_start = pd.Timestamp(max_trading_date) - pd.Timedelta(days=RECENT_TICKER_HISTORY_DERIVED_CALENDAR_DAYS)
+    buffer_start = recent_start - pd.Timedelta(days=TICKER_HISTORY_BUFFER_DAYS)
+
+    membership = conn.execute(
+        """
+        SELECT
+            t.id AS theme_id,
+            t.name AS theme,
+            t.category,
+            t.is_active,
+            m.ticker,
+            CASE WHEN COALESCE(s.status, 'active') = 'refresh_suppressed' THEN FALSE ELSE TRUE END AS is_eligible
+        FROM themes t
+        JOIN theme_membership m ON m.theme_id = t.id
+        LEFT JOIN symbol_refresh_status s ON s.ticker = m.ticker
+        ORDER BY t.id, m.ticker
+        """
+    ).df()
+    if membership.empty:
+        return pd.DataFrame()
+
+    history = conn.execute(
+        """
+        WITH governed_tickers AS (
+            SELECT DISTINCT ticker
+            FROM theme_membership
+        )
+        SELECT
+            h.ticker,
+            h.trading_date,
+            h.close
+        FROM ticker_daily_history h
+        JOIN governed_tickers g ON g.ticker = h.ticker
+        WHERE h.market_data_source = ?
+          AND h.trading_date BETWEEN ? AND ?
+        ORDER BY h.ticker, h.trading_date
+        """,
+        [market_data_source, pd.Timestamp(buffer_start).date(), pd.Timestamp(max_trading_date).date()],
+    ).df()
+    if history.empty:
+        return pd.DataFrame()
+
+    perf = _compute_ticker_history_perf(history)
+    perf = perf[pd.to_datetime(perf["trading_date"]).dt.date >= pd.Timestamp(recent_start).date()].copy()
+    if perf.empty:
+        return pd.DataFrame()
+
+    recent_dates = pd.DataFrame({"trading_date": sorted(pd.to_datetime(perf["trading_date"]).dt.date.unique().tolist())})
+    membership = membership.copy()
+    membership["_cross_key"] = 1
+    recent_dates["_cross_key"] = 1
+    raw = membership.merge(recent_dates, on="_cross_key", how="inner").drop(columns=["_cross_key"])
+    raw = raw.merge(perf, on=["ticker", "trading_date"], how="left")
+    if raw.empty:
+        return pd.DataFrame()
+
+    raw["eligible_member"] = raw["is_eligible"].astype(bool).astype(int)
+    raw["covered_eligible_member"] = ((raw["is_eligible"].astype(bool)) & raw["close"].notna()).astype(int)
+
+    grouped = raw.groupby(["theme_id", "theme", "category", "is_active", "trading_date"], dropna=False)
+    metrics = grouped.agg(
+        ticker_count=("ticker", "count"),
+        avg_1w=("perf_1w", "mean"),
+        avg_1m=("perf_1m", "mean"),
+        avg_3m=("perf_3m", "mean"),
+        positive_1w_breadth_pct=("perf_1w", lambda s: (s.dropna().gt(0).mean() * 100) if len(s.dropna()) else 0),
+        positive_1m_breadth_pct=("perf_1m", lambda s: (s.dropna().gt(0).mean() * 100) if len(s.dropna()) else 0),
+        positive_3m_breadth_pct=("perf_3m", lambda s: (s.dropna().gt(0).mean() * 100) if len(s.dropna()) else 0),
+        eligible_constituent_count=("eligible_member", "sum"),
+        covered_eligible_constituent_count=("covered_eligible_member", "sum"),
+    ).reset_index()
+    metrics["eligible_coverage_pct"] = (
+        metrics["covered_eligible_constituent_count"] / metrics["eligible_constituent_count"].replace({0: pd.NA})
+    ) * 100.0
+    base_score = (
+        COMPOSITE_WEIGHTS["perf_1w"] * metrics["avg_1w"].fillna(0)
+        + COMPOSITE_WEIGHTS["perf_1m"] * metrics["avg_1m"].fillna(0)
+        + COMPOSITE_WEIGHTS["perf_3m"] * metrics["avg_3m"].fillna(0)
+    )
+    metrics["composite_score"] = base_score * metrics["ticker_count"].apply(_theme_confidence_factor_for_history)
+    metrics = metrics[
+        (metrics["eligible_constituent_count"] > 0)
+        & (metrics["covered_eligible_constituent_count"] > 0)
+        & (
+            (
+                metrics["covered_eligible_constituent_count"]
+                / metrics["eligible_constituent_count"].replace({0: pd.NA})
+            )
+            >= TICKER_HISTORY_ELIGIBLE_COVERAGE_THRESHOLD
+        )
+    ].copy()
+    if metrics.empty:
+        return pd.DataFrame()
+
+    metrics["snapshot_date"] = pd.to_datetime(metrics["trading_date"]).dt.date
+    metrics["snapshot_time"] = pd.to_datetime(metrics["snapshot_date"])
+    metrics["run_id"] = pd.NA
+    metrics["snapshot_source"] = market_data_source
+    metrics["provenance_class"] = "ticker_history_derived"
+    metrics["provenance_source_label"] = "ticker_daily_history_recent"
+    metrics[
+        [
+            "avg_1w",
+            "avg_1m",
+            "avg_3m",
+            "positive_1w_breadth_pct",
+            "positive_1m_breadth_pct",
+            "positive_3m_breadth_pct",
+            "composite_score",
+            "eligible_coverage_pct",
+        ]
+    ] = metrics[
+        [
+            "avg_1w",
+            "avg_1m",
+            "avg_3m",
+            "positive_1w_breadth_pct",
+            "positive_1m_breadth_pct",
+            "positive_3m_breadth_pct",
+            "composite_score",
+            "eligible_coverage_pct",
+        ]
+    ].round(2)
+    return metrics[
+        [
+            "run_id",
+            "snapshot_date",
+            "snapshot_time",
+            "theme_id",
+            "theme",
+            "category",
+            "ticker_count",
+            "avg_1w",
+            "avg_1m",
+            "avg_3m",
+            "positive_1w_breadth_pct",
+            "positive_1m_breadth_pct",
+            "positive_3m_breadth_pct",
+            "composite_score",
+            "snapshot_source",
+            "provenance_class",
+            "provenance_source_label",
+        ]
+    ].sort_values(["snapshot_time", "theme"]).reset_index(drop=True)
 
 
 def last_refresh_run(conn) -> pd.DataFrame:
