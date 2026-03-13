@@ -38,6 +38,8 @@ from src.symbol_hygiene import (
     clear_symbol_hygiene_staged_state,
     filter_symbol_hygiene_queue,
     hygiene_decision_context,
+    approve_suppression,
+    reject_keep_active,
     sync_symbol_hygiene_staged_action,
     sort_symbol_hygiene_queue,
     symbol_hygiene_queue,
@@ -248,8 +250,8 @@ with ops_tab:
         queue = filter_symbol_hygiene_queue(queue, queue_view)
         queue = sort_symbol_hygiene_queue(queue, queue_sort)
         st.caption(
-            "Suppression is a refresh-control decision, not a delete action. "
-            "Preferred policy: keep symbol lineage/history in DuckDB, suppress high-confidence non-viable symbols from active refresh, and review theme membership separately."
+            "Suppression is a calculation-control decision, not a delete action. "
+            "Preferred policy: keep symbol lineage/history in DuckDB, suppress high-confidence non-viable symbols from refresh and theme calculations, and review theme membership separately."
         )
         if queue_view == "Pending review":
             st.caption("Default view shows actionable review items. Already suppressed symbols move to `Suppressed / resolved` after approval.")
@@ -335,6 +337,17 @@ with ops_tab:
                         f"suggested_status={row.get('suggested_status') or 'none'}"
                     )
                     st.caption(str(row.get("suggested_reason") or recommendation_help))
+                    if row.get("outlier_reason"):
+                        st.caption(
+                            f"Calculation outlier: {row.get('outlier_reason')} "
+                            f"| surfaces={row.get('affected_calculation_surfaces') or 'n/a'}"
+                        )
+                        st.caption(
+                            f"price={_display_placeholder(row.get('price'))} | "
+                            f"dollar_volume={_display_placeholder(row.get('dollar_volume'))} | "
+                            f"1W={_display_placeholder(row.get('perf_1w'))} | "
+                            f"1M={_display_placeholder(row.get('perf_1m'))}"
+                        )
                     current_themes = str(row.get("current_theme_names") or "").strip()
                     current_categories = str(row.get("current_categories") or "").strip()
                     if current_themes:
@@ -471,6 +484,45 @@ with themes_tab:
                 member_view["symbol_hygiene_status"] = member_view["symbol_hygiene_status"].map(_display_placeholder)
                 st.caption("Member ticker failure context. Tickers with the most recent failures are listed first.")
                 st.dataframe(member_view, width="stretch", hide_index=True)
+
+                with st.form(f"health_theme_member_suppression_{theme_id}"):
+                    st.write("Manual member calculation control")
+                    suppression_member = st.selectbox(
+                        "Member ticker",
+                        options=members,
+                        help="This changes calculation eligibility only. Theme membership remains intact.",
+                    )
+                    suppression_action = st.selectbox(
+                        "Action",
+                        options=["Suppress from calculations", "Return to active calculations"],
+                        help="Suppressed tickers stay visible in membership and health views, but are excluded from refresh, ranking, and movement calculations.",
+                    )
+                    suppression_submitted = st.form_submit_button("Apply member calculation action")
+
+                if suppression_submitted:
+                    try:
+                        with get_conn() as conn:
+                            if suppression_action == "Suppress from calculations":
+                                approve_suppression(
+                                    conn,
+                                    suppression_member,
+                                    note="Manually suppressed from calculations in Theme Health. Theme membership preserved.",
+                                )
+                                success_message = (
+                                    f"Suppressed `{suppression_member}` from refresh, ranking, and movement calculations. "
+                                    "Theme membership was left unchanged."
+                                )
+                            else:
+                                reject_keep_active(conn, suppression_member)
+                                success_message = (
+                                    f"Returned `{suppression_member}` to active calculations. "
+                                    "Theme membership was left unchanged."
+                                )
+                        st.session_state["health_selected_theme_id"] = theme_id
+                        st.success(success_message)
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not update ticker calculation suppression. {exc}")
 
                 with st.form(f"health_theme_replace_ticker_{theme_id}"):
                     st.write("Correct member ticker")

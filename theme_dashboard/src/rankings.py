@@ -57,15 +57,22 @@ def theme_confidence_factor(ticker_count: int | float) -> float:
 
 
 def _compute_theme_metrics(raw: pd.DataFrame) -> pd.DataFrame:
-    grouped = raw.groupby(["theme_id", "theme", "category", "is_active"], dropna=False)
+    prepared = raw.copy()
+    if "calculation_eligible" not in prepared.columns:
+        prepared["calculation_eligible"] = True
+    prepared["calculation_eligible"] = prepared["calculation_eligible"].fillna(False).astype(bool)
+    for perf_col in ("perf_1w", "perf_1m", "perf_3m"):
+        prepared[f"{perf_col}_for_calc"] = prepared[perf_col].where(prepared["calculation_eligible"])
+
+    grouped = prepared.groupby(["theme_id", "theme", "category", "is_active"], dropna=False)
     out = grouped.agg(
-        ticker_count=("ticker", "count"),
-        avg_1w=("perf_1w", "mean"),
-        avg_1m=("perf_1m", "mean"),
-        avg_3m=("perf_3m", "mean"),
-        positive_1w_breadth_pct=("perf_1w", lambda s: (s.dropna().gt(0).mean() * 100) if len(s.dropna()) else 0),
-        positive_1m_breadth_pct=("perf_1m", lambda s: (s.dropna().gt(0).mean() * 100) if len(s.dropna()) else 0),
-        positive_3m_breadth_pct=("perf_3m", lambda s: (s.dropna().gt(0).mean() * 100) if len(s.dropna()) else 0),
+        ticker_count=("calculation_eligible", "sum"),
+        avg_1w=("perf_1w_for_calc", "mean"),
+        avg_1m=("perf_1m_for_calc", "mean"),
+        avg_3m=("perf_3m_for_calc", "mean"),
+        positive_1w_breadth_pct=("perf_1w_for_calc", lambda s: (s.dropna().gt(0).mean() * 100) if len(s.dropna()) else 0),
+        positive_1m_breadth_pct=("perf_1m_for_calc", lambda s: (s.dropna().gt(0).mean() * 100) if len(s.dropna()) else 0),
+        positive_3m_breadth_pct=("perf_3m_for_calc", lambda s: (s.dropna().gt(0).mean() * 100) if len(s.dropna()) else 0),
     ).reset_index()
 
     base_score = (
@@ -80,13 +87,17 @@ def _compute_theme_metrics(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_theme_metrics_for_run(conn, run_id: int) -> pd.DataFrame:
+    status_join = "LEFT JOIN symbol_refresh_status sr ON sr.ticker = m.ticker" if _table_exists(conn, "symbol_refresh_status") else ""
+    calculation_eligible_expr = "COALESCE(sr.status, 'active') <> 'refresh_suppressed'" if status_join else "TRUE"
     raw = conn.execute(
-        """
+        f"""
         SELECT t.id AS theme_id, t.name AS theme, t.category, t.is_active,
-               m.ticker, s.perf_1w, s.perf_1m, s.perf_3m
+               m.ticker, s.perf_1w, s.perf_1m, s.perf_3m,
+               {calculation_eligible_expr} AS calculation_eligible
         FROM themes t
         LEFT JOIN theme_membership m ON t.id = m.theme_id
         LEFT JOIN ticker_snapshots s ON s.ticker = m.ticker AND s.run_id = ?
+        {status_join}
         """,
         [run_id],
     ).df()

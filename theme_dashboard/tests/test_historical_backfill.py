@@ -402,6 +402,71 @@ class TestHistoricalBackfill(unittest.TestCase):
         self.assertIn("ticker_history_derived", set(out["provenance_class"].astype(str)))
         conn.close()
 
+    def test_suppressed_tickers_are_excluded_from_recent_ticker_history_aggregation(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'Biotech', 'Health', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'GOOD')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'BBIG')")
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, consecutive_failure_count, rolling_failure_count, updated_at
+            ) values ('BBIG', 'refresh_suppressed', 1, 1, CURRENT_TIMESTAMP)
+            """
+        )
+
+        dates = pd.bdate_range("2026-01-05", periods=70)
+        good_history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 100 + idx, "volume": 100000 + idx} for idx, ts in enumerate(dates)]
+        )
+        bad_history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 1 + idx, "volume": 500 + idx} for idx, ts in enumerate(dates)]
+        )
+        persist_ticker_daily_history(conn, good_history, ticker="GOOD", provenance_source_label="daily_historical_append", market_data_source="live")
+        persist_ticker_daily_history(conn, bad_history, ticker="BBIG", provenance_source_label="daily_historical_append", market_data_source="live")
+
+        out = theme_history_window(conn, 30)
+        derived = out[out["provenance_class"] == "ticker_history_derived"].sort_values("snapshot_time")
+
+        self.assertFalse(derived.empty)
+        self.assertTrue((derived["ticker_count"] == 1).all())
+        self.assertLess(float(derived["avg_1w"].abs().max()), 10.0)
+        conn.close()
+
+    def test_reconstructed_theme_history_excludes_suppressed_members_from_calculation_rows(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'Biotech', 'Health', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'GOOD')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'BBIG')")
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, consecutive_failure_count, rolling_failure_count, updated_at
+            ) values ('BBIG', 'refresh_suppressed', 1, 1, CURRENT_TIMESTAMP)
+            """
+        )
+
+        result = reconstruct_theme_history_range(
+            conn,
+            provider_name="mock",
+            start_date="2026-02-10",
+            end_date="2026-02-12",
+            tickers=["GOOD", "BBIG"],
+            provenance_source_label="historical_backfill",
+            replace_existing=True,
+        )
+        stored = conn.execute(
+            """
+            select distinct ticker_count
+            from reconstructed_theme_snapshots
+            where provenance_source_label = 'historical_backfill'
+            """
+        ).fetchall()
+
+        self.assertGreater(int(result["snapshot_rows_written"]), 0)
+        self.assertEqual(stored, [(1,)])
+        conn.close()
+
     def test_captured_history_still_wins_over_ticker_history_derived_on_same_date(self):
         conn = self._conn()
         conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")

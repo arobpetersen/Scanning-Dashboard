@@ -4,12 +4,23 @@ from datetime import datetime
 
 import pandas as pd
 
+from .config import (
+    CALCULATION_OUTLIER_MAX_DOLLAR_VOLUME,
+    CALCULATION_OUTLIER_MAX_PRICE,
+    CALCULATION_OUTLIER_MIN_ABS_PERF_1M,
+    CALCULATION_OUTLIER_MIN_ABS_PERF_1W,
+    CURRENT_RANKING_MIN_DOLLAR_VOLUME,
+    CURRENT_RANKING_MIN_PRICE,
+    CURRENT_RANKING_RETURN_CAP_PCT,
+)
 from .failure_classification import categorize_failure_message
+from .queries import latest_ticker_snapshots
 
 ACTIVE = "active"
 WATCH = "watch"
 REFRESH_SUPPRESSED = "refresh_suppressed"
 INACTIVE_CANDIDATE = "inactive_candidate"
+CALCULATION_OUTLIER = "CALC_OUTLIER"
 
 NO_CANDLES_FLAG_THRESHOLD = 3
 NO_CANDLES_AUTO_SUPPRESS_THRESHOLD = 5
@@ -174,7 +185,13 @@ def hygiene_decision_context(row) -> dict[str, str]:
         return {
             "recommended_action": "Keep suppressed",
             "confidence": "high",
-            "explanation": "Refreshes are already suppressed. This preserves lineage/history while keeping the symbol out of active refresh.",
+            "explanation": "Refreshes are already suppressed. This preserves lineage/history while keeping the symbol out of refresh, current rankings, and historical movement calculations.",
+        }
+    if category == CALCULATION_OUTLIER and suggested == REFRESH_SUPPRESSED:
+        return {
+            "recommended_action": "Approve suppression",
+            "confidence": "high",
+            "explanation": "Current preferred-source data shows an extreme low-liquidity return pattern that can distort ranking and movement calculations. Suppression removes the ticker from calculations without deleting membership.",
         }
     if suggested == REFRESH_SUPPRESSED and category == "NO_CANDLES" and consecutive >= NO_CANDLES_AUTO_SUPPRESS_THRESHOLD:
         return {
@@ -232,7 +249,7 @@ def clear_symbol_hygiene_staged_state(session_state, tickers: list[str]) -> None
     session_state["symbol_hygiene_staged"] = {}
 
 
-def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
+def _base_symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
     membership_join = ""
     membership_columns = "NULL AS current_theme_names, NULL AS current_categories,"
     membership_cte = ""
@@ -306,6 +323,200 @@ def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
     ).df()
 
 
+def _allowlisted_calculation_outlier(state_row) -> bool:
+    if not state_row:
+        return False
+    last_failure_category = str(state_row[5] or "")
+    suggested_reason = str(state_row[3] or "")
+    return last_failure_category == CALCULATION_OUTLIER and "kept active by reviewer" in suggested_reason.lower()
+
+
+def _calculation_outlier_candidates(conn) -> pd.DataFrame:
+    if not _table_exists(conn, "theme_membership") or not _table_exists(conn, "themes"):
+        return pd.DataFrame()
+
+    latest = latest_ticker_snapshots(conn)
+    if latest.empty:
+        return pd.DataFrame()
+
+    membership = conn.execute(
+        """
+        SELECT
+            m.ticker,
+            STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+            STRING_AGG(
+                DISTINCT COALESCE(NULLIF(t.category, ''), 'Uncategorized'),
+                ', '
+                ORDER BY COALESCE(NULLIF(t.category, ''), 'Uncategorized')
+            ) AS current_categories
+        FROM theme_membership m
+        JOIN themes t ON t.id = m.theme_id
+        GROUP BY m.ticker
+        """
+    ).df()
+    if membership.empty:
+        return pd.DataFrame()
+
+    candidates = latest.merge(membership, on="ticker", how="inner")
+    if candidates.empty:
+        return pd.DataFrame()
+
+    for col in ("price", "avg_volume", "perf_1w", "perf_1m", "perf_3m"):
+        candidates[col] = pd.to_numeric(candidates.get(col), errors="coerce")
+
+    candidates["dollar_volume"] = candidates["price"] * candidates["avg_volume"]
+    candidates["abs_perf_1w"] = candidates["perf_1w"].abs()
+    candidates["abs_perf_1m"] = candidates["perf_1m"].abs()
+
+    short_window_mask = (
+        candidates["abs_perf_1w"].ge(CALCULATION_OUTLIER_MIN_ABS_PERF_1W)
+        & candidates["dollar_volume"].lt(CALCULATION_OUTLIER_MAX_DOLLAR_VOLUME)
+    )
+    low_price_mask = (
+        candidates["price"].lt(CALCULATION_OUTLIER_MAX_PRICE)
+        & candidates["abs_perf_1w"].ge(CURRENT_RANKING_RETURN_CAP_PCT)
+    )
+    medium_window_mask = (
+        candidates["abs_perf_1m"].ge(CALCULATION_OUTLIER_MIN_ABS_PERF_1M)
+        & candidates["dollar_volume"].lt(max(CURRENT_RANKING_MIN_DOLLAR_VOLUME, CALCULATION_OUTLIER_MAX_DOLLAR_VOLUME))
+    )
+    candidates = candidates[short_window_mask | low_price_mask | medium_window_mask].copy()
+    if candidates.empty:
+        return pd.DataFrame()
+
+    def _reason(row) -> str:
+        if pd.notna(row.get("abs_perf_1w")) and float(row["abs_perf_1w"]) >= CALCULATION_OUTLIER_MIN_ABS_PERF_1W:
+            return (
+                f"Extreme 1W move ({float(row['perf_1w']):+.1f}%) on low dollar volume "
+                f"({float(row['dollar_volume']):,.0f}). Review suppression from calculations."
+            )
+        if pd.notna(row.get("abs_perf_1m")) and float(row["abs_perf_1m"]) >= CALCULATION_OUTLIER_MIN_ABS_PERF_1M:
+            return (
+                f"Extreme 1M move ({float(row['perf_1m']):+.1f}%) on low dollar volume "
+                f"({float(row['dollar_volume']):,.0f}). Review suppression from calculations."
+            )
+        return (
+            f"Low-price contributor ({float(row['price']):.2f}) showing large return "
+            f"({float(row['perf_1w']):+.1f}% 1W) with weak liquidity ({float(row['dollar_volume']):,.0f} dollar volume)."
+        )
+
+    candidates["suggested_reason"] = candidates.apply(_reason, axis=1)
+    candidates["affected_calculation_surfaces"] = "current rankings, historical movement"
+    return candidates[
+        [
+            "ticker",
+            "price",
+            "avg_volume",
+            "dollar_volume",
+            "perf_1w",
+            "perf_1m",
+            "perf_3m",
+            "last_updated",
+            "current_theme_names",
+            "current_categories",
+            "suggested_reason",
+            "affected_calculation_surfaces",
+        ]
+    ].reset_index(drop=True)
+def sync_calculation_outlier_flags(conn) -> dict[str, int]:
+    candidates = _calculation_outlier_candidates(conn)
+    candidate_map = {str(row["ticker"]).strip().upper(): row for _, row in candidates.iterrows()}
+    candidate_tickers = set(candidate_map.keys())
+    flagged = 0
+    cleared = 0
+
+    existing_calc_rows = conn.execute(
+        """
+        SELECT ticker
+        FROM symbol_refresh_status
+        WHERE last_failure_category = ?
+        """,
+        [CALCULATION_OUTLIER],
+    ).fetchall()
+    existing_calc_tickers = {str(row[0]).strip().upper() for row in existing_calc_rows}
+
+    for ticker, row in candidate_map.items():
+        ensure_symbol_row(conn, ticker)
+        state = _load_state(conn, ticker)
+        if _allowlisted_calculation_outlier(state):
+            continue
+
+        current_status = str(state[1] or ACTIVE) if state else ACTIVE
+        current_suggested = str(state[2] or "") if state and state[2] else ""
+        current_category = str(state[4] or "") if state and state[4] else ""
+        if current_status == REFRESH_SUPPRESSED:
+            continue
+        if current_suggested and current_category != CALCULATION_OUTLIER:
+            continue
+
+        conn.execute(
+            """
+            UPDATE symbol_refresh_status
+            SET suggested_status = ?,
+                suggested_reason = ?,
+                last_failure_category = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ticker = ?
+            """,
+            [REFRESH_SUPPRESSED, str(row["suggested_reason"]), CALCULATION_OUTLIER, ticker],
+        )
+        flagged += 1
+
+    stale_tickers = sorted(existing_calc_tickers - candidate_tickers)
+    for ticker in stale_tickers:
+        state = _load_state(conn, ticker)
+        if not state:
+            continue
+        if str(state[1] or "") == REFRESH_SUPPRESSED:
+            continue
+        if _allowlisted_calculation_outlier(state):
+            continue
+        conn.execute(
+            """
+            UPDATE symbol_refresh_status
+            SET suggested_status = NULL,
+                suggested_reason = CASE
+                    WHEN suggested_status IS NOT NULL THEN 'Calculation outlier no longer triggered.'
+                    ELSE suggested_reason
+                END,
+                last_failure_category = CASE
+                    WHEN last_failure_category = ? THEN NULL
+                    ELSE last_failure_category
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ticker = ?
+            """,
+            [CALCULATION_OUTLIER, ticker],
+        )
+        cleared += 1
+
+    return {"flagged": flagged, "cleared": cleared}
+
+
+def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
+    sync_calculation_outlier_flags(conn)
+    queue = _base_symbol_hygiene_queue(conn, limit=limit)
+    if queue.empty:
+        return queue
+
+    outlier_context = _calculation_outlier_candidates(conn)
+    if outlier_context.empty:
+        return queue
+
+    outlier_context = outlier_context.rename(
+        columns={
+            "last_updated": "outlier_market_data_at",
+            "suggested_reason": "outlier_reason",
+        }
+    )
+    queue = queue.merge(
+        outlier_context,
+        on=["ticker", "current_theme_names", "current_categories"],
+        how="left",
+    )
+    return queue
+
+
 def filter_symbol_hygiene_queue(queue: pd.DataFrame, queue_view: str) -> pd.DataFrame:
     if queue.empty:
         return queue
@@ -346,7 +557,7 @@ def sort_symbol_hygiene_queue(queue: pd.DataFrame, sort_mode: str) -> pd.DataFra
 
 def approve_suppression(conn, ticker: str, note: str | None = None) -> None:
     ensure_symbol_row(conn, ticker)
-    reason = note or "Suppression approved in Health review queue."
+    reason = note or "Suppression approved in Health review queue. Excluded from refresh, current rankings, and historical movement calculations."
     conn.execute(
         """
         UPDATE symbol_refresh_status
@@ -410,6 +621,7 @@ def reject_keep_active(conn, ticker: str) -> None:
         SET status='active',
             suggested_status=NULL,
             suggested_reason='Suppression rejected; kept active by reviewer.',
+            suppression_reason='Calculation outlier kept active by reviewer.',
             updated_at=CURRENT_TIMESTAMP
         WHERE ticker=?
         """,

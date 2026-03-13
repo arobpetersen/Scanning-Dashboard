@@ -1076,6 +1076,64 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
         self.assertEqual(out.iloc[0]["current_categories"], "Emerging Tech")
         conn.close()
 
+    def test_symbol_hygiene_queue_flags_calculation_outliers_and_keeps_membership_visible(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp default current_timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Meme Stocks', 'Spec', true)")
+        conn.execute("insert into theme_membership values (1, 'BBIG')")
+        conn.execute("insert into refresh_runs values (7, 'success', '2026-03-12 22:00:00')")
+        conn.execute(
+            """
+            insert into ticker_snapshots values
+            (7, 'BBIG', 2.0, 180.0, 240.0, 300.0, 10000000, 1000000, null, null, null, '2026-03-12 21:00:00', 'live')
+            """
+        )
+
+        queue = symbol_hygiene_queue(conn, limit=20)
+
+        self.assertEqual(queue.iloc[0]["ticker"], "BBIG")
+        self.assertEqual(queue.iloc[0]["suggested_status"], "refresh_suppressed")
+        self.assertEqual(queue.iloc[0]["last_failure_category"], "CALC_OUTLIER")
+        self.assertIn("Meme Stocks", str(queue.iloc[0]["current_theme_names"]))
+        self.assertIn("current rankings, historical movement", str(queue.iloc[0]["affected_calculation_surfaces"]))
+        self.assertIn("Extreme", str(queue.iloc[0]["outlier_reason"]))
+
+        apply_staged_symbol_hygiene_actions(conn, {"BBIG": "suppress"})
+        member_context = theme_member_hygiene_context(conn, 1)
+
+        self.assertEqual(member_context.iloc[0]["ticker"], "BBIG")
+        self.assertEqual(member_context.iloc[0]["symbol_hygiene_status"], "refresh_suppressed")
+        conn.close()
+
     def test_resolve_staged_symbol_hygiene_action_prefers_override(self):
         self.assertEqual(resolve_staged_symbol_hygiene_action(True, "none"), "suppress")
         self.assertEqual(resolve_staged_symbol_hygiene_action(False, "keep_active"), "keep_active")

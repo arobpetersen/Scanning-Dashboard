@@ -268,7 +268,7 @@ def _recent_ticker_history_theme_history(
                 theme_id,
                 MAX(theme) AS theme,
                 MAX(category) AS category,
-                COUNT(*) AS ticker_count,
+                SUM(CASE WHEN is_eligible THEN 1 ELSE 0 END) AS ticker_count,
                 SUM(CASE WHEN is_eligible THEN 1 ELSE 0 END) AS eligible_constituent_count
             FROM membership
             GROUP BY theme_id
@@ -276,6 +276,7 @@ def _recent_ticker_history_theme_history(
         governed_tickers AS (
             SELECT DISTINCT ticker
             FROM membership
+            WHERE is_eligible
         ),
         perf AS (
             SELECT
@@ -299,12 +300,12 @@ def _recent_ticker_history_theme_history(
             SELECT
                 m.theme_id,
                 rp.trading_date,
-                AVG(rp.perf_1w) AS avg_1w,
-                AVG(rp.perf_1m) AS avg_1m,
-                AVG(rp.perf_3m) AS avg_3m,
-                AVG(CASE WHEN rp.perf_1w IS NULL THEN NULL WHEN rp.perf_1w > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_1w_breadth_pct,
-                AVG(CASE WHEN rp.perf_1m IS NULL THEN NULL WHEN rp.perf_1m > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_1m_breadth_pct,
-                AVG(CASE WHEN rp.perf_3m IS NULL THEN NULL WHEN rp.perf_3m > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_3m_breadth_pct,
+                AVG(CASE WHEN m.is_eligible THEN rp.perf_1w ELSE NULL END) AS avg_1w,
+                AVG(CASE WHEN m.is_eligible THEN rp.perf_1m ELSE NULL END) AS avg_1m,
+                AVG(CASE WHEN m.is_eligible THEN rp.perf_3m ELSE NULL END) AS avg_3m,
+                AVG(CASE WHEN NOT m.is_eligible OR rp.perf_1w IS NULL THEN NULL WHEN rp.perf_1w > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_1w_breadth_pct,
+                AVG(CASE WHEN NOT m.is_eligible OR rp.perf_1m IS NULL THEN NULL WHEN rp.perf_1m > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_1m_breadth_pct,
+                AVG(CASE WHEN NOT m.is_eligible OR rp.perf_3m IS NULL THEN NULL WHEN rp.perf_3m > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_3m_breadth_pct,
                 SUM(CASE WHEN m.is_eligible AND rp.close IS NOT NULL THEN 1 ELSE 0 END) AS covered_eligible_constituent_count
             FROM membership m
             JOIN recent_perf rp ON rp.ticker = m.ticker

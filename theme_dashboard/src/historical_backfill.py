@@ -223,6 +223,19 @@ def reconstruct_theme_history_range(
         rows_skipped = 0
 
         membership_base = membership[["theme_id", "theme", "category", "is_active", "ticker"]].copy()
+        status_df = conn.execute(
+            """
+            SELECT ticker, COALESCE(status, 'active') <> 'refresh_suppressed' AS calculation_eligible
+            FROM symbol_refresh_status
+            """
+        ).df()
+        if status_df.empty:
+            membership_base["calculation_eligible"] = True
+        else:
+            membership_base = membership_base.merge(status_df, on="ticker", how="left")
+            membership_base["calculation_eligible"] = membership_base["calculation_eligible"].combine_first(
+                pd.Series(True, index=membership_base.index, dtype="boolean")
+            ).astype(bool)
         for snapshot_date in snapshot_dates:
             daily_perf = perf_df[pd.to_datetime(perf_df["snapshot_date"]).dt.date == snapshot_date][
                 ["ticker", "perf_1w", "perf_1m", "perf_3m"]
