@@ -6,7 +6,7 @@ import pandas as pd
 from src.database import SCHEMA_SQL
 from src.historical_backfill import reconstruct_theme_history_range
 from src.momentum_engine import compute_theme_momentum
-from src.queries import theme_history_window
+from src.queries import classify_ticker_history_readiness, theme_history_window, ticker_history_readiness
 from src.rankings import compute_theme_rankings
 from src.ticker_history import persist_ticker_daily_history, ticker_daily_history_rows
 
@@ -221,6 +221,77 @@ class TestHistoricalBackfill(unittest.TestCase):
         self.assertEqual(rankings.iloc[0]["theme"], "AI")
         self.assertEqual(float(rankings.iloc[0]["composite_score"]), 10.0)
         conn.close()
+
+    def test_ticker_history_readiness_handles_no_rows(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+
+        readiness = ticker_history_readiness(conn, target_trading_days=30)
+
+        self.assertEqual(int(readiness.iloc[0]["available_trading_days"]), 0)
+        self.assertEqual(int(readiness.iloc[0]["remaining_trading_days"]), 30)
+        self.assertEqual(int(readiness.iloc[0]["governed_active_tickers"]), 1)
+        self.assertEqual(float(readiness.iloc[0]["governed_ready_pct"]), 0.0)
+        self.assertEqual(readiness.iloc[0]["status_label"], "accumulating")
+        conn.close()
+
+    def test_ticker_history_readiness_reports_partial_depth_and_sparse_coverage(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'Cloud', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'MSFT')")
+
+        dates = pd.bdate_range("2026-02-02", periods=22)
+        nvda_history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 100 + idx, "volume": 1000 + idx} for idx, ts in enumerate(dates)]
+        )
+        msft_history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 200 + idx, "volume": 2000 + idx} for idx, ts in enumerate(dates[:10])]
+        )
+        persist_ticker_daily_history(conn, nvda_history, ticker="NVDA", provenance_source_label="ticker_intake_backfill", market_data_source="live")
+        persist_ticker_daily_history(conn, msft_history, ticker="MSFT", provenance_source_label="ticker_intake_backfill", market_data_source="live")
+
+        readiness = ticker_history_readiness(conn, target_trading_days=30)
+
+        self.assertEqual(int(readiness.iloc[0]["available_trading_days"]), 22)
+        self.assertEqual(int(readiness.iloc[0]["remaining_trading_days"]), 8)
+        self.assertEqual(int(readiness.iloc[0]["governed_active_tickers"]), 2)
+        self.assertEqual(int(readiness.iloc[0]["governed_active_tickers_ready"]), 0)
+        self.assertEqual(float(readiness.iloc[0]["governed_ready_pct"]), 0.0)
+        self.assertEqual(readiness.iloc[0]["status_label"], "near ready")
+        conn.close()
+
+    def test_ticker_history_readiness_reports_ready_when_depth_and_coverage_are_strong(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'Cloud', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (3, 'Energy', 'Macro', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'MSFT')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (3, 'XOM')")
+
+        dates = pd.bdate_range("2026-01-15", periods=30)
+        for ticker, base in [("NVDA", 100), ("MSFT", 200), ("XOM", 50)]:
+            history = pd.DataFrame(
+                [{"snapshot_date": ts.date(), "close": base + idx, "volume": 1000 + idx} for idx, ts in enumerate(dates)]
+            )
+            persist_ticker_daily_history(conn, history, ticker=ticker, provenance_source_label="daily_historical_append", market_data_source="live")
+
+        readiness = ticker_history_readiness(conn, target_trading_days=30)
+
+        self.assertEqual(int(readiness.iloc[0]["available_trading_days"]), 30)
+        self.assertEqual(int(readiness.iloc[0]["remaining_trading_days"]), 0)
+        self.assertEqual(int(readiness.iloc[0]["governed_active_tickers_ready"]), 3)
+        self.assertEqual(float(readiness.iloc[0]["governed_ready_pct"]), 100.0)
+        self.assertEqual(readiness.iloc[0]["status_label"], "ready")
+        conn.close()
+
+    def test_classify_ticker_history_readiness_thresholds(self):
+        self.assertEqual(classify_ticker_history_readiness(10, 0.0, target_trading_days=30), "accumulating")
+        self.assertEqual(classify_ticker_history_readiness(24, 10.0, target_trading_days=30), "near ready")
+        self.assertEqual(classify_ticker_history_readiness(30, 75.0, target_trading_days=30), "ready")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from src.queries import (
     row_counts,
     snapshot_counts,
     source_audit_status,
+    ticker_history_readiness,
     theme_health_overview,
     theme_member_hygiene_context,
 )
@@ -82,6 +83,7 @@ with get_conn() as conn:
     snaps = snapshot_counts(conn)
     baseline = baseline_status(conn)
     source_audit = source_audit_status(conn)
+    ticker_history_ready = ticker_history_readiness(conn, target_trading_days=30)
     sugg_counts = suggestion_status_counts(conn)
 
 ops_tab, themes_tab = st.tabs(["Operations", "Theme Health"])
@@ -143,6 +145,36 @@ with ops_tab:
             st.info("Mixed source history exists as residue, but current live-facing views are using live-preferred data.")
         else:
             st.success("Current live-facing views are source-pure under live-preferred selection.")
+
+    if not ticker_history_ready.empty:
+        readiness = ticker_history_ready.iloc[0]
+        st.subheader("Ticker history readiness")
+        st.caption(
+            "Tracks progress toward using persisted ticker-day history as the baseline for recent historical reconstruction. "
+            "This is a trading-day target and does not change current/live semantics."
+        )
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Target", f"{int(readiness['target_trading_days'])} trading days")
+        r2.metric("Current progress", int(readiness["available_trading_days"]))
+        r3.metric("Remaining", int(readiness["remaining_trading_days"]))
+        r4.metric("Status", str(readiness["status_label"]).title())
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Governed active tickers", int(readiness["governed_active_tickers"]))
+        c2.metric(
+            f"Governed tickers with >={int(readiness['target_trading_days'])} rows",
+            int(readiness["governed_active_tickers_ready"]),
+        )
+        c3.metric("Ready coverage", f"{float(readiness['governed_ready_pct']):.1f}%")
+        st.caption(
+            f"Source=`{readiness.get('market_data_source') or 'none'}` | "
+            f"Depth range=`{int(readiness['min_ticker_depth'])}` / `{float(readiness['median_ticker_depth']):.1f}` / `{int(readiness['max_ticker_depth'])}` "
+            "(min / median / max rows across governed active tickers)"
+        )
+        if readiness.get("earliest_trading_date") or readiness.get("latest_trading_date"):
+            st.caption(
+                f"Stored trading-date range: `{readiness.get('earliest_trading_date') or 'n/a'}` to "
+                f"`{readiness.get('latest_trading_date') or 'n/a'}`"
+            )
 
     with get_conn() as conn:
         reconstruction_runs = historical_reconstruction_runs(conn, limit=10)

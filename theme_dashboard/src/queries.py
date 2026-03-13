@@ -750,6 +750,151 @@ def historical_reconstruction_runs(conn, limit: int = 20) -> pd.DataFrame:
     ).df()
 
 
+def classify_ticker_history_readiness(
+    available_trading_days: int,
+    ready_coverage_pct: float,
+    *,
+    target_trading_days: int = 30,
+) -> str:
+    if available_trading_days >= target_trading_days and ready_coverage_pct >= 70.0:
+        return "ready"
+    if available_trading_days >= 20 or ready_coverage_pct >= 40.0:
+        return "near ready"
+    return "accumulating"
+
+
+def ticker_history_readiness(conn, target_trading_days: int = 30) -> pd.DataFrame:
+    governed_active_tickers = conn.execute(
+        """
+        SELECT DISTINCT m.ticker
+        FROM theme_membership m
+        JOIN themes t ON t.id = m.theme_id
+        WHERE t.is_active = TRUE
+        ORDER BY m.ticker
+        """
+    ).df()
+    governed_count = int(len(governed_active_tickers))
+
+    if not _table_exists(conn, "ticker_daily_history"):
+        return pd.DataFrame(
+            [
+                {
+                    "target_trading_days": int(target_trading_days),
+                    "market_data_source": None,
+                    "available_trading_days": 0,
+                    "remaining_trading_days": int(target_trading_days),
+                    "governed_active_tickers": governed_count,
+                    "governed_active_tickers_ready": 0,
+                    "governed_ready_pct": 0.0,
+                    "min_ticker_depth": 0,
+                    "median_ticker_depth": 0.0,
+                    "max_ticker_depth": 0,
+                    "earliest_trading_date": None,
+                    "latest_trading_date": None,
+                    "status_label": "accumulating",
+                }
+            ]
+        )
+
+    preferred_source = conn.execute(
+        """
+        SELECT market_data_source
+        FROM ticker_daily_history
+        ORDER BY CASE WHEN market_data_source = 'live' THEN 0 ELSE 1 END,
+                 trading_date DESC,
+                 updated_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    market_data_source = str(preferred_source[0]) if preferred_source and preferred_source[0] else None
+
+    if not market_data_source:
+        return pd.DataFrame(
+            [
+                {
+                    "target_trading_days": int(target_trading_days),
+                    "market_data_source": None,
+                    "available_trading_days": 0,
+                    "remaining_trading_days": int(target_trading_days),
+                    "governed_active_tickers": governed_count,
+                    "governed_active_tickers_ready": 0,
+                    "governed_ready_pct": 0.0,
+                    "min_ticker_depth": 0,
+                    "median_ticker_depth": 0.0,
+                    "max_ticker_depth": 0,
+                    "earliest_trading_date": None,
+                    "latest_trading_date": None,
+                    "status_label": "accumulating",
+                }
+            ]
+        )
+
+    coverage = conn.execute(
+        """
+        WITH governed AS (
+            SELECT DISTINCT m.ticker
+            FROM theme_membership m
+            JOIN themes t ON t.id = m.theme_id
+            WHERE t.is_active = TRUE
+        )
+        SELECT
+            g.ticker,
+            COUNT(DISTINCT h.trading_date) AS trading_day_rows
+        FROM governed g
+        LEFT JOIN ticker_daily_history h
+          ON h.ticker = g.ticker
+         AND h.market_data_source = ?
+        GROUP BY g.ticker
+        ORDER BY g.ticker
+        """,
+        [market_data_source],
+    ).df()
+    overall = conn.execute(
+        """
+        SELECT
+            COUNT(DISTINCT trading_date) AS available_trading_days,
+            MIN(trading_date) AS earliest_trading_date,
+            MAX(trading_date) AS latest_trading_date
+        FROM ticker_daily_history
+        WHERE market_data_source = ?
+        """,
+        [market_data_source],
+    ).df()
+
+    available_trading_days = int(overall.iloc[0]["available_trading_days"] or 0) if not overall.empty else 0
+    remaining_trading_days = max(0, int(target_trading_days) - available_trading_days)
+    ready_count = int((coverage["trading_day_rows"] >= int(target_trading_days)).sum()) if not coverage.empty else 0
+    ready_pct = round((ready_count / governed_count) * 100.0, 1) if governed_count > 0 else 0.0
+    min_depth = int(coverage["trading_day_rows"].min()) if not coverage.empty else 0
+    median_depth = float(coverage["trading_day_rows"].median()) if not coverage.empty else 0.0
+    max_depth = int(coverage["trading_day_rows"].max()) if not coverage.empty else 0
+    status_label = classify_ticker_history_readiness(
+        available_trading_days,
+        ready_pct,
+        target_trading_days=int(target_trading_days),
+    )
+
+    return pd.DataFrame(
+        [
+            {
+                "target_trading_days": int(target_trading_days),
+                "market_data_source": market_data_source,
+                "available_trading_days": available_trading_days,
+                "remaining_trading_days": remaining_trading_days,
+                "governed_active_tickers": governed_count,
+                "governed_active_tickers_ready": ready_count,
+                "governed_ready_pct": ready_pct,
+                "min_ticker_depth": min_depth,
+                "median_ticker_depth": median_depth,
+                "max_ticker_depth": max_depth,
+                "earliest_trading_date": overall.iloc[0]["earliest_trading_date"] if not overall.empty else None,
+                "latest_trading_date": overall.iloc[0]["latest_trading_date"] if not overall.empty else None,
+                "status_label": status_label,
+            }
+        ]
+    )
+
+
 def theme_snapshot_history_recent(conn, snapshot_limit: int = 14) -> pd.DataFrame:
     return conn.execute(
         """
