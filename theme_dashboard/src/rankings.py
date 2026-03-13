@@ -50,6 +50,9 @@ CURRENT_RANKING_COLUMNS = [
 ]
 
 
+CURRENT_RANKING_SNAPSHOT_KEYS = ["theme_metrics", "rankings"]
+
+
 def theme_confidence_factor(ticker_count: int | float) -> float:
     if pd.isna(ticker_count) or float(ticker_count) <= 0:
         return 0.0
@@ -242,65 +245,63 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         prepared["perf_1w_eligible"] & prepared["perf_1m_eligible"] & prepared["perf_3m_eligible"]
     )
 
-    rows: list[dict[str, object]] = []
-    group_cols = ["theme_id", "theme", "category", "is_active"]
-    for (theme_id, theme, category, is_active), group in prepared.groupby(group_cols, dropna=False):
-        ticker_count = int(group["ticker"].notna().sum())
-        eligible_ticker_count = int(group["eligible_ticker"].sum())
-        eligible_1w_count = int(group["perf_1w_eligible"].sum())
-        eligible_1m_count = int(group["perf_1m_eligible"].sum())
-        eligible_3m_count = int(group["perf_3m_eligible"].sum())
-        eligible_composite_count = int(group["composite_metric_eligible"].sum())
+    prepared["ticker_present"] = prepared["ticker"].notna().astype(int)
+    prepared["perf_1w_capped_for_agg"] = prepared[capped_return_cols["perf_1w"]].where(prepared["perf_1w_eligible"])
+    prepared["perf_1m_capped_for_agg"] = prepared[capped_return_cols["perf_1m"]].where(prepared["perf_1m_eligible"])
+    prepared["perf_3m_capped_for_agg"] = prepared[capped_return_cols["perf_3m"]].where(prepared["perf_3m_eligible"])
+    prepared["perf_1w_positive"] = np.where(prepared["perf_1w_eligible"], prepared["perf_1w"] > 0, np.nan)
+    prepared["perf_1m_positive"] = np.where(prepared["perf_1m_eligible"], prepared["perf_1m"] > 0, np.nan)
+    prepared["perf_3m_positive"] = np.where(prepared["perf_3m_eligible"], prepared["perf_3m"] > 0, np.nan)
 
-        avg_1w = group.loc[group["perf_1w_eligible"], capped_return_cols["perf_1w"]].mean()
-        avg_1m = group.loc[group["perf_1m_eligible"], capped_return_cols["perf_1m"]].mean()
-        avg_3m = group.loc[group["perf_3m_eligible"], capped_return_cols["perf_3m"]].mean()
-
-        positive_1w = group.loc[group["perf_1w_eligible"], "perf_1w"].gt(0).mean() * 100 if eligible_1w_count else 0.0
-        positive_1m = group.loc[group["perf_1m_eligible"], "perf_1m"].gt(0).mean() * 100 if eligible_1m_count else 0.0
-        positive_3m = group.loc[group["perf_3m_eligible"], "perf_3m"].gt(0).mean() * 100 if eligible_3m_count else 0.0
-
-        snapshot_time = group["snapshot_time"].dropna().max() if "snapshot_time" in group.columns else pd.NaT
-        run_id_series = group["run_id"].dropna() if "run_id" in group.columns else pd.Series(dtype=float)
-        run_id = int(run_id_series.max()) if not run_id_series.empty else None
-        eligible_breadth_pct = (eligible_ticker_count / ticker_count) * 100.0 if ticker_count > 0 else 0.0
-
-        base_score = (
-            COMPOSITE_WEIGHTS["perf_1w"] * (0.0 if pd.isna(avg_1w) else float(avg_1w))
-            + COMPOSITE_WEIGHTS["perf_1m"] * (0.0 if pd.isna(avg_1m) else float(avg_1m))
-            + COMPOSITE_WEIGHTS["perf_3m"] * (0.0 if pd.isna(avg_3m) else float(avg_3m))
-        )
-        composite_score = base_score * theme_confidence_factor(ticker_count) if eligible_composite_count else np.nan
-
-        rows.append(
-            {
-                "theme_id": theme_id,
-                "theme": theme,
-                "category": category,
-                "is_active": is_active,
-                "run_id": run_id,
-                "snapshot_time": snapshot_time,
-                "ticker_count": ticker_count,
-                "eligible_ticker_count": eligible_ticker_count,
-                "eligible_1w_count": eligible_1w_count,
-                "eligible_1m_count": eligible_1m_count,
-                "eligible_3m_count": eligible_3m_count,
-                "eligible_composite_count": eligible_composite_count,
-                "eligible_breadth_pct": eligible_breadth_pct,
-                "avg_1w": avg_1w,
-                "avg_1m": avg_1m,
-                "avg_3m": avg_3m,
-                "positive_1w_breadth_pct": positive_1w,
-                "positive_1m_breadth_pct": positive_1m,
-                "positive_3m_breadth_pct": positive_3m,
-                "composite_score": composite_score,
-            }
-        )
-
-    out = pd.DataFrame(rows, columns=CURRENT_RANKING_COLUMNS)
+    grouped = prepared.groupby(["theme_id", "theme", "category", "is_active"], dropna=False)
+    out = grouped.agg(
+        run_id=("run_id", "max"),
+        snapshot_time=("snapshot_time", "max"),
+        ticker_count=("ticker_present", "sum"),
+        eligible_ticker_count=("eligible_ticker", "sum"),
+        eligible_1w_count=("perf_1w_eligible", "sum"),
+        eligible_1m_count=("perf_1m_eligible", "sum"),
+        eligible_3m_count=("perf_3m_eligible", "sum"),
+        eligible_composite_count=("composite_metric_eligible", "sum"),
+        avg_1w=("perf_1w_capped_for_agg", "mean"),
+        avg_1m=("perf_1m_capped_for_agg", "mean"),
+        avg_3m=("perf_3m_capped_for_agg", "mean"),
+        positive_1w_breadth_pct=("perf_1w_positive", "mean"),
+        positive_1m_breadth_pct=("perf_1m_positive", "mean"),
+        positive_3m_breadth_pct=("perf_3m_positive", "mean"),
+    ).reset_index()
     if out.empty:
         return out
 
+    count_cols = [
+        "ticker_count",
+        "eligible_ticker_count",
+        "eligible_1w_count",
+        "eligible_1m_count",
+        "eligible_3m_count",
+        "eligible_composite_count",
+    ]
+    out[count_cols] = out[count_cols].fillna(0).astype(int)
+    out["run_id"] = pd.to_numeric(out["run_id"], errors="coerce")
+    out["run_id"] = out["run_id"].where(out["run_id"].notna(), None)
+    out["positive_1w_breadth_pct"] = out["positive_1w_breadth_pct"].fillna(0.0) * 100.0
+    out["positive_1m_breadth_pct"] = out["positive_1m_breadth_pct"].fillna(0.0) * 100.0
+    out["positive_3m_breadth_pct"] = out["positive_3m_breadth_pct"].fillna(0.0) * 100.0
+    out["eligible_breadth_pct"] = np.where(
+        out["ticker_count"] > 0,
+        (out["eligible_ticker_count"] / out["ticker_count"]) * 100.0,
+        0.0,
+    )
+    base_score = (
+        COMPOSITE_WEIGHTS["perf_1w"] * out["avg_1w"].fillna(0.0)
+        + COMPOSITE_WEIGHTS["perf_1m"] * out["avg_1m"].fillna(0.0)
+        + COMPOSITE_WEIGHTS["perf_3m"] * out["avg_3m"].fillna(0.0)
+    )
+    out["composite_score"] = np.where(
+        out["eligible_composite_count"] > 0,
+        base_score * out["ticker_count"].apply(theme_confidence_factor),
+        np.nan,
+    )
     numeric_cols = [
         "eligible_breadth_pct",
         "avg_1w",
@@ -312,7 +313,7 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         "composite_score",
     ]
     out[numeric_cols] = out[numeric_cols].round(2)
-    return out
+    return out[CURRENT_RANKING_COLUMNS]
 
 
 def compute_current_theme_metrics(conn) -> pd.DataFrame:
@@ -320,10 +321,22 @@ def compute_current_theme_metrics(conn) -> pd.DataFrame:
     return _build_current_ranking_metrics(current_raw)
 
 
-def compute_theme_rankings(conn) -> pd.DataFrame:
+def _finalize_current_rankings(current: pd.DataFrame) -> pd.DataFrame:
+    rankings = current[current["eligible_composite_count"] >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS].copy()
+    rankings = rankings.sort_values(
+        ["composite_score", "positive_1m_breadth_pct", "eligible_composite_count", "theme"],
+        ascending=[False, False, False, True],
+    ).reset_index(drop=True)
+    return rankings
+
+
+def compute_current_ranking_snapshot(conn) -> dict[str, pd.DataFrame]:
     current = compute_current_theme_metrics(conn)
     if current.empty:
-        return pd.DataFrame()
+        return {
+            "theme_metrics": pd.DataFrame(columns=CURRENT_RANKING_COLUMNS),
+            "rankings": pd.DataFrame(),
+        }
 
     preferred_source = preferred_theme_snapshot_source(conn)
     if not preferred_source:
@@ -336,12 +349,7 @@ def compute_theme_rankings(conn) -> pd.DataFrame:
             "delta_composite_score",
         ):
             rankings[col] = np.nan
-        rankings = rankings[rankings["eligible_composite_count"] >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS].copy()
-        rankings = rankings.sort_values(
-            ["composite_score", "positive_1m_breadth_pct", "eligible_composite_count", "theme"],
-            ascending=[False, False, False, True],
-        ).reset_index(drop=True)
-        return rankings
+        return {"theme_metrics": current, "rankings": _finalize_current_rankings(rankings)}
 
     prior = conn.execute(
         """
@@ -378,10 +386,8 @@ def compute_theme_rankings(conn) -> pd.DataFrame:
         rankings["positive_1m_breadth_pct"] - rankings["prev_positive_1m_breadth_pct"]
     ).round(2)
     rankings["delta_composite_score"] = (rankings["composite_score"] - rankings["prev_composite_score"]).round(2)
+    return {"theme_metrics": current, "rankings": _finalize_current_rankings(rankings)}
 
-    rankings = rankings[rankings["eligible_composite_count"] >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS].copy()
-    rankings = rankings.sort_values(
-        ["composite_score", "positive_1m_breadth_pct", "eligible_composite_count", "theme"],
-        ascending=[False, False, False, True],
-    ).reset_index(drop=True)
-    return rankings
+
+def compute_theme_rankings(conn) -> pd.DataFrame:
+    return compute_current_ranking_snapshot(conn)["rankings"]

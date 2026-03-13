@@ -12,7 +12,7 @@ from src.leaderboard_utils import (
 )
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.momentum_engine import compute_theme_momentum
-from src.rankings import compute_current_theme_metrics, compute_theme_rankings
+from src.rankings import compute_current_ranking_snapshot
 from src.queries import ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
 from src.theme_selection import (
     SELECTED_THEME_ID_KEY,
@@ -280,8 +280,9 @@ with explore_tab:
         st.session_state[SELECTED_THEME_SOURCE_KEY] = "default"
 
     with get_conn() as conn:
-        current_theme_metrics = compute_current_theme_metrics(conn)
-        current_rankings = compute_theme_rankings(conn)
+        current_snapshot = compute_current_ranking_snapshot(conn)
+        current_theme_metrics = current_snapshot["theme_metrics"]
+        current_rankings = current_snapshot["rankings"]
         momentum_1w = compute_theme_momentum(conn, 7, top_n=20)
         momentum_1m = compute_theme_momentum(conn, 30, top_n=20)
     leadership_df = build_current_leadership_table(current_rankings, top_k=12)
