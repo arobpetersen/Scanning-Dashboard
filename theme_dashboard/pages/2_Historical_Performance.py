@@ -8,6 +8,7 @@ from src.leaderboard_utils import build_window_leaderboard
 from src.momentum_engine import compute_theme_momentum
 from src.queries import theme_snapshot_history
 from src.rotation_engine import compute_theme_rotation
+from src.streamlit_utils import extract_selected_row
 from src.theme_selection import set_theme_selection_state
 from src.theme_service import list_themes, seed_if_needed
 
@@ -63,27 +64,6 @@ def _signal_reason_text(row: pd.Series) -> str:
         f"delta_composite {row.get('delta_composite', 0):+.2f}, "
         f"delta_breadth {row.get('delta_breadth', 0):+.2f}"
     )
-
-
-def _extract_selected_row(event) -> int | None:
-    selection = {}
-    if isinstance(event, dict):
-        selection = event.get("selection", {}) or {}
-    elif hasattr(event, "selection"):
-        selection = event.selection
-
-    rows = selection.get("rows", []) if isinstance(selection, dict) else getattr(selection, "rows", [])
-    for row in rows or []:
-        if row is not None:
-            return int(row)
-
-    cells = selection.get("cells", []) if isinstance(selection, dict) else getattr(selection, "cells", [])
-    for cell in cells or []:
-        if isinstance(cell, dict) and cell.get("row") is not None:
-            return int(cell["row"])
-        if hasattr(cell, "row") and getattr(cell, "row", None) is not None:
-            return int(getattr(cell, "row"))
-    return None
 
 
 def _open_theme_in_themes(theme_name: str, id_by_name: dict[str, int], label_by_name: dict[str, str], source: str) -> None:
@@ -266,7 +246,7 @@ leaders_event = st.dataframe(
     selection_mode="single-row",
     key="historical_momentum_leaderboard",
 )
-leader_idx = _extract_selected_row(leaders_event)
+leader_idx = extract_selected_row(leaders_event)
 if leader_idx is not None and 0 <= leader_idx < len(leaders_tbl):
     picked_theme = str(leaders_tbl.iloc[leader_idx]["theme"])
     if st.button(f"Open `{picked_theme}` in Themes detail", key="open_historical_momentum_theme"):
@@ -419,7 +399,7 @@ else:
         selection_mode="single-row",
         key="historical_signal_table",
     )
-    signal_idx = _extract_selected_row(signal_event)
+    signal_idx = extract_selected_row(signal_event)
     if signal_idx is not None and 0 <= signal_idx < len(signal_df):
         picked_theme = str(signal_df.iloc[signal_idx]["theme"])
         if st.button(f"Open signal theme `{picked_theme}` in Themes detail", key="open_historical_signal_theme"):
@@ -552,7 +532,7 @@ detail_event = st.dataframe(
     selection_mode="single-row",
     key="historical_detail_table",
 )
-detail_idx = _extract_selected_row(detail_event)
+detail_idx = extract_selected_row(detail_event)
 if detail_idx is not None and 0 <= detail_idx < len(detail_df):
     picked_theme = str(detail_df.iloc[detail_idx]["theme"])
     if st.button(f"Open detail theme `{picked_theme}` in Themes detail", key="open_historical_detail_theme"):

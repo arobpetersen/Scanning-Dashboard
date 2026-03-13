@@ -164,7 +164,7 @@ def run_refresh(
                     ).df()
                     if not prior_caps.empty:
                         payload = payload.merge(prior_caps, on="ticker", how="left", suffixes=("", "_prev"))
-                        payload["market_cap"] = payload["market_cap"].fillna(payload["market_cap_prev"])
+                        payload["market_cap"] = payload["market_cap"].combine_first(payload["market_cap_prev"])
                         payload = payload.drop(columns=["market_cap_prev"], errors="ignore")
                 payload["run_id"] = run_id
                 conn.register("incoming_snapshots", payload)

@@ -50,9 +50,6 @@ CURRENT_RANKING_COLUMNS = [
 ]
 
 
-CURRENT_RANKING_SNAPSHOT_KEYS = ["theme_metrics", "rankings"]
-
-
 def theme_confidence_factor(ticker_count: int | float) -> float:
     if pd.isna(ticker_count) or float(ticker_count) <= 0:
         return 0.0
@@ -316,11 +313,6 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
     return out[CURRENT_RANKING_COLUMNS]
 
 
-def compute_current_theme_metrics(conn) -> pd.DataFrame:
-    current_raw = _load_current_ranking_constituents(conn)
-    return _build_current_ranking_metrics(current_raw)
-
-
 def _finalize_current_rankings(current: pd.DataFrame) -> pd.DataFrame:
     rankings = current[current["eligible_composite_count"] >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS].copy()
     rankings = rankings.sort_values(
@@ -331,7 +323,9 @@ def _finalize_current_rankings(current: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_current_ranking_snapshot(conn) -> dict[str, pd.DataFrame]:
-    current = compute_current_theme_metrics(conn)
+    # Current trust surfaces all derive from one prepared latest-snapshot view so
+    # contributor eligibility and capped-return semantics stay consistent.
+    current = _build_current_ranking_metrics(_load_current_ranking_constituents(conn))
     if current.empty:
         return {
             "theme_metrics": pd.DataFrame(columns=CURRENT_RANKING_COLUMNS),

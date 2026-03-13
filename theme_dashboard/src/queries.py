@@ -169,6 +169,8 @@ def _historical_theme_snapshot_union(
     if combined.empty:
         return combined
 
+    # For any theme/date collision, prefer captured snapshots, then recent
+    # ticker-history-derived snapshots, then deeper reconstructed history.
     combined["snapshot_time"] = pd.to_datetime(combined["snapshot_time"])
     combined["snapshot_date"] = pd.to_datetime(combined["snapshot_date"]).dt.date
     combined["_precedence"] = combined["provenance_class"].map(
@@ -204,19 +206,6 @@ def _theme_confidence_factor_for_history(ticker_count: int | float) -> float:
     if pd.isna(ticker_count) or float(ticker_count) <= 0:
         return 0.0
     return min(1.0, (float(ticker_count) / float(THEME_CONFIDENCE_FULL_COUNT)) ** 0.5)
-
-
-def _compute_ticker_history_perf(history: pd.DataFrame) -> pd.DataFrame:
-    if history.empty:
-        return pd.DataFrame(columns=["ticker", "trading_date", "close", "perf_1w", "perf_1m", "perf_3m"])
-
-    enriched = history.sort_values(["ticker", "trading_date"]).copy()
-    enriched["trading_date"] = pd.to_datetime(enriched["trading_date"]).dt.date
-    grouped = enriched.groupby("ticker")["close"]
-    enriched["perf_1w"] = ((grouped.transform(lambda s: s / s.shift(5))) - 1.0) * 100.0
-    enriched["perf_1m"] = ((grouped.transform(lambda s: s / s.shift(21))) - 1.0) * 100.0
-    enriched["perf_3m"] = ((grouped.transform(lambda s: s / s.shift(63))) - 1.0) * 100.0
-    return enriched
 
 
 def _recent_ticker_history_theme_history(
@@ -780,38 +769,11 @@ def theme_history_last_n_snapshots(
     *,
     include_recent_ticker_history: bool = False,
 ) -> pd.DataFrame:
-    history = _historical_theme_snapshot_union(
+    return theme_snapshot_history(
         conn,
+        int(theme_id),
+        limit=snapshot_limit,
         include_recent_ticker_history=include_recent_ticker_history,
-        theme_id=int(theme_id),
-    )
-    if history.empty:
-        return pd.DataFrame()
-    view = history.copy()
-    if view.empty:
-        return view
-    return (
-        view[
-            [
-                "run_id",
-                "snapshot_time",
-                "theme_id",
-                "ticker_count",
-                "avg_1w",
-                "avg_1m",
-                "avg_3m",
-                "positive_1w_breadth_pct",
-                "positive_1m_breadth_pct",
-                "positive_3m_breadth_pct",
-                "composite_score",
-                "snapshot_source",
-                "provenance_class",
-                "provenance_source_label",
-            ]
-        ]
-        .sort_values(["snapshot_time", "run_id"], ascending=[False, False])
-        .head(snapshot_limit)
-        .reset_index(drop=True)
     )
 
 

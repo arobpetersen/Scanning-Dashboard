@@ -29,6 +29,7 @@ from src.queries import (
     theme_health_overview,
     theme_member_hygiene_context,
 )
+from src.streamlit_utils import extract_selected_row
 from src.suggestions_service import suggestion_status_counts
 from src.symbol_hygiene import (
     OVERRIDE_ACTIONS,
@@ -50,27 +51,6 @@ st.title("Health & Operations")
 
 def _display_placeholder(value) -> str:
     return "-" if value is None or value != value else str(value)
-
-
-def _extract_selected_row(event) -> int | None:
-    selection = {}
-    if isinstance(event, dict):
-        selection = event.get("selection", {}) or {}
-    elif hasattr(event, "selection"):
-        selection = event.selection
-
-    rows = selection.get("rows", []) if isinstance(selection, dict) else getattr(selection, "rows", [])
-    for row in rows or []:
-        if row is not None:
-            return int(row)
-
-    cells = selection.get("cells", []) if isinstance(selection, dict) else getattr(selection, "cells", [])
-    for cell in cells or []:
-        if isinstance(cell, dict) and cell.get("row") is not None:
-            return int(cell["row"])
-        if hasattr(cell, "row") and getattr(cell, "row", None) is not None:
-            return int(getattr(cell, "row"))
-    return None
 
 
 init_db()
@@ -112,10 +92,10 @@ with ops_tab:
         )
         d1, d2 = st.columns(2)
         with d1:
-            st.write(f"Latest theme snapshot: `{short_timestamp(state.get('latest_theme_snapshot_time')) or 'â€”'}`")
+            st.write(f"Latest theme snapshot: `{short_timestamp(state.get('latest_theme_snapshot_time')) or '-'}`")
             st.write(f"Recent theme sources: `{state.get('recent_theme_sources') or 'none'}`")
         with d2:
-            st.write(f"Latest ticker snapshot: `{short_timestamp(state.get('latest_ticker_snapshot_time')) or 'â€”'}`")
+            st.write(f"Latest ticker snapshot: `{short_timestamp(state.get('latest_ticker_snapshot_time')) or '-'}`")
             st.write(f"Recent ticker sources: `{state.get('recent_ticker_sources') or 'none'}`")
 
         theme_sets = int(state.get("theme_snapshot_sets") or 0)
@@ -453,7 +433,7 @@ with themes_tab:
             selection_mode="single-row",
             key="health_theme_table",
         )
-        picked_idx = _extract_selected_row(health_event)
+        picked_idx = extract_selected_row(health_event)
         view_reset = view.reset_index(drop=True)
         selected_theme_id = st.session_state.get("health_selected_theme_id")
         if picked_idx is not None and 0 <= picked_idx < len(view_reset):

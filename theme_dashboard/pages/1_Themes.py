@@ -14,6 +14,7 @@ from src.metric_formatting import display_or_dash, format_price, format_theme_ti
 from src.momentum_engine import compute_theme_momentum
 from src.rankings import compute_current_ranking_snapshot
 from src.queries import ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
+from src.streamlit_utils import extract_selected_row
 from src.theme_selection import (
     SELECTED_THEME_ID_KEY,
     SELECTED_THEME_LABEL_KEY,
@@ -50,38 +51,6 @@ if themes.empty:
 
 def _handled_selection_key(source: str) -> str:
     return f"{source}_handled_selection_token"
-
-
-def _extract_selected_row(event) -> int | None:
-    """Best-effort extraction of selected row index across Streamlit selection payload shapes."""
-    selection = {}
-    if isinstance(event, dict):
-        selection = event.get("selection", {}) or {}
-    elif hasattr(event, "selection"):
-        selection = event.selection
-
-    row_candidates = []
-
-    rows = selection.get("rows", []) if isinstance(selection, dict) else getattr(selection, "rows", [])
-    row_candidates.extend(rows or [])
-
-    cells = selection.get("cells", []) if isinstance(selection, dict) else getattr(selection, "cells", [])
-    for cell in cells or []:
-        if isinstance(cell, dict):
-            row_candidates.append(cell.get("row"))
-        elif isinstance(cell, (tuple, list)) and cell:
-            row_candidates.append(cell[0])
-        elif hasattr(cell, "row"):
-            row_candidates.append(getattr(cell, "row"))
-
-    for value in row_candidates:
-        if value is None:
-            continue
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            continue
-    return None
 
 
 def _build_historical_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tuple[object, str | None]:
@@ -123,7 +92,7 @@ def _render_leaderboard(title: str, key_prefix: str, leaderboard_df, label_by_id
         key=f"{key_prefix}_table",
     )
 
-    row_idx = _extract_selected_row(event)
+    row_idx = extract_selected_row(event)
     if row_idx is not None and 0 <= row_idx < len(leaderboard_df):
         picked_theme_id = int(leaderboard_df.iloc[row_idx]["theme_id"])
         picked_label = label_by_id.get(
@@ -203,7 +172,7 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str]) -> No
         selection_mode="single-cell",
         key="current_leadership_table",
     )
-    row_idx = _extract_selected_row(event)
+    row_idx = extract_selected_row(event)
     if row_idx is not None and 0 <= row_idx < len(leadership_df):
         picked_theme_id = int(leadership_df.iloc[row_idx]["theme_id"])
         picked_label = label_by_id.get(
@@ -244,7 +213,7 @@ def _render_current_performance(title: str, key_prefix: str, leaderboard_df, lab
         selection_mode="single-cell",
         key=f"{key_prefix}_current_table",
     )
-    row_idx = _extract_selected_row(event)
+    row_idx = extract_selected_row(event)
     if row_idx is not None and 0 <= row_idx < len(leaderboard_df):
         picked_theme_id = int(leaderboard_df.iloc[row_idx]["theme_id"])
         picked_label = label_by_id.get(

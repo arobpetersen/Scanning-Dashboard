@@ -199,6 +199,32 @@ class TestHistoricalBackfill(unittest.TestCase):
         conn = self._conn()
         conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
         conn.execute("insert into themes(id, name, category, is_active) values (2, 'Energy', 'Macro', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'MSFT')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAPL')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'XOM')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'CVX')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'SLB')")
+        conn.execute(
+            """
+            insert into refresh_runs(run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count) values
+            (1, 'live', '2026-03-11 20:00:00', '2026-03-11 22:00:00', 'success', 6, 6, 0)
+            """
+        )
+        conn.execute(
+            """
+            insert into ticker_snapshots(
+                run_id, ticker, price, perf_1w, perf_1m, perf_3m,
+                market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated, snapshot_source
+            ) values
+            (1, 'NVDA', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-11 21:00:00', 'live'),
+            (1, 'MSFT', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-11 21:00:00', 'live'),
+            (1, 'AAPL', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-11 21:00:00', 'live'),
+            (1, 'XOM', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-11 21:00:00', 'live'),
+            (1, 'CVX', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-11 21:00:00', 'live'),
+            (1, 'SLB', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-11 21:00:00', 'live')
+            """
+        )
         conn.execute(
             """
             insert into theme_snapshots(
@@ -225,7 +251,7 @@ class TestHistoricalBackfill(unittest.TestCase):
 
         rankings = compute_theme_rankings(conn)
         self.assertEqual(rankings.iloc[0]["theme"], "AI")
-        self.assertEqual(float(rankings.iloc[0]["composite_score"]), 10.0)
+        self.assertEqual(float(rankings.iloc[0]["avg_1m"]), 2.0)
         conn.close()
 
     def test_ticker_history_readiness_handles_no_rows(self):
