@@ -66,6 +66,19 @@ def _signal_reason_text(row: pd.Series) -> str:
     )
 
 
+def _history_depth_quality(window_meta: dict, summary: pd.DataFrame) -> str:
+    snapshot_count = int(window_meta.get("boundary_snapshot_count") or 0)
+    provenance_mix = str(window_meta.get("provenance_mix") or "unknown")
+    collapsed = bool(window_meta.get("collapsed_to_available_history"))
+    theme_count = int(summary.shape[0]) if not summary.empty else 0
+
+    if snapshot_count < 2 or theme_count == 0:
+        return "Too shallow"
+    if collapsed or "mixed" in provenance_mix or "reconstructed" in provenance_mix:
+        return "Mixed"
+    return "Good"
+
+
 def _open_theme_in_themes(theme_name: str, id_by_name: dict[str, int], label_by_name: dict[str, str], source: str) -> None:
     if theme_name not in id_by_name:
         st.warning(f"Unable to open `{theme_name}` in Themes because it is not present in the current theme registry.")
@@ -192,16 +205,27 @@ rotation = compute_theme_rotation(summary, analysis_top_n, momentum["new_leaders
 with get_conn() as conn:
     inflections = compute_theme_inflections(conn, int(lookback_days), top_n=analysis_top_n)
 window_meta = momentum.get("meta", {})
+history_depth_quality = _history_depth_quality(window_meta, summary)
 
-w1, w2, w3 = st.columns(3)
-w1.metric("Window start", str(pd.to_datetime(window_meta.get("window_start")).strftime("%Y-%m-%d")) if window_meta.get("window_start") is not None else "-")
-w2.metric("Window end", str(pd.to_datetime(window_meta.get("window_end")).strftime("%Y-%m-%d")) if window_meta.get("window_end") is not None else "-")
+w1, w2, w3, w4 = st.columns(4)
+w1.metric("Effective window start", str(pd.to_datetime(window_meta.get("window_start")).strftime("%Y-%m-%d")) if window_meta.get("window_start") is not None else "-")
+w2.metric("Effective window end", str(pd.to_datetime(window_meta.get("window_end")).strftime("%Y-%m-%d")) if window_meta.get("window_end") is not None else "-")
 w3.metric("Boundary snapshots", int(window_meta.get("boundary_snapshot_count") or 0))
+w4.metric("History depth quality", history_depth_quality)
+
+c1, c2 = st.columns([2, 1])
+with c1:
+    st.caption(
+        f"Resolved boundary provenance: `{window_meta.get('boundary_provenance_mix') or 'unknown'}` | "
+        f"overall window provenance: `{window_meta.get('provenance_mix') or 'unknown'}`"
+    )
+with c2:
+    st.caption(f"Themes analyzed: `{int(summary.shape[0])}`")
+
 st.caption(
-    f"Resolved boundary provenance: `{window_meta.get('boundary_provenance_mix') or 'unknown'}` | "
-    f"overall window provenance: `{window_meta.get('provenance_mix') or 'unknown'}`"
+    "Use this strip to judge window trust before reading the tables below. "
+    "Shallow or mixed windows are still useful for audit, but less trustworthy for strong inference."
 )
-st.caption("Treat the outputs below as conditional on this resolved window shape and provenance mix. Shallow or mixed windows are useful for audit, but less trustworthy for strong inference.")
 if window_meta.get("collapsed_to_available_history"):
     st.info(
         f"Selected {int(window_meta.get('requested_lookback_days') or 0)}d lookback currently resolves to an effective "
@@ -215,12 +239,6 @@ if any(
         "Historical movement windows may use captured theme history, reconstructed theme history, or recent ticker-history-derived reconstruction. "
         "Non-captured history applies current governed membership to historical market data and is not a true point-in-time membership record."
     )
-
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Themes in window", int(summary.shape[0]))
-m2.metric("New leaders", len(momentum["new_leaders"]))
-m3.metric("Dropped leaders", len(momentum["dropped_leaders"]))
-m4.metric("Rotation intensity", f"{rotation['rotation_intensity']['rotation_intensity_score']:.1f}")
 
 st.subheader("Most Improving Themes In This Window")
 leaders_tbl = summary.sort_values(["momentum_score", "delta_composite", "rank_change"], ascending=[False, False, False]).head(10).copy()
