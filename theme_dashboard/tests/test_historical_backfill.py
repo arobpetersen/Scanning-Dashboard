@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import duckdb
 import pandas as pd
@@ -6,7 +7,12 @@ import pandas as pd
 from src.database import SCHEMA_SQL
 from src.historical_backfill import reconstruct_theme_history_range
 from src.momentum_engine import compute_theme_momentum
-from src.queries import classify_ticker_history_readiness, theme_history_window, ticker_history_readiness
+from src.queries import (
+    classify_ticker_history_readiness,
+    theme_history_window,
+    theme_snapshot_history,
+    ticker_history_readiness,
+)
 from src.rankings import compute_theme_rankings
 from src.ticker_history import persist_ticker_daily_history, ticker_daily_history_rows
 
@@ -396,6 +402,81 @@ class TestHistoricalBackfill(unittest.TestCase):
 
         self.assertFalse(same_day.empty)
         self.assertEqual(str(same_day.iloc[0]["provenance_class"]), "captured")
+        conn.close()
+
+    def test_theme_snapshot_history_default_path_skips_recent_ticker_history_reconstruction(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAA')")
+        conn.execute(
+            """
+            insert into theme_snapshots(
+                run_id, snapshot_time, theme_id, ticker_count,
+                avg_1w, avg_1m, avg_3m,
+                positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                composite_score, snapshot_source
+            ) values
+            (1, '2026-03-11 22:00:00', 1, 1, 1, 2, 3, 40, 50, 60, 10, 'live')
+            """
+        )
+        dates = pd.bdate_range("2026-01-05", periods=70)
+        history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 100 + idx, "volume": 1000 + idx} for idx, ts in enumerate(dates)]
+        )
+        persist_ticker_daily_history(conn, history, ticker="AAA", provenance_source_label="daily_historical_append", market_data_source="live")
+
+        out = theme_snapshot_history(conn, 1, limit=50)
+
+        self.assertFalse(out.empty)
+        self.assertEqual(set(out["provenance_class"].astype(str)), {"captured"})
+        conn.close()
+
+    def test_theme_snapshot_history_can_opt_into_recent_ticker_history_reconstruction(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAA')")
+
+        dates = pd.bdate_range("2026-01-05", periods=70)
+        history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 100 + idx, "volume": 1000 + idx} for idx, ts in enumerate(dates)]
+        )
+        persist_ticker_daily_history(conn, history, ticker="AAA", provenance_source_label="daily_historical_append", market_data_source="live")
+
+        default_out = theme_snapshot_history(conn, 1, limit=50)
+        opted_in = theme_snapshot_history(conn, 1, limit=50, include_recent_ticker_history=True)
+
+        self.assertTrue(default_out.empty)
+        self.assertFalse(opted_in.empty)
+        self.assertIn("ticker_history_derived", set(opted_in["provenance_class"].astype(str)))
+        conn.close()
+
+    def test_recent_ticker_history_reconstruction_kill_switch_preserves_reconstructed_fallback(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAA')")
+        conn.execute(
+            """
+            insert into reconstructed_theme_snapshots(
+                run_id, snapshot_date, snapshot_time, theme_id, ticker_count,
+                avg_1w, avg_1m, avg_3m,
+                positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                composite_score, provenance_class, provenance_source_label, market_data_source, membership_basis
+            ) values
+            (101, '2026-03-10', '2026-03-10 00:00:00', 1, 1, 1, 2, 3, 50, 60, 70, 2, 'reconstructed', 'historical_backfill', 'live', 'current_governed_membership'),
+            (102, '2026-03-11', '2026-03-11 00:00:00', 1, 1, 2, 3, 4, 55, 65, 75, 3, 'reconstructed', 'historical_backfill', 'live', 'current_governed_membership')
+            """
+        )
+        dates = pd.bdate_range("2026-01-05", periods=70)
+        history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 100 + idx, "volume": 1000 + idx} for idx, ts in enumerate(dates)]
+        )
+        persist_ticker_daily_history(conn, history, ticker="AAA", provenance_source_label="daily_historical_append", market_data_source="live")
+
+        with patch("src.queries.ENABLE_RECENT_TICKER_HISTORY_PREFERRED_RECONSTRUCTION", False):
+            out = theme_history_window(conn, 30)
+
+        self.assertFalse(out.empty)
+        self.assertEqual(set(out["provenance_class"].astype(str)), {"reconstructed"})
         conn.close()
 
 

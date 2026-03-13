@@ -573,7 +573,7 @@ else:
                 break
     sel = st.selectbox("Theme", labels, index=default_index)
     with get_conn() as conn:
-        single = theme_snapshot_history(conn, options[sel], limit=250)
+        single = theme_snapshot_history(conn, options[sel], limit=250, include_recent_ticker_history=True)
     if single.empty:
         st.info("No history for selected theme.")
     else:

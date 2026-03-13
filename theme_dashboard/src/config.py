@@ -37,6 +37,10 @@ COMPOSITE_WEIGHTS = {
 }
 
 THEME_CONFIDENCE_FULL_COUNT = 8
+ENABLE_RECENT_TICKER_HISTORY_PREFERRED_RECONSTRUCTION = os.getenv(
+    "ENABLE_RECENT_TICKER_HISTORY_PREFERRED_RECONSTRUCTION",
+    "1",
+).strip().lower() not in {"0", "false", "no"}
 
 
 def massive_api_key() -> str | None:
