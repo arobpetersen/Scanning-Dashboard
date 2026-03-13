@@ -74,6 +74,7 @@ def _historical_theme_snapshot_union(
     include_recent_ticker_history: bool = False,
     theme_id: int | None = None,
     start_date: object | None = None,
+    prefer_recent_ticker_history: bool = False,
 ) -> pd.DataFrame:
     preferred_source = preferred_theme_snapshot_source(conn) or _preferred_ticker_history_source(conn)
     if not preferred_source:
@@ -173,9 +174,10 @@ def _historical_theme_snapshot_union(
     # ticker-history-derived snapshots, then deeper reconstructed history.
     combined["snapshot_time"] = pd.to_datetime(combined["snapshot_time"])
     combined["snapshot_date"] = pd.to_datetime(combined["snapshot_date"]).dt.date
-    combined["_precedence"] = combined["provenance_class"].map(
-        {"captured": 0, "ticker_history_derived": 1, "reconstructed": 2}
-    ).fillna(9)
+    precedence_map = {"captured": 0, "ticker_history_derived": 1, "reconstructed": 2}
+    if include_recent_ticker_history and prefer_recent_ticker_history:
+        precedence_map = {"ticker_history_derived": 0, "captured": 1, "reconstructed": 2}
+    combined["_precedence"] = combined["provenance_class"].map(precedence_map).fillna(9)
     combined = (
         combined.sort_values(["theme_id", "snapshot_date", "_precedence", "snapshot_time"], ascending=[True, True, True, False])
         .drop_duplicates(subset=["theme_id", "snapshot_date"], keep="first")
@@ -184,6 +186,49 @@ def _historical_theme_snapshot_union(
         .reset_index(drop=True)
     )
     return combined
+
+
+def _recent_movement_theme_snapshot_union(
+    conn,
+    *,
+    theme_id: int | None = None,
+    start_date: object | None = None,
+) -> pd.DataFrame:
+    """Build the recent movement window with ticker-history-derived rows preferred over captured rows when available."""
+    return _historical_theme_snapshot_union(
+        conn,
+        include_recent_ticker_history=True,
+        theme_id=theme_id,
+        start_date=start_date,
+        prefer_recent_ticker_history=True,
+    )
+
+
+def _resolve_recent_movement_boundaries(history: pd.DataFrame, lookback_days: int) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    if history.empty:
+        return None, None
+
+    snapshot_times = pd.to_datetime(history["snapshot_time"]).dropna()
+    if snapshot_times.empty:
+        return None, None
+
+    # When recent ticker-history-derived rows are available, anchor the
+    # movement window to that last fully derived trading day instead of a
+    # newer captured-only snapshot that cannot be reproduced from persisted
+    # daily history yet.
+    derived_times = pd.to_datetime(
+        history.loc[history["provenance_class"].astype(str) == "ticker_history_derived", "snapshot_time"]
+    ).dropna()
+    end_time = derived_times.max() if not derived_times.empty else snapshot_times.max()
+
+    eligible_times = snapshot_times[snapshot_times <= end_time].drop_duplicates().sort_values()
+    if eligible_times.empty:
+        return None, None
+
+    target_start = end_time - pd.Timedelta(days=int(lookback_days))
+    start_candidates = eligible_times[eligible_times <= target_start]
+    start_time = start_candidates.iloc[-1] if not start_candidates.empty else eligible_times.iloc[0]
+    return start_time, end_time
 
 
 def _preferred_ticker_history_source(conn) -> str | None:
@@ -582,25 +627,264 @@ def theme_snapshot_history(
     )
 
 
+def historical_theme_boundary_debug(conn, theme_id: int, lookback_days: int) -> dict[str, object]:
+    boundary_history = _recent_movement_theme_snapshot_union(conn)
+    if boundary_history.empty:
+        return {
+            "resolved_window_start": None,
+            "resolved_window_end": None,
+            "boundary_summary": pd.DataFrame(),
+            "candidate_rows": pd.DataFrame(),
+        }
+
+    start_time, end_time = _resolve_recent_movement_boundaries(boundary_history, int(lookback_days))
+    if start_time is None or end_time is None:
+        return {
+            "resolved_window_start": None,
+            "resolved_window_end": None,
+            "boundary_summary": pd.DataFrame(),
+            "candidate_rows": pd.DataFrame(),
+        }
+
+    theme_window = _recent_movement_theme_snapshot_union(conn, theme_id=int(theme_id), start_date=start_time)
+    if theme_window.empty:
+        return {
+            "resolved_window_start": start_time,
+            "resolved_window_end": end_time,
+            "boundary_summary": pd.DataFrame(),
+            "candidate_rows": pd.DataFrame(),
+        }
+
+    theme_window = theme_window[
+        (pd.to_datetime(theme_window["snapshot_time"]) >= start_time)
+        & (pd.to_datetime(theme_window["snapshot_time"]) <= end_time)
+    ].copy()
+    if theme_window.empty:
+        return {
+            "resolved_window_start": start_time,
+            "resolved_window_end": end_time,
+            "boundary_summary": pd.DataFrame(),
+            "candidate_rows": pd.DataFrame(),
+        }
+
+    preferred_source = preferred_theme_snapshot_source(conn) or _preferred_ticker_history_source(conn)
+    candidate_frames: list[pd.DataFrame] = []
+    boundary_dates = [pd.Timestamp(start_time).date(), pd.Timestamp(end_time).date()]
+    boundary_map = {
+        pd.Timestamp(start_time).date(): "start",
+        pd.Timestamp(end_time).date(): "end",
+    }
+
+    captured = conn.execute(
+        """
+        SELECT
+            ts.run_id,
+            CAST(ts.snapshot_time AS DATE) AS snapshot_date,
+            ts.snapshot_time,
+            ts.theme_id,
+            ts.ticker_count,
+            ts.avg_1w,
+            ts.avg_1m,
+            ts.avg_3m,
+            ts.composite_score,
+            'captured' AS provenance_class,
+            ts.snapshot_source AS provenance_source_label,
+            ts.snapshot_source AS market_data_source
+        FROM theme_snapshots ts
+        WHERE ts.theme_id = ?
+          AND ts.snapshot_source = ?
+          AND CAST(ts.snapshot_time AS DATE) IN (?, ?)
+        """,
+        [int(theme_id), preferred_source, *boundary_dates],
+    ).df()
+    if not captured.empty:
+        candidate_frames.append(captured)
+
+    if _table_exists(conn, "reconstructed_theme_snapshots"):
+        reconstructed = conn.execute(
+            """
+            SELECT
+                r.run_id,
+                r.snapshot_date,
+                r.snapshot_time,
+                r.theme_id,
+                r.ticker_count,
+                r.avg_1w,
+                r.avg_1m,
+                r.avg_3m,
+                r.composite_score,
+                r.provenance_class,
+                r.provenance_source_label,
+                r.market_data_source
+            FROM reconstructed_theme_snapshots r
+            WHERE r.theme_id = ?
+              AND r.market_data_source = ?
+              AND r.snapshot_date IN (?, ?)
+            """,
+            [int(theme_id), preferred_source, *boundary_dates],
+        ).df()
+        if not reconstructed.empty:
+            candidate_frames.append(reconstructed)
+
+    if ENABLE_RECENT_TICKER_HISTORY_PREFERRED_RECONSTRUCTION:
+        ticker_history_derived = _recent_ticker_history_theme_history(
+            conn,
+            preferred_source,
+            theme_id=int(theme_id),
+            start_date=start_time,
+        )
+        if not ticker_history_derived.empty:
+            ticker_history_derived = ticker_history_derived[
+                pd.to_datetime(ticker_history_derived["snapshot_date"]).dt.date.isin(boundary_dates)
+            ].copy()
+            ticker_history_derived["market_data_source"] = ticker_history_derived["snapshot_source"]
+            if not ticker_history_derived.empty:
+                candidate_frames.append(
+                    ticker_history_derived[
+                        [
+                            "run_id",
+                            "snapshot_date",
+                            "snapshot_time",
+                            "theme_id",
+                            "ticker_count",
+                            "avg_1w",
+                            "avg_1m",
+                            "avg_3m",
+                            "composite_score",
+                            "provenance_class",
+                            "provenance_source_label",
+                            "market_data_source",
+                        ]
+                    ]
+                )
+
+    candidate_rows = pd.concat(candidate_frames, ignore_index=True) if candidate_frames else pd.DataFrame()
+    if candidate_rows.empty:
+        return {
+            "resolved_window_start": start_time,
+            "resolved_window_end": end_time,
+            "boundary_summary": pd.DataFrame(),
+            "candidate_rows": pd.DataFrame(),
+        }
+
+    candidate_rows["snapshot_time"] = pd.to_datetime(candidate_rows["snapshot_time"], errors="coerce")
+    candidate_rows["snapshot_date"] = pd.to_datetime(candidate_rows["snapshot_date"]).dt.date
+    candidate_rows["precedence_rank"] = candidate_rows["provenance_class"].map(
+        {"ticker_history_derived": 0, "captured": 1, "reconstructed": 2}
+    ).fillna(9)
+    candidate_rows["boundary_label"] = candidate_rows["snapshot_date"].map(boundary_map).fillna("other")
+
+    winners = theme_window[pd.to_datetime(theme_window["snapshot_time"]).isin([start_time, end_time])].copy()
+    winners["snapshot_time"] = pd.to_datetime(winners["snapshot_time"], errors="coerce")
+    winners["snapshot_date"] = pd.to_datetime(winners["snapshot_time"]).dt.date
+    winners["boundary_label"] = winners["snapshot_date"].map(boundary_map).fillna("other")
+    winners = winners.rename(
+        columns={
+            "provenance_class": "winner_provenance_class",
+            "provenance_source_label": "winner_provenance_source_label",
+            "snapshot_source": "winner_market_data_source",
+        }
+    )
+
+    candidate_rows = candidate_rows.merge(
+        winners[
+            [
+                "snapshot_date",
+                "boundary_label",
+                "winner_provenance_class",
+                "winner_provenance_source_label",
+                "winner_market_data_source",
+            ]
+        ],
+        on=["snapshot_date", "boundary_label"],
+        how="left",
+    )
+    candidate_rows["selected"] = (
+        (candidate_rows["provenance_class"] == candidate_rows["winner_provenance_class"])
+        & (candidate_rows["provenance_source_label"] == candidate_rows["winner_provenance_source_label"])
+    )
+    candidate_rows["suppression_honored"] = candidate_rows["provenance_class"].map(
+        {
+            "captured": "unknown/legacy row",
+            "ticker_history_derived": "yes",
+            "reconstructed": "yes",
+        }
+    ).fillna("unknown")
+
+    boundary_summary_rows: list[dict[str, object]] = []
+    for boundary_date, boundary_label in boundary_map.items():
+        boundary_candidates = candidate_rows[candidate_rows["snapshot_date"] == boundary_date].copy()
+        winner = winners[winners["snapshot_date"] == boundary_date]
+        winner_row = winner.iloc[0] if not winner.empty else None
+        boundary_summary_rows.append(
+            {
+                "boundary_label": boundary_label,
+                "resolved_snapshot_date": boundary_date,
+                "resolved_snapshot_time": winner_row["snapshot_time"] if winner_row is not None else None,
+                "winner_provenance_class": winner_row["winner_provenance_class"] if winner_row is not None else None,
+                "winner_provenance_source_label": winner_row["winner_provenance_source_label"] if winner_row is not None else None,
+                "winner_market_data_source": winner_row["winner_market_data_source"] if winner_row is not None else None,
+                "captured_candidate_exists": bool((boundary_candidates["provenance_class"] == "captured").any()),
+                "ticker_history_derived_candidate_exists": bool((boundary_candidates["provenance_class"] == "ticker_history_derived").any()),
+                "reconstructed_candidate_exists": bool((boundary_candidates["provenance_class"] == "reconstructed").any()),
+                "reconstructed_overridden": bool(
+                    (boundary_candidates["provenance_class"] == "reconstructed").any()
+                    and not (boundary_candidates["selected"] & (boundary_candidates["provenance_class"] == "reconstructed")).any()
+                ),
+                "ticker_history_derived_overridden": bool(
+                    (boundary_candidates["provenance_class"] == "ticker_history_derived").any()
+                    and not (boundary_candidates["selected"] & (boundary_candidates["provenance_class"] == "ticker_history_derived")).any()
+                ),
+                "suppression_honored_in_winner": (
+                    {
+                        "captured": "unknown/legacy row",
+                        "ticker_history_derived": "yes",
+                        "reconstructed": "yes",
+                    }.get(winner_row["winner_provenance_class"], "unknown")
+                    if winner_row is not None
+                    else "unknown"
+                ),
+            }
+        )
+
+    boundary_summary = pd.DataFrame(boundary_summary_rows)
+    candidate_rows = candidate_rows[
+        [
+            "boundary_label",
+            "snapshot_date",
+            "snapshot_time",
+            "provenance_class",
+            "provenance_source_label",
+            "market_data_source",
+            "ticker_count",
+            "avg_1w",
+            "avg_1m",
+            "avg_3m",
+            "composite_score",
+            "precedence_rank",
+            "selected",
+            "suppression_honored",
+        ]
+    ].sort_values(["snapshot_date", "precedence_rank", "snapshot_time"], ascending=[True, True, False]).reset_index(drop=True)
+
+    return {
+        "resolved_window_start": start_time,
+        "resolved_window_end": end_time,
+        "boundary_summary": boundary_summary,
+        "candidate_rows": candidate_rows,
+    }
+
+
 def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
-    boundary_history = _historical_theme_snapshot_union(conn, include_recent_ticker_history=True)
+    boundary_history = _recent_movement_theme_snapshot_union(conn)
     if boundary_history.empty:
         return pd.DataFrame()
 
-    boundary_times = pd.to_datetime(boundary_history["snapshot_time"]).dropna().drop_duplicates().sort_values()
-    if boundary_times.empty:
+    start_time, end_time = _resolve_recent_movement_boundaries(boundary_history, int(lookback_days))
+    if start_time is None or end_time is None:
         return pd.DataFrame()
 
-    end_time = boundary_times.iloc[-1]
-    target_start = end_time - pd.Timedelta(days=int(lookback_days))
-    start_candidates = boundary_times[boundary_times <= target_start]
-    start_time = start_candidates.iloc[-1] if not start_candidates.empty else boundary_times.iloc[0]
-
-    history = _historical_theme_snapshot_union(
-        conn,
-        include_recent_ticker_history=True,
-        start_date=start_time,
-    )
+    history = _recent_movement_theme_snapshot_union(conn, start_date=start_time)
     if history.empty:
         return pd.DataFrame()
 

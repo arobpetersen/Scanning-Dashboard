@@ -6,7 +6,7 @@ from src.database import get_conn, init_db
 from src.inflection_engine import compute_theme_inflections
 from src.leaderboard_utils import build_window_leaderboard
 from src.momentum_engine import compute_theme_momentum
-from src.queries import theme_snapshot_history
+from src.queries import historical_theme_boundary_debug, theme_snapshot_history
 from src.rotation_engine import compute_theme_rotation
 from src.streamlit_utils import extract_selected_row
 from src.theme_selection import set_theme_selection_state
@@ -538,7 +538,7 @@ with st.expander("Advanced historical diagnostics", expanded=False):
             with st.expander("Why these themes are marked Weakening"):
                 st.dataframe(weak_reasons[["theme", "trigger_reason"]], width="stretch")
 
-st.subheader("Single Theme History")
+st.subheader("Single Theme Historical Snapshot Detail")
 if themes.empty:
     st.info("No themes found.")
 else:
@@ -552,20 +552,61 @@ else:
                 default_index = i
                 break
     sel = st.selectbox("Theme", labels, index=default_index)
+    st.caption(
+        "Historical table basis: resolved historical snapshot window above. "
+        "Detail basis below: historical theme snapshot rows for the selected theme, not a current/live constituent member table."
+    )
+    st.caption(
+        "If you want current/live constituent rows for this theme, use the Themes page. "
+        "This section is for historical theme-level snapshot behavior across time."
+    )
     with get_conn() as conn:
         single = theme_snapshot_history(conn, options[sel], limit=250, include_recent_ticker_history=True)
+        boundary_debug = historical_theme_boundary_debug(conn, options[sel], int(lookback_days))
     if single.empty:
         st.info("No history for selected theme.")
     else:
         single = single.sort_values("snapshot_time")
         single_points = int(single["snapshot_time"].nunique())
+        d1, d2 = st.columns(2)
+        d1.metric("Detail basis", "Historical snapshots")
+        d2.metric("Constituent basis", "Not current/live members")
         if single_points < 2:
             st.caption(
                 f"Selected theme currently has {single_points} snapshot point(s). "
                 "At least 2 are needed for meaningful before/after comparison."
             )
+        st.caption(
+            "These rows summarize the theme at each historical snapshot boundary. "
+            "They should not be compared directly to a current/live member tape as if both describe the same time basis."
+        )
         st.line_chart(single.set_index("snapshot_time")[["composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct"]])
         st.dataframe(single, width="stretch")
+        with st.expander("Debug: Historical Source Lineage", expanded=False):
+            st.caption(
+                "Use this to verify which layer actually drove the selected theme's resolved historical boundary rows for the current lookback window."
+            )
+            st.caption(
+                f"Resolved boundary window: `{pd.to_datetime(boundary_debug.get('resolved_window_start')).strftime('%Y-%m-%d') if boundary_debug.get('resolved_window_start') is not None else '-'}` "
+                f"to `{pd.to_datetime(boundary_debug.get('resolved_window_end')).strftime('%Y-%m-%d') if boundary_debug.get('resolved_window_end') is not None else '-'}`"
+            )
+            boundary_summary = boundary_debug.get("boundary_summary", pd.DataFrame())
+            if boundary_summary.empty:
+                st.info("No boundary lineage rows are available for this selected theme/window.")
+            else:
+                st.dataframe(boundary_summary, width="stretch", hide_index=True)
+                winners = boundary_summary["winner_provenance_class"].dropna().astype(str).tolist()
+                if winners:
+                    st.caption(f"Displayed boundary driver(s): `{', '.join(winners)}`")
+            candidate_rows = boundary_debug.get("candidate_rows", pd.DataFrame())
+            if not candidate_rows.empty:
+                st.caption(
+                    "Candidate rows below include same-date source layers that either won precedence (`selected=True`) or were overridden by a higher-precedence row."
+                )
+                st.dataframe(candidate_rows, width="stretch", hide_index=True)
+        selected_theme_name = sel.split(" (", 1)[0]
+        if st.button(f"Open current/live constituent view for `{selected_theme_name}`", key="open_historical_theme_current_view"):
+            _open_theme_in_themes(selected_theme_name, theme_id_by_name, theme_label_by_name, "historical_detail")
 
 with st.expander("Momentum score formula (deterministic)"):
     st.code(

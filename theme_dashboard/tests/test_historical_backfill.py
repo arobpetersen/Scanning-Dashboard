@@ -9,6 +9,7 @@ from src.historical_backfill import rebuild_recent_reconstructed_history, recons
 from src.momentum_engine import compute_theme_momentum
 from src.queries import (
     classify_ticker_history_readiness,
+    historical_theme_boundary_debug,
     theme_history_window,
     theme_snapshot_history,
     ticker_history_readiness,
@@ -616,7 +617,7 @@ class TestHistoricalBackfill(unittest.TestCase):
         self.assertEqual(int(second_row[0]), 2)
         conn.close()
 
-    def test_captured_history_still_wins_over_ticker_history_derived_on_same_date(self):
+    def test_recent_movement_history_prefers_ticker_history_derived_over_captured_on_same_date(self):
         conn = self._conn()
         conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
         conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAA')")
@@ -638,6 +639,76 @@ class TestHistoricalBackfill(unittest.TestCase):
         persist_ticker_daily_history(conn, history, ticker="AAA", provenance_source_label="daily_historical_append", market_data_source="live")
 
         out = theme_history_window(conn, 30)
+        same_day = out[pd.to_datetime(out["snapshot_time"]).dt.date.astype(str) == "2026-03-11"]
+        debug = historical_theme_boundary_debug(conn, 1, 30)
+
+        self.assertFalse(same_day.empty)
+        self.assertEqual(str(same_day.iloc[0]["provenance_class"]), "ticker_history_derived")
+        self.assertEqual(
+            str(
+                debug["boundary_summary"]
+                .loc[debug["boundary_summary"]["boundary_label"] == "end", "winner_provenance_class"]
+                .iloc[0]
+            ),
+            "ticker_history_derived",
+        )
+        conn.close()
+
+    def test_recent_movement_window_anchors_to_latest_derived_boundary_when_captured_is_newer(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAA')")
+        conn.execute(
+            """
+            insert into theme_snapshots(
+                run_id, snapshot_time, theme_id, ticker_count,
+                avg_1w, avg_1m, avg_3m,
+                positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                composite_score, snapshot_source
+            ) values
+            (1, '2026-03-13 08:42:50', 1, 1, 9, 9, 9, 90, 90, 90, 99, 'live')
+            """
+        )
+        dates = pd.bdate_range("2025-12-15", periods=64)
+        history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 100 + idx, "volume": 1000 + idx} for idx, ts in enumerate(dates)]
+        )
+        persist_ticker_daily_history(conn, history, ticker="AAA", provenance_source_label="daily_historical_append", market_data_source="live")
+
+        out = theme_history_window(conn, 7)
+        debug = historical_theme_boundary_debug(conn, 1, 7)
+
+        boundary_times = pd.to_datetime(out["snapshot_time"]).dropna().drop_duplicates().sort_values()
+        self.assertFalse(out.empty)
+        self.assertEqual(str(boundary_times.iloc[-1].date()), "2026-03-12")
+        self.assertNotIn("2026-03-13", pd.to_datetime(out["snapshot_time"]).dt.date.astype(str).tolist())
+        end_boundary = debug["boundary_summary"][debug["boundary_summary"]["boundary_label"] == "end"].iloc[0]
+        self.assertEqual(str(pd.Timestamp(debug["resolved_window_end"]).date()), "2026-03-12")
+        self.assertEqual(str(end_boundary["winner_provenance_class"]), "ticker_history_derived")
+        conn.close()
+
+    def test_theme_snapshot_history_still_prefers_captured_over_ticker_history_derived_on_same_date(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAA')")
+        conn.execute(
+            """
+            insert into theme_snapshots(
+                run_id, snapshot_time, theme_id, ticker_count,
+                avg_1w, avg_1m, avg_3m,
+                positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                composite_score, snapshot_source
+            ) values
+            (1, '2026-03-11 22:00:00', 1, 1, 1, 2, 3, 40, 50, 60, 10, 'live')
+            """
+        )
+        dates = pd.bdate_range("2026-01-05", periods=70)
+        history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 100 + idx, "volume": 1000 + idx} for idx, ts in enumerate(dates)]
+        )
+        persist_ticker_daily_history(conn, history, ticker="AAA", provenance_source_label="daily_historical_append", market_data_source="live")
+
+        out = theme_snapshot_history(conn, 1, limit=50, include_recent_ticker_history=True)
         same_day = out[pd.to_datetime(out["snapshot_time"]).dt.date.astype(str) == "2026-03-11"]
 
         self.assertFalse(same_day.empty)

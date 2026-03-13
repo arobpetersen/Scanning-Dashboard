@@ -482,6 +482,9 @@ with themes_tab:
                 failed_count = int(member_rows["last_failure_at"].notna().sum()) if "last_failure_at" in member_rows.columns else 0
                 st.metric("Members with recent failures", failed_count)
                 member_view = member_rows.copy()
+                member_view["calculation_status"] = member_rows["symbol_hygiene_status"].apply(
+                    lambda value: "Suppressed" if str(value or "").strip().lower() == "refresh_suppressed" else "Active"
+                )
                 member_view["last_failure_category"] = member_view["last_failure_category"].map(_display_placeholder)
                 member_view["last_failure_at"] = member_view["last_failure_at"].apply(lambda v: short_timestamp(v) or "-")
                 member_view["consecutive_failure_count"] = member_view["consecutive_failure_count"].map(_display_placeholder)
@@ -496,22 +499,29 @@ with themes_tab:
                         options=members,
                         help="This changes calculation eligibility only. Theme membership remains intact.",
                     )
-                    suppression_action = st.selectbox(
-                        "Action",
-                        options=["Suppress from calculations", "Return to active calculations"],
-                        help="Suppressed tickers stay visible in membership and health views, but are excluded from refresh, ranking, and movement calculations.",
+                    selected_member_row = member_rows[member_rows["ticker"] == suppression_member]
+                    selected_member_status = (
+                        str(selected_member_row.iloc[0]["symbol_hygiene_status"] or "").strip().lower()
+                        if not selected_member_row.empty
+                        else ""
                     )
+                    is_suppressed = selected_member_status == "refresh_suppressed"
+                    current_state_label = "Suppressed" if is_suppressed else "Active"
+                    action_label = "Return to active calculations" if is_suppressed else "Suppress from calculations"
+                    st.caption(f"Current calculation state: {current_state_label}")
+                    if is_suppressed:
+                        st.caption("Suppressed members are excluded from rankings and historical movement. Theme membership is retained.")
                     rebuild_after_suppression = st.checkbox(
                         f"Rebuild recent reconstructed history for affected themes ({SUPPRESSION_REBUILD_LOOKBACK_DAYS}d)",
                         value=True,
                         help="Rewrites only recent reconstructed rows for affected themes. Captured history is untouched.",
                     )
-                    suppression_submitted = st.form_submit_button("Apply member calculation action")
+                    suppression_submitted = st.form_submit_button(action_label)
 
                 if suppression_submitted:
                     try:
                         with get_conn() as conn:
-                            if suppression_action == "Suppress from calculations":
+                            if not is_suppressed:
                                 approve_suppression(
                                     conn,
                                     suppression_member,
