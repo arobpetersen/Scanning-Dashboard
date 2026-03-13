@@ -14,6 +14,7 @@ from src.leaderboard_utils import (
     build_category_leaderboard,
     build_category_theme_breakdown,
     build_current_leadership_table,
+    build_current_performance_table,
     build_window_leaderboard,
 )
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
@@ -48,7 +49,7 @@ from src.theme_service import refresh_active_ticker_universe, replace_ticker_in_
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
 from src.eod_refresh import has_eod_run_for_date, run_scheduled_eod_refresh
-from src.rankings import _compute_theme_metrics, theme_confidence_factor
+from src.rankings import _build_current_ranking_metrics, _compute_theme_metrics, compute_theme_rankings, theme_confidence_factor
 
 
 class TestLeaderboardUtils(unittest.TestCase):
@@ -222,6 +223,8 @@ class TestLeaderboardUtils(unittest.TestCase):
                     "avg_3m": 6.0,
                     "positive_1m_breadth_pct": 72.0,
                     "ticker_count": 10,
+                    "eligible_composite_count": 9,
+                    "eligible_breadth_pct": 90.0,
                 },
                 {
                     "theme_id": 2,
@@ -234,6 +237,8 @@ class TestLeaderboardUtils(unittest.TestCase):
                     "avg_3m": 2.0,
                     "positive_1m_breadth_pct": 30.0,
                     "ticker_count": 3,
+                    "eligible_composite_count": 3,
+                    "eligible_breadth_pct": 100.0,
                 },
                 {
                     "theme_id": 3,
@@ -246,6 +251,8 @@ class TestLeaderboardUtils(unittest.TestCase):
                     "avg_3m": 5.0,
                     "positive_1m_breadth_pct": 55.0,
                     "ticker_count": 6,
+                    "eligible_composite_count": 5,
+                    "eligible_breadth_pct": 83.3,
                 },
             ]
         )
@@ -254,8 +261,52 @@ class TestLeaderboardUtils(unittest.TestCase):
 
         self.assertEqual(out["theme"].tolist(), ["Broad Tech", "Narrow Spike", "Turning Up"])
         self.assertEqual(out.iloc[0]["leadership_quality"], "Broad leader")
-        self.assertEqual(out.iloc[1]["leadership_quality"], "Narrow leader")
-        self.assertEqual(out.iloc[2]["leadership_quality"], "Emerging leader")
+        self.assertEqual(out.iloc[1]["leadership_quality"], "Thin / filtered")
+        self.assertEqual(out.iloc[2]["leadership_quality"], "Narrow leader")
+        self.assertEqual(int(out.iloc[0]["eligible_contributor_count"]), 9)
+
+    def test_current_performance_table_uses_metric_specific_eligible_counts(self):
+        rankings = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Deep Bench",
+                    "category": "Tech",
+                    "is_active": True,
+                    "avg_1w": 8.0,
+                    "avg_1m": 12.0,
+                    "composite_score": 10.0,
+                    "positive_1m_breadth_pct": 70.0,
+                    "ticker_count": 8,
+                    "eligible_1w_count": 6,
+                    "eligible_1m_count": 5,
+                    "eligible_3m_count": 5,
+                    "eligible_composite_count": 5,
+                    "eligible_breadth_pct": 75.0,
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Thin Bench",
+                    "category": "Spec",
+                    "is_active": True,
+                    "avg_1w": 30.0,
+                    "avg_1m": 15.0,
+                    "composite_score": 8.0,
+                    "positive_1m_breadth_pct": 60.0,
+                    "ticker_count": 4,
+                    "eligible_1w_count": 2,
+                    "eligible_1m_count": 4,
+                    "eligible_3m_count": 4,
+                    "eligible_composite_count": 4,
+                    "eligible_breadth_pct": 100.0,
+                },
+            ]
+        )
+
+        out = build_current_performance_table(rankings, "avg_1w", top_k=10)
+
+        self.assertEqual(out["theme"].tolist(), ["Deep Bench"])
+        self.assertEqual(int(out.iloc[0]["eligible_contributor_count"]), 6)
 
 
 class TestThemeConfidenceAdjustment(unittest.TestCase):
@@ -289,6 +340,231 @@ class TestThemeConfidenceAdjustment(unittest.TestCase):
         self.assertEqual(float(out[out["theme"] == "Small"]["composite_score"].iloc[0]), 5.0)
         self.assertEqual(float(out[out["theme"] == "Broad"]["composite_score"].iloc[0]), 9.0)
 
+
+class TestCurrentThemeRankingHardening(unittest.TestCase):
+    def _build_conn(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint,
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint,
+                ticker varchar,
+                price double,
+                perf_1w double,
+                perf_1m double,
+                perf_3m double,
+                market_cap double,
+                avg_volume double,
+                short_interest_pct double,
+                float_shares double,
+                adr_pct double,
+                last_updated timestamp,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1w_breadth_pct double,
+                positive_1m_breadth_pct double,
+                positive_3m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar,
+                status varchar
+            )
+            """
+        )
+        conn.execute("insert into refresh_runs values (1, 'live', '2026-03-12 20:00:00', '2026-03-12 22:00:00', 'success')")
+        conn.execute("insert into themes values (1, 'Quality', 'Tech', true)")
+        conn.execute("insert into themes values (2, 'Thin', 'Spec', true)")
+        return conn
+
+    def test_build_current_ranking_metrics_excludes_low_price_low_volume_and_suppressed_names(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "AAA",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 10.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 5.0,
+                    "perf_1m": 10.0,
+                    "perf_3m": 15.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "PENNY",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 0.5,
+                    "avg_volume": 50_000_000.0,
+                    "perf_1w": 200.0,
+                    "perf_1m": 250.0,
+                    "perf_3m": 300.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "ILLIQ",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 2.0,
+                    "avg_volume": 1_000_000.0,
+                    "perf_1w": 40.0,
+                    "perf_1m": 40.0,
+                    "perf_3m": 40.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "SUPR",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 8.0,
+                    "avg_volume": 3_000_000.0,
+                    "perf_1w": 20.0,
+                    "perf_1m": 20.0,
+                    "perf_3m": 20.0,
+                    "status": "refresh_suppressed",
+                },
+            ]
+        )
+
+        out = _build_current_ranking_metrics(raw)
+
+        self.assertEqual(int(out.iloc[0]["ticker_count"]), 4)
+        self.assertEqual(int(out.iloc[0]["eligible_ticker_count"]), 1)
+        self.assertEqual(int(out.iloc[0]["eligible_composite_count"]), 1)
+        self.assertEqual(float(out.iloc[0]["avg_1w"]), 5.0)
+
+    def test_build_current_ranking_metrics_caps_outlier_returns_before_aggregation(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "AAA",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 10.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 10.0,
+                    "perf_1m": 10.0,
+                    "perf_3m": 10.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "BBB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 12.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 200.0,
+                    "perf_1m": 200.0,
+                    "perf_3m": 200.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "CCC",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 14.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": -20.0,
+                    "perf_1m": -20.0,
+                    "perf_3m": -20.0,
+                    "status": "active",
+                },
+            ]
+        )
+
+        out = _build_current_ranking_metrics(raw)
+
+        self.assertEqual(float(out.iloc[0]["avg_1w"]), 13.33)
+        self.assertEqual(float(out.iloc[0]["avg_1m"]), 13.33)
+
+    def test_compute_theme_rankings_excludes_themes_with_too_few_eligible_contributors(self):
+        conn = self._build_conn()
+        try:
+            conn.execute("insert into theme_membership values (1, 'AAA'), (1, 'BBB'), (1, 'CCC')")
+            conn.execute("insert into theme_membership values (2, 'XXX'), (2, 'YYY')")
+            conn.execute(
+                """
+                insert into ticker_snapshots values
+                (1, 'AAA', 10, 5, 6, 7, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'BBB', 12, 6, 7, 8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'CCC', 14, 7, 8, 9, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'XXX', 9, 30, 30, 30, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'YYY', 9, 25, 25, 25, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live')
+                """
+            )
+            conn.execute(
+                """
+                insert into theme_snapshots values
+                (1, '2026-03-12 22:00:00', 1, 3, 1, 1, 1, 50, 50, 50, 1, 'live'),
+                (1, '2026-03-12 22:00:00', 2, 2, 1, 1, 1, 50, 50, 50, 1, 'live')
+                """
+            )
+
+            out = compute_theme_rankings(conn)
+
+            self.assertEqual(out["theme"].tolist(), ["Quality"])
+            self.assertEqual(int(out.iloc[0]["eligible_composite_count"]), 3)
+        finally:
+            conn.close()
 
 class TestBoundarySelection(unittest.TestCase):
     def test_theme_history_window_uses_boundary_snapshot(self):

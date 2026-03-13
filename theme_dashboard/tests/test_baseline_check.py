@@ -109,19 +109,27 @@ class TestBaselineQueries(unittest.TestCase):
 
         conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
         conn.execute("insert into theme_membership values (1, 'NVDA')")
+        conn.execute("insert into theme_membership values (1, 'MSFT')")
+        conn.execute("insert into theme_membership values (1, 'AAPL')")
         conn.execute("insert into refresh_runs values (1, 'live', '2026-03-10 20:00:00', '2026-03-10 22:00:00', 'success', 1, 1, 0)")
         conn.execute("insert into refresh_runs values (2, 'mock', '2026-03-11 20:00:00', '2026-03-11 22:00:00', 'success', 1, 1, 0)")
         conn.execute(
-            "insert into ticker_snapshots values (1, 'NVDA', 100, 1, 2, 3, 1000, 2000, null, null, null, '2026-03-10 21:00:00', 'live')"
+            "insert into ticker_snapshots values (1, 'NVDA', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-10 21:00:00', 'live')"
         )
         conn.execute(
-            "insert into ticker_snapshots values (2, 'NVDA', 200, 9, 9, 9, 2000, 3000, null, null, null, '2026-03-11 21:00:00', 'mock')"
+            "insert into ticker_snapshots values (1, 'MSFT', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-10 21:00:00', 'live')"
         )
         conn.execute(
-            "insert into theme_snapshots values (1, '2026-03-10 22:00:00', 1, 1, 1, 2, 3, 40, 50, 60, 10, 'live')"
+            "insert into ticker_snapshots values (1, 'AAPL', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-10 21:00:00', 'live')"
         )
         conn.execute(
-            "insert into theme_snapshots values (2, '2026-03-11 22:00:00', 1, 1, 9, 9, 9, 90, 90, 90, 99, 'mock')"
+            "insert into ticker_snapshots values (2, 'NVDA', 200, 9, 9, 9, 2000, 300000, null, null, null, '2026-03-11 21:00:00', 'mock')"
+        )
+        conn.execute(
+            "insert into theme_snapshots values (1, '2026-03-10 22:00:00', 1, 3, 1, 2, 3, 40, 50, 60, 10, 'live')"
+        )
+        conn.execute(
+            "insert into theme_snapshots values (2, '2026-03-11 22:00:00', 1, 3, 9, 9, 9, 90, 90, 90, 99, 'mock')"
         )
 
         status = baseline_status(conn).iloc[0]
@@ -226,19 +234,27 @@ class TestLivePreferredSourceSelection(unittest.TestCase):
 
         conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
         conn.execute("insert into theme_membership values (1, 'NVDA')")
+        conn.execute("insert into theme_membership values (1, 'MSFT')")
+        conn.execute("insert into theme_membership values (1, 'AAPL')")
         conn.execute("insert into refresh_runs values (1, 'live', '2026-03-10 20:00:00', '2026-03-10 22:00:00', 'success', 1, 1, 0)")
         conn.execute("insert into refresh_runs values (2, 'mock', '2026-03-11 20:00:00', '2026-03-11 22:00:00', 'success', 1, 1, 0)")
         conn.execute(
-            "insert into ticker_snapshots values (1, 'NVDA', 100, 1, 2, 3, 1000, 2000, null, null, null, '2026-03-10 21:00:00', 'live')"
+            "insert into ticker_snapshots values (1, 'NVDA', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-10 21:00:00', 'live')"
         )
         conn.execute(
-            "insert into ticker_snapshots values (2, 'NVDA', 200, 9, 9, 9, 2000, 3000, null, null, null, '2026-03-11 21:00:00', 'mock')"
+            "insert into ticker_snapshots values (1, 'MSFT', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-10 21:00:00', 'live')"
         )
         conn.execute(
-            "insert into theme_snapshots values (1, '2026-03-10 22:00:00', 1, 1, 1, 2, 3, 40, 50, 60, 10, 'live')"
+            "insert into ticker_snapshots values (1, 'AAPL', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-10 21:00:00', 'live')"
         )
         conn.execute(
-            "insert into theme_snapshots values (2, '2026-03-11 22:00:00', 1, 1, 9, 9, 9, 90, 90, 90, 99, 'mock')"
+            "insert into ticker_snapshots values (2, 'NVDA', 200, 9, 9, 9, 2000, 300000, null, null, null, '2026-03-11 21:00:00', 'mock')"
+        )
+        conn.execute(
+            "insert into theme_snapshots values (1, '2026-03-10 22:00:00', 1, 3, 1, 2, 3, 40, 50, 60, 10, 'live')"
+        )
+        conn.execute(
+            "insert into theme_snapshots values (2, '2026-03-11 22:00:00', 1, 3, 9, 9, 9, 90, 90, 90, 99, 'mock')"
         )
 
         self.assertEqual(preferred_theme_snapshot_source(conn), "live")

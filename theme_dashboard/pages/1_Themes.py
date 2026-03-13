@@ -7,11 +7,12 @@ from src.leaderboard_utils import (
     build_category_leaderboard,
     build_category_theme_breakdown,
     build_current_leadership_table,
+    build_current_performance_table,
     build_window_leaderboard,
 )
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.momentum_engine import compute_theme_momentum
-from src.rankings import compute_theme_rankings
+from src.rankings import compute_current_theme_metrics, compute_theme_rankings
 from src.queries import ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
 from src.theme_selection import (
     SELECTED_THEME_ID_KEY,
@@ -83,7 +84,7 @@ def _extract_selected_row(event) -> int | None:
     return None
 
 
-def _build_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tuple[object, str | None]:
+def _build_historical_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tuple[object, str | None]:
     ranked, msg = build_window_leaderboard(momentum, metric_col, top_k=10)
     if ranked.empty:
         return None, msg
@@ -176,8 +177,8 @@ def _render_category_theme_drill(title: str, breakdown_df) -> None:
 def _render_current_leadership(leadership_df, label_by_id: dict[int, str]) -> None:
     st.subheader("Current Market Leadership")
     st.caption(
-        "Ranks active themes by current confidence-adjusted composite strength. "
-        "Breadth, constituent count, and the leadership label help distinguish broad current leadership from narrower spikes."
+        "Ranks active themes by current confidence-adjusted composite strength using only eligible preferred-source contributors. "
+        "`eligible_contributors` shows how many names actually fed the current rank, while `eligible_breadth_pct` shows the share of governed members that passed live ranking filters."
     )
     event = st.dataframe(
         leadership_df[
@@ -191,6 +192,8 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str]) -> No
                 "avg_3m",
                 "breadth_1m",
                 "ticker_count",
+                "eligible_contributor_count",
+                "eligible_breadth_pct",
                 "leadership_quality",
             ]
         ],
@@ -211,6 +214,47 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str]) -> No
         handled_key = _handled_selection_key("current_leadership")
         if should_apply_selection_token(selection_token, st.session_state.get(handled_key)):
             _set_theme_selection(picked_theme_id, picked_label, "current_leadership")
+            st.session_state[handled_key] = selection_token
+
+
+def _render_current_performance(title: str, key_prefix: str, leaderboard_df, label_by_id: dict[int, str]) -> None:
+    st.markdown(f"**{title}**")
+    st.caption(
+        "Ranks current active themes on the selected window return using eligible preferred-source contributors only. "
+        "Displayed performance uses capped constituent returns for aggregation, but raw ticker rows remain unchanged in the detail table."
+    )
+    event = st.dataframe(
+        leaderboard_df[
+            [
+                "rank",
+                "theme",
+                "category",
+                "performance",
+                "composite_score",
+                "breadth_1m",
+                "ticker_count",
+                "eligible_contributor_count",
+                "eligible_breadth_pct",
+                "leadership_quality",
+            ]
+        ],
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-cell",
+        key=f"{key_prefix}_current_table",
+    )
+    row_idx = _extract_selected_row(event)
+    if row_idx is not None and 0 <= row_idx < len(leaderboard_df):
+        picked_theme_id = int(leaderboard_df.iloc[row_idx]["theme_id"])
+        picked_label = label_by_id.get(
+            picked_theme_id,
+            f"{leaderboard_df.iloc[row_idx]['theme']} ({leaderboard_df.iloc[row_idx]['category']})",
+        )
+        selection_token = f"{key_prefix}:{picked_theme_id}"
+        handled_key = _handled_selection_key(key_prefix)
+        if should_apply_selection_token(selection_token, st.session_state.get(handled_key)):
+            _set_theme_selection(picked_theme_id, picked_label, key_prefix)
             st.session_state[handled_key] = selection_token
 
 
@@ -236,21 +280,39 @@ with explore_tab:
         st.session_state[SELECTED_THEME_SOURCE_KEY] = "default"
 
     with get_conn() as conn:
+        current_theme_metrics = compute_current_theme_metrics(conn)
         current_rankings = compute_theme_rankings(conn)
         momentum_1w = compute_theme_momentum(conn, 7, top_n=20)
         momentum_1m = compute_theme_momentum(conn, 30, top_n=20)
     leadership_df = build_current_leadership_table(current_rankings, top_k=12)
+    current_1w_df = build_current_performance_table(current_theme_metrics, "avg_1w", top_k=10)
+    current_1m_df = build_current_performance_table(current_theme_metrics, "avg_1m", top_k=10)
 
     if leadership_df.empty:
         st.info("No active theme leadership data is available yet.")
     else:
         _render_current_leadership(leadership_df, label_by_id)
 
-    lb1, lb1_msg = _build_leaderboard(momentum_1w, "avg_1w", "performance")
-    lb2, lb2_msg = _build_leaderboard(momentum_1m, "avg_1m", "performance")
+    st.divider()
+    st.subheader("Current Top Themes By Window")
+    st.caption("These are current live/preferred-source theme rankings, hardened for constituent eligibility, outlier control, and minimum contributor count.")
+    current_c1, current_c2 = st.columns(2)
+    with current_c1:
+        if current_1w_df.empty:
+            st.warning("Top Themes - Current 1W: No themes currently meet the eligible-contributor threshold.")
+        else:
+            _render_current_performance("Top Themes - Current 1W", "current_top_1w", current_1w_df, label_by_id)
+    with current_c2:
+        if current_1m_df.empty:
+            st.warning("Top Themes - Current 1M: No themes currently meet the eligible-contributor threshold.")
+        else:
+            _render_current_performance("Top Themes - Current 1M", "current_top_1m", current_1m_df, label_by_id)
+
+    lb1, lb1_msg = _build_historical_leaderboard(momentum_1w, "avg_1w", "performance")
+    lb2, lb2_msg = _build_historical_leaderboard(momentum_1m, "avg_1m", "performance")
     st.divider()
     st.subheader("Theme Movement Snapshots")
-    st.caption("These tables rank performance within the selected 1W and 1M windows. Use them to spot short-term movement and rotation rather than current broad leadership.")
+    st.caption("These tables remain historical movement views built from snapshot windows. Use them to spot rotation and momentum change, not current live leadership.")
     leaderboard_mode = st.radio("Top table view", ["Themes", "Categories"], horizontal=True, key="themes_leaderboard_mode")
     show_advanced_leaderboard = st.checkbox(
         "Show advanced leaderboard context",
@@ -308,10 +370,22 @@ with explore_tab:
     with get_conn() as conn:
         ticker_df = theme_ticker_metrics(conn, theme_id)
         history_df = theme_snapshot_history(conn, theme_id, limit=50)
+        theme_current_row = current_theme_metrics[current_theme_metrics["theme_id"] == theme_id].copy()
 
     if ticker_df.empty:
         st.warning("No tickers for selected theme.")
     else:
+        if not theme_current_row.empty:
+            current_row = theme_current_row.iloc[0]
+            qc1, qc2, qc3, qc4 = st.columns(4)
+            qc1.metric("Governed tickers", int(current_row.get("ticker_count") or 0))
+            qc2.metric("Current eligible", int(current_row.get("eligible_composite_count") or 0))
+            qc3.metric("Eligible breadth", f"{float(current_row.get('eligible_breadth_pct') or 0):.1f}%")
+            qc4.metric("Current quality", str(build_current_leadership_table(theme_current_row, top_k=1).iloc[0]["leadership_quality"]))
+            st.caption(
+                "Current theme ranking eligibility is separate from membership: governed members remain in the theme, "
+                "but only eligible preferred-source contributors feed current ranking calculations."
+            )
         if "perf_1w" in ticker_df.columns:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Ticker count", int(ticker_df.shape[0]))

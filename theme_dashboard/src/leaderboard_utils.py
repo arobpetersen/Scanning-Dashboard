@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .config import CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS
+
 
 def _leadership_quality_label(row: pd.Series) -> str:
-    breadth = row.get("positive_1m_breadth_pct")
+    breadth = row.get("eligible_breadth_pct", row.get("positive_1m_breadth_pct"))
     breadth_value = float(breadth) if breadth is not None and not pd.isna(breadth) else None
-    ticker_count = int(row.get("ticker_count") or 0)
+    ticker_count = int(row.get("eligible_contributor_count", row.get("eligible_composite_count", row.get("ticker_count") or 0)) or 0)
 
     if breadth_value is not None and breadth_value >= 60 and ticker_count >= 8:
         return "Broad leader"
-    if ticker_count < 5 or (breadth_value is not None and breadth_value < 45):
-        return "Narrow leader"
-    return "Emerging leader"
+    if ticker_count <= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS + 1 or (breadth_value is not None and breadth_value < 45):
+        return "Thin / filtered"
+    return "Narrow leader"
 
 
 def _validate_window_leaderboard_inputs(momentum: dict) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
@@ -73,10 +75,11 @@ def build_current_leadership_table(rankings: pd.DataFrame, top_k: int = 12) -> p
         return pd.DataFrame()
 
     leadership = leadership.sort_values(
-        ["composite_score", "positive_1m_breadth_pct", "ticker_count", "theme"],
-        ascending=[False, False, False, True],
+        ["composite_score", "positive_1m_breadth_pct", "eligible_composite_count", "ticker_count", "theme"],
+        ascending=[False, False, False, False, True],
     ).head(top_k).reset_index(drop=True)
     leadership["rank"] = leadership.index + 1
+    leadership["eligible_contributor_count"] = leadership["eligible_composite_count"]
     leadership["leadership_quality"] = leadership.apply(_leadership_quality_label, axis=1)
     leadership = leadership.rename(columns={"positive_1m_breadth_pct": "breadth_1m"})
     return leadership[
@@ -91,6 +94,52 @@ def build_current_leadership_table(rankings: pd.DataFrame, top_k: int = 12) -> p
             "avg_3m",
             "breadth_1m",
             "ticker_count",
+            "eligible_contributor_count",
+            "eligible_breadth_pct",
+            "leadership_quality",
+        ]
+    ]
+
+
+def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k: int = 10) -> pd.DataFrame:
+    if rankings.empty:
+        return pd.DataFrame()
+
+    eligible_count_col = {
+        "avg_1w": "eligible_1w_count",
+        "avg_1m": "eligible_1m_count",
+        "avg_3m": "eligible_3m_count",
+    }.get(perf_col)
+    if not eligible_count_col:
+        raise ValueError(f"Unsupported current performance column: {perf_col}")
+
+    current = rankings.copy()
+    if "is_active" in current.columns:
+        current = current[current["is_active"] == True].copy()
+    current = current[current[eligible_count_col] >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS].copy()
+    if current.empty:
+        return pd.DataFrame()
+
+    current["eligible_contributor_count"] = current[eligible_count_col]
+    current = current.sort_values(
+        [perf_col, "composite_score", "eligible_contributor_count", "eligible_breadth_pct", "theme"],
+        ascending=[False, False, False, False, True],
+    ).head(top_k).reset_index(drop=True)
+    current["rank"] = current.index + 1
+    current["leadership_quality"] = current.apply(_leadership_quality_label, axis=1)
+    current = current.rename(columns={perf_col: "performance", "positive_1m_breadth_pct": "breadth_1m"})
+    return current[
+        [
+            "rank",
+            "theme_id",
+            "theme",
+            "category",
+            "performance",
+            "composite_score",
+            "breadth_1m",
+            "ticker_count",
+            "eligible_contributor_count",
+            "eligible_breadth_pct",
             "leadership_quality",
         ]
     ]
