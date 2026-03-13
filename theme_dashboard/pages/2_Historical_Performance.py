@@ -75,9 +75,7 @@ def _open_theme_in_themes(theme_name: str, id_by_name: dict[str, int], label_by_
 
 
 def _build_overview_leaders(momentum: dict, perf_col: str, top_k: int = 10) -> tuple[pd.DataFrame, str | None]:
-    # Centralized helper keeps window ranking rules consistent across Themes and Historical pages.
     return build_window_leaderboard(momentum, perf_col, top_k=top_k)
-
 
 
 def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, message: str | None, key_prefix: str):
@@ -88,7 +86,6 @@ def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, mes
 
     display = leaders.rename(columns={perf_col: "window_perf"})
     cols = ["rank", "theme", "window_perf", "momentum_score", "rank_change"]
-    # Row click acts as direct drill-down into Single Theme History.
     event = st.dataframe(
         display[cols],
         hide_index=True,
@@ -99,20 +96,15 @@ def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, mes
         key=f"{key_prefix}_table",
     )
 
-    rows = []
-    if isinstance(event, dict):
-        cells = event.get("selection", {}).get("cells", [])
-        rows = [c.get("row") for c in cells if isinstance(c, dict) and c.get("row") is not None]
-    elif hasattr(event, "selection") and hasattr(event.selection, "cells"):
-        rows = [getattr(c, "row", None) for c in event.selection.cells]
-    if rows:
-        picked = display.iloc[int(rows[0])]["theme"]
+    row_idx = extract_selected_row(event)
+    if row_idx is not None and 0 <= row_idx < len(display):
+        picked = display.iloc[int(row_idx)]["theme"]
         st.session_state["historical_selected_theme_name"] = picked
 
 
 st.set_page_config(page_title="Historical Performance", layout="wide")
 st.title("Historical Performance & Theme Momentum")
-st.caption("Track leadership, rotation, emerging strength, and weakening themes over configurable windows.")
+st.caption("Audit historical theme movement, leadership rotation, and provenance-aware change across resolved boundary windows.")
 
 init_db()
 with get_conn() as conn:
@@ -121,25 +113,29 @@ with get_conn() as conn:
 theme_label_by_name = {str(r["name"]): f"{r['name']} ({r['category']})" for _, r in themes.iterrows()}
 theme_id_by_name = {str(r["name"]): int(r["id"]) for _, r in themes.iterrows()}
 
-# Fixed multi-window overview is intentionally independent of lower analysis controls.
 with get_conn() as conn:
     overview_1w = compute_theme_momentum(conn, 7, top_n=10)
     overview_1m = compute_theme_momentum(conn, 30, top_n=10)
     overview_3m = compute_theme_momentum(conn, 90, top_n=10)
 
-st.subheader("Top Theme Overview (fixed cross-window)")
-st.caption("Fixed cross-window snapshot. Each panel is independently ranked by its own window return metric (1W/1M/3M), with momentum shown as context.")
+st.subheader("Window-End Leadership Snapshot")
+st.caption(
+    "Fixed cross-window historical snapshot. These panels show which themes were strongest at the end of each resolved window, "
+    "not which themes are strongest in the current/live view."
+)
 
-ov1, ov2, ov3 = st.columns(3)
+ov1, ov2 = st.columns(2)
 with ov1:
     leaders_1w, msg_1w = _build_overview_leaders(overview_1w, "avg_1w")
-    _render_overview_panel("Top Themes — 1W", leaders_1w, "avg_1w", msg_1w, "ov_1w")
+    _render_overview_panel("Window-End Leaders - 1W", leaders_1w, "avg_1w", msg_1w, "ov_1w")
 with ov2:
     leaders_1m, msg_1m = _build_overview_leaders(overview_1m, "avg_1m")
-    _render_overview_panel("Top Themes — 1M", leaders_1m, "avg_1m", msg_1m, "ov_1m")
-with ov3:
+    _render_overview_panel("Window-End Leaders - 1M", leaders_1m, "avg_1m", msg_1m, "ov_1m")
+
+with st.expander("Advanced historical snapshot leaders", expanded=False):
+    st.caption("Longer-horizon and secondary window-end leader cuts live here so the main page stays focused on movement audit.")
     leaders_3m, msg_3m = _build_overview_leaders(overview_3m, "avg_3m")
-    _render_overview_panel("Top Themes — 3M", leaders_3m, "avg_3m", msg_3m, "ov_3m")
+    _render_overview_panel("Window-End Leaders - 3M", leaders_3m, "avg_3m", msg_3m, "ov_3m")
 
 st.divider()
 st.subheader("Theme Movement Analysis")
@@ -198,13 +194,14 @@ with get_conn() as conn:
 window_meta = momentum.get("meta", {})
 
 w1, w2, w3 = st.columns(3)
-w1.metric("Window start", str(pd.to_datetime(window_meta.get("window_start")).strftime("%Y-%m-%d")) if window_meta.get("window_start") is not None else "—")
-w2.metric("Window end", str(pd.to_datetime(window_meta.get("window_end")).strftime("%Y-%m-%d")) if window_meta.get("window_end") is not None else "—")
+w1.metric("Window start", str(pd.to_datetime(window_meta.get("window_start")).strftime("%Y-%m-%d")) if window_meta.get("window_start") is not None else "-")
+w2.metric("Window end", str(pd.to_datetime(window_meta.get("window_end")).strftime("%Y-%m-%d")) if window_meta.get("window_end") is not None else "-")
 w3.metric("Boundary snapshots", int(window_meta.get("boundary_snapshot_count") or 0))
 st.caption(
     f"Resolved boundary provenance: `{window_meta.get('boundary_provenance_mix') or 'unknown'}` | "
     f"overall window provenance: `{window_meta.get('provenance_mix') or 'unknown'}`"
 )
+st.caption("Treat the outputs below as conditional on this resolved window shape and provenance mix. Shallow or mixed windows are useful for audit, but less trustworthy for strong inference.")
 if window_meta.get("collapsed_to_available_history"):
     st.info(
         f"Selected {int(window_meta.get('requested_lookback_days') or 0)}d lookback currently resolves to an effective "
@@ -226,7 +223,6 @@ m3.metric("Dropped leaders", len(momentum["dropped_leaders"]))
 m4.metric("Rotation intensity", f"{rotation['rotation_intensity']['rotation_intensity_score']:.1f}")
 
 st.subheader("Most Improving Themes In This Window")
-# Explicit reactive sort: strongest momentum first, then composite delta and rank improvement.
 leaders_tbl = summary.sort_values(["momentum_score", "delta_composite", "rank_change"], ascending=[False, False, False]).head(10).copy()
 leaders_tbl["rank"] = leaders_tbl.index + 1
 st.caption(
@@ -251,6 +247,17 @@ if leader_idx is not None and 0 <= leader_idx < len(leaders_tbl):
     picked_theme = str(leaders_tbl.iloc[leader_idx]["theme"])
     if st.button(f"Open `{picked_theme}` in Themes detail", key="open_historical_momentum_theme"):
         _open_theme_in_themes(picked_theme, theme_id_by_name, theme_label_by_name, "historical_table")
+
+st.subheader("Top Momentum Themes")
+st.caption(
+    "These are the strongest themes by the page's deterministic momentum model for the selected window. "
+    "Use this as the clearest model-based companion to the improving-themes leaderboard."
+)
+st.dataframe(
+    momentum["top_momentum"][["theme", "momentum_score", "delta_composite", "rank_change", "delta_breadth"]].head(analysis_top_n),
+    width="stretch",
+    column_config=_config_for_columns(["theme", "momentum_score", "delta_composite", "rank_change", "delta_breadth"]),
+)
 
 with st.expander("Advanced chart controls", expanded=False):
     fc1, fc2 = st.columns(2)
@@ -367,12 +374,15 @@ st.altair_chart(chart, width="stretch")
 
 st.caption(
     f"Analyzed top N={analysis_top_n}; displaying {trend['theme'].nunique()} movement-selected theme lines "
-    f"from {pd.to_datetime(window_meta.get('window_start')).strftime('%Y-%m-%d') if window_meta.get('window_start') is not None else '—'} "
-    f"to {pd.to_datetime(window_meta.get('window_end')).strftime('%Y-%m-%d') if window_meta.get('window_end') is not None else '—'}."
+    f"from {pd.to_datetime(window_meta.get('window_start')).strftime('%Y-%m-%d') if window_meta.get('window_start') is not None else '-'} "
+    f"to {pd.to_datetime(window_meta.get('window_end')).strftime('%Y-%m-%d') if window_meta.get('window_end') is not None else '-'}."
 )
 
-st.subheader("Theme Signals (Inflection Feed)")
-st.caption("Deterministic high-confidence events derived from momentum + rotation metrics for the selected analysis window.")
+st.subheader("Theme Signals (Deterministic Inflection Feed)")
+st.caption(
+    "Deterministic event triage derived from momentum + rotation rules for the selected historical window. "
+    "These are heuristic flags, not predictive signals."
+)
 if inflections["meta"]["insufficient"]:
     st.info(inflections["meta"]["message"])
 elif inflections["signals"].empty:
@@ -407,7 +417,7 @@ else:
     st.caption(f"Showing top {min(30, len(inflections['signals']))} signals by priority and momentum.")
 
 st.subheader("Rotation Signals")
-st.caption("Leadership change buckets that explain which themes are entering strength, exiting, accelerating, or fading.")
+st.caption("Leadership transition is kept prominent here; overlap-heavy secondary diagnostics have been moved lower.")
 r1, r2 = st.columns(2)
 with r1:
     _render_explained_table(
@@ -416,23 +426,6 @@ with r1:
         rotation["rotating_into"],
         ["theme", "rank_start", "rank_end", "rank_change", "delta_composite", "momentum_score"],
     )
-    _render_explained_table(
-        "Emerging Themes",
-        "Themes with rapid rank improvement plus improving momentum and breadth.",
-        rotation["emerging"],
-        ["theme", "rank_change", "delta_composite", "delta_avg_1m", "delta_breadth", "momentum_score"],
-    )
-    if not rotation["emerging"].empty:
-        reasons = rotation["emerging"].head(5).copy()
-        reasons["trigger_reason"] = reasons.apply(_signal_reason_text, axis=1)
-        with st.expander("Why these themes are marked Emerging"):
-            st.dataframe(reasons[["theme", "trigger_reason"]], width="stretch")
-    _render_explained_table(
-        "Acceleration in Leadership",
-        "Themes already in leadership that are still gaining rank and momentum.",
-        rotation["acceleration"],
-        ["theme", "rank_end", "rank_change", "delta_composite", "momentum_score"],
-    )
 with r2:
     _render_explained_table(
         "Rotating Out Of Leadership",
@@ -440,71 +433,6 @@ with r2:
         rotation["rotating_out"],
         ["theme", "rank_start", "rank_end", "rank_change", "delta_composite", "momentum_score"],
     )
-    _render_explained_table(
-        "Fading Themes",
-        "Themes with broad deterioration across rank, returns, and breadth participation.",
-        rotation["fading"],
-        ["theme", "rank_change", "delta_composite", "delta_avg_1m", "delta_breadth", "momentum_score"],
-    )
-    _render_explained_table(
-        "Deterioration in Leadership",
-        "Current leaders that are losing momentum and slipping in rank.",
-        rotation["deterioration"],
-        ["theme", "rank_end", "rank_change", "delta_composite", "momentum_score"],
-    )
-
-st.subheader("Momentum Summary Sections")
-sec1, sec2 = st.columns(2)
-with sec1:
-    _render_explained_table(
-        "Top Momentum Themes",
-        "Themes with the strongest overall momentum score based on performance, breadth, and rank movement.",
-        momentum["top_momentum"],
-        ["theme", "momentum_score", "delta_composite", "rank_change", "delta_breadth"],
-        limit=analysis_top_n,
-    )
-    _render_explained_table(
-        "Biggest Risers",
-        "Themes with the largest positive rank change over the selected lookback window.",
-        momentum["biggest_risers"],
-        ["theme", "rank_change", "delta_composite", "momentum_score"],
-        limit=analysis_top_n,
-    )
-    _render_explained_table(
-        "Breadth Improvers",
-        "Themes where a larger share of constituent tickers is contributing positively.",
-        momentum["breadth_improvers"],
-        ["theme", "delta_breadth", "delta_composite", "momentum_score"],
-        limit=analysis_top_n,
-    )
-with sec2:
-    _render_explained_table(
-        "Biggest Fallers",
-        "Themes with the largest negative rank change over the selected lookback window.",
-        momentum["biggest_fallers"],
-        ["theme", "rank_change", "delta_composite", "momentum_score"],
-        limit=analysis_top_n,
-    )
-    _render_explained_table(
-        "Weakening Themes",
-        "Themes where momentum and breadth are deteriorating across the selected window.",
-        momentum["weakening_themes"],
-        ["theme", "delta_composite", "delta_breadth", "rank_change"],
-        limit=analysis_top_n,
-    )
-    if not momentum["weakening_themes"].empty:
-        weak_reasons = momentum["weakening_themes"].head(5).copy()
-        weak_reasons["trigger_reason"] = weak_reasons.apply(_signal_reason_text, axis=1)
-        with st.expander("Why these themes are marked Weakening"):
-            st.dataframe(weak_reasons[["theme", "trigger_reason"]], width="stretch")
-
-c1, c2 = st.columns(2)
-with c1:
-    st.write(f"**New leaders in top {analysis_top_n}**")
-    st.write(", ".join(momentum["new_leaders"]) if momentum["new_leaders"] else "None")
-with c2:
-    st.write(f"**Dropped from top {analysis_top_n}**")
-    st.write(", ".join(momentum["dropped_leaders"]) if momentum["dropped_leaders"] else "None")
 
 st.subheader("Cross-theme Detail Table")
 st.caption("Full start/end comparison across themes for the selected window. Use this table to audit every major movement component.")
@@ -537,6 +465,63 @@ if detail_idx is not None and 0 <= detail_idx < len(detail_df):
     picked_theme = str(detail_df.iloc[detail_idx]["theme"])
     if st.button(f"Open detail theme `{picked_theme}` in Themes detail", key="open_historical_detail_theme"):
         _open_theme_in_themes(picked_theme, theme_id_by_name, theme_label_by_name, "historical_table")
+
+with st.expander("Advanced historical diagnostics", expanded=False):
+    st.caption(
+        "Secondary and overlap-prone diagnostics live here so the main page stays focused on movement audit, rotation, and provenance-aware drilldown."
+    )
+    ad1, ad2 = st.columns(2)
+    with ad1:
+        _render_explained_table(
+            "Emerging Themes",
+            "Themes with rapid rank improvement plus improving momentum and breadth.",
+            rotation["emerging"],
+            ["theme", "rank_change", "delta_composite", "delta_avg_1m", "delta_breadth", "momentum_score"],
+        )
+        if not rotation["emerging"].empty:
+            reasons = rotation["emerging"].head(5).copy()
+            reasons["trigger_reason"] = reasons.apply(_signal_reason_text, axis=1)
+            with st.expander("Why these themes are marked Emerging"):
+                st.dataframe(reasons[["theme", "trigger_reason"]], width="stretch")
+        _render_explained_table(
+            "Largest Rank Improvers",
+            "Themes with the largest positive rank change over the selected lookback window.",
+            momentum["biggest_risers"],
+            ["theme", "rank_change", "delta_composite", "momentum_score"],
+            limit=analysis_top_n,
+        )
+        _render_explained_table(
+            "Breadth Improvers",
+            "Themes where a larger share of constituent tickers is contributing positively.",
+            momentum["breadth_improvers"],
+            ["theme", "delta_breadth", "delta_composite", "momentum_score"],
+            limit=analysis_top_n,
+        )
+    with ad2:
+        _render_explained_table(
+            "Acceleration In Leadership",
+            "Themes already in leadership that are still gaining rank and momentum.",
+            rotation["acceleration"],
+            ["theme", "rank_end", "rank_change", "delta_composite", "momentum_score"],
+        )
+        _render_explained_table(
+            "Largest Rank Decliners",
+            "Themes with the largest negative rank change over the selected lookback window.",
+            momentum["biggest_fallers"],
+            ["theme", "rank_change", "delta_composite", "momentum_score"],
+            limit=analysis_top_n,
+        )
+        _render_explained_table(
+            "Leadership Deterioration",
+            "Current leaders that are losing momentum and slipping in rank.",
+            rotation["deterioration"],
+            ["theme", "rank_end", "rank_change", "delta_composite", "momentum_score"],
+        )
+        if not momentum["weakening_themes"].empty:
+            weak_reasons = momentum["weakening_themes"].head(5).copy()
+            weak_reasons["trigger_reason"] = weak_reasons.apply(_signal_reason_text, axis=1)
+            with st.expander("Why these themes are marked Weakening"):
+                st.dataframe(weak_reasons[["theme", "trigger_reason"]], width="stretch")
 
 st.subheader("Single Theme History")
 if themes.empty:
