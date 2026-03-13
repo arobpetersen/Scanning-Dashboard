@@ -118,6 +118,7 @@ def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, mes
 st.set_page_config(page_title="Historical Performance", layout="wide")
 st.title("Historical Performance & Theme Momentum")
 st.caption("Audit historical theme movement, leadership rotation, and provenance-aware change across resolved boundary windows.")
+st.caption("Use the Themes page for current leadership and strongest-now views. This page is for what changed across a historical window and how trustworthy that change is.")
 
 init_db()
 with get_conn() as conn:
@@ -131,26 +132,6 @@ with get_conn() as conn:
     overview_1m = compute_theme_momentum(conn, 30, top_n=10)
     overview_3m = compute_theme_momentum(conn, 90, top_n=10)
 
-st.subheader("Window-End Leadership Snapshot")
-st.caption(
-    "Fixed cross-window historical snapshot. These panels show which themes were strongest at the end of each resolved window, "
-    "not which themes are strongest in the current/live view."
-)
-
-ov1, ov2 = st.columns(2)
-with ov1:
-    leaders_1w, msg_1w = _build_overview_leaders(overview_1w, "avg_1w")
-    _render_overview_panel("Window-End Leaders - 1W", leaders_1w, "avg_1w", msg_1w, "ov_1w")
-with ov2:
-    leaders_1m, msg_1m = _build_overview_leaders(overview_1m, "avg_1m")
-    _render_overview_panel("Window-End Leaders - 1M", leaders_1m, "avg_1m", msg_1m, "ov_1m")
-
-with st.expander("Advanced historical snapshot leaders", expanded=False):
-    st.caption("Longer-horizon and secondary window-end leader cuts live here so the main page stays focused on movement audit.")
-    leaders_3m, msg_3m = _build_overview_leaders(overview_3m, "avg_3m")
-    _render_overview_panel("Window-End Leaders - 3M", leaders_3m, "avg_3m", msg_3m, "ov_3m")
-
-st.divider()
 st.subheader("Theme Movement Analysis")
 st.caption(
     "Use this section to understand which themes are improving, weakening, or rotating over the selected window. "
@@ -488,6 +469,22 @@ with st.expander("Advanced historical diagnostics", expanded=False):
     st.caption(
         "Secondary and overlap-prone diagnostics live here so the main page stays focused on movement audit, rotation, and provenance-aware drilldown."
     )
+    st.write("**Historical Snapshot Reference**")
+    st.caption(
+        "These window-end leader tables are retained as secondary historical reference only. "
+        "They are not intended to compete with the Themes page current leadership surfaces."
+    )
+    ov1, ov2 = st.columns(2)
+    with ov1:
+        leaders_1w, msg_1w = _build_overview_leaders(overview_1w, "avg_1w")
+        _render_overview_panel("Window-End Leaders - 1W", leaders_1w, "avg_1w", msg_1w, "ov_1w")
+    with ov2:
+        leaders_1m, msg_1m = _build_overview_leaders(overview_1m, "avg_1m")
+        _render_overview_panel("Window-End Leaders - 1M", leaders_1m, "avg_1m", msg_1m, "ov_1m")
+    leaders_3m, msg_3m = _build_overview_leaders(overview_3m, "avg_3m")
+    _render_overview_panel("Window-End Leaders - 3M", leaders_3m, "avg_3m", msg_3m, "ov_3m")
+
+    st.divider()
     ad1, ad2 = st.columns(2)
     with ad1:
         _render_explained_table(
