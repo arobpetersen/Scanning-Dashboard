@@ -897,10 +897,60 @@ def _merge_priority(existing_priority: object, next_priority: str) -> str:
     return current if ranking.get(current, 1) >= ranking.get(next_priority, 1) else next_priority
 
 
+def _normalize_theme_selection_ids(values: list[object] | None) -> list[int]:
+    out: list[int] = []
+    for value in values or []:
+        try:
+            normalized = int(value)
+        except Exception:
+            continue
+        if normalized not in out:
+            out.append(normalized)
+    return out
+
+
+def _resolve_theme_entries(conn, theme_ids: list[int]) -> list[dict[str, object]]:
+    if not theme_ids:
+        return []
+    placeholders = ", ".join(["?"] * len(theme_ids))
+    rows = conn.execute(
+        f"""
+        SELECT id AS theme_id, name AS theme_name, category
+        FROM themes
+        WHERE id IN ({placeholders})
+        ORDER BY name
+        """,
+        theme_ids,
+    ).df()
+    if rows.empty:
+        return []
+    return [
+        {
+            "theme_id": int(row["theme_id"]),
+            "theme_name": str(row["theme_name"]),
+            "category": str(row["category"] or "Uncategorized"),
+        }
+        for _, row in rows.iterrows()
+    ]
+
+
+def _normalize_new_theme_labels(values: list[str] | None) -> list[str]:
+    out: list[str] = []
+    for value in values or []:
+        cleaned = str(value or "").strip()
+        if cleaned and cleaned not in out:
+            out.append(cleaned)
+    return out
+
+
 def promote_scanner_candidate_to_theme_review(
     conn,
     ticker: str,
     promotion_note: str = "",
+    research_draft: dict[str, object] | None = None,
+    selected_suggested_theme_ids: list[object] | None = None,
+    custom_existing_theme_ids: list[object] | None = None,
+    custom_new_themes: list[str] | None = None,
 ) -> dict[str, object]:
     normalized = normalize_ticker(ticker)
     if not normalized:
@@ -952,6 +1002,26 @@ def promote_scanner_candidate_to_theme_review(
         "metadata_basis": str(row["metadata_basis"] or ""),
         "promoted_at": promoted_at.isoformat(sep=" "),
     }
+    suggested_ids = _normalize_theme_selection_ids(selected_suggested_theme_ids)
+    custom_existing_ids = _normalize_theme_selection_ids(custom_existing_theme_ids)
+    suggested_theme_entries: list[dict[str, object]] = []
+    if research_draft:
+        for item in research_draft.get("suggested_existing_themes") or []:
+            try:
+                theme_id = int(item.get("theme_id"))
+            except Exception:
+                continue
+            if theme_id in suggested_ids:
+                suggested_theme_entries.append(
+                    {
+                        "theme_id": theme_id,
+                        "theme_name": str(item.get("theme_name") or ""),
+                        "category": str(item.get("category") or ""),
+                        "why_it_might_fit": str(item.get("why_it_might_fit") or ""),
+                    }
+                )
+    custom_existing_entries = _resolve_theme_entries(conn, custom_existing_ids)
+    custom_new_theme_labels = _normalize_new_theme_labels(custom_new_themes)
     context = dict(existing_context)
     context.update(
         {
@@ -959,10 +1029,26 @@ def promote_scanner_candidate_to_theme_review(
             "promotion_note": note_text,
             "promoted_at": promoted_at.isoformat(sep=" "),
             "scanner_audit_evidence": evidence,
+            "selected_suggested_themes": suggested_theme_entries,
+            "custom_existing_themes": custom_existing_entries,
+            "custom_new_themes": custom_new_theme_labels,
         }
     )
+    if research_draft:
+        context["research_draft"] = research_draft
     context_json = json.dumps(context, sort_keys=True)
     rationale = _scanner_audit_rationale(row)
+    if suggested_theme_entries or custom_existing_entries or custom_new_theme_labels:
+        selected_names = [item["theme_name"] for item in suggested_theme_entries if item.get("theme_name")]
+        custom_existing_names = [item["theme_name"] for item in custom_existing_entries if item.get("theme_name")]
+        selection_summary = []
+        if selected_names:
+            selection_summary.append("selected themes=" + ", ".join(selected_names))
+        if custom_existing_names:
+            selection_summary.append("custom existing themes=" + ", ".join(custom_existing_names))
+        if custom_new_theme_labels:
+            selection_summary.append("custom new themes=" + ", ".join(custom_new_theme_labels))
+        rationale = rationale + " Review selections: " + " | ".join(selection_summary) + "."
 
     if existing is None:
         from .suggestions_service import SuggestionPayload, create_suggestion

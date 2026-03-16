@@ -19,6 +19,7 @@ from src.scanner_audit import (
     scanner_import_overview,
     set_scanner_candidate_review_state,
 )
+from src.scanner_research import get_or_create_scanner_research_draft
 from src.streamlit_utils import (
     db_cache_token,
     load_scanner_candidate_summary_cached,
@@ -45,6 +46,16 @@ from src.theme_service import get_theme_members, list_themes, seed_if_needed
 st.set_page_config(page_title="Suggestions", layout="wide")
 st.title("Suggestions")
 reset_perf_timings("suggestions")
+research_feedback = st.session_state.pop("scanner_research_feedback", None)
+if research_feedback:
+    level = str(research_feedback.get("level") or "info")
+    message = str(research_feedback.get("message") or "")
+    if level == "success":
+        st.success(message)
+    elif level == "warning":
+        st.warning(message)
+    else:
+        st.error(message)
 
 feedback = st.session_state.pop("suggestions_feedback", None)
 if feedback:
@@ -88,6 +99,7 @@ except Exception as exc:
 db_token = db_cache_token()
 
 theme_options = themes[["id", "name"]].to_dict("records")
+theme_option_by_id = {int(row["id"]): row for row in theme_options}
 
 manual_tab, queue_tab, rules_tab, ai_tab, scanner_tab = st.tabs(["Manual", "Queue", "Rules", "AI", "Scanner Audit"])
 
@@ -510,7 +522,7 @@ with scanner_tab:
         render_dataframe("scanner_candidate_display", display, width="stretch", hide_index=True)
 
         if not view.empty:
-            selected_audit_ticker = st.selectbox("Selected scanner candidate", options=view["ticker"].tolist())
+            selected_audit_ticker = st.selectbox("Selected scanner candidate", options=view["ticker"].tolist(), key="scanner_audit_selected_ticker")
             selected_audit_row = view[view["ticker"] == selected_audit_ticker].iloc[0]
             st.caption(
                 f"{selected_audit_ticker}: {selected_audit_row['recommendation_reason']} | "
@@ -535,6 +547,150 @@ with scanner_tab:
                 except Exception as exc:
                     st.error(f"Could not save candidate review state. {exc}")
 
+            draft_store = st.session_state.setdefault("scanner_research_drafts", {})
+            debug_store = st.session_state.setdefault("scanner_research_debug", {})
+            existing_draft = draft_store.get(selected_audit_ticker)
+            generate_label = "Regenerate Research Draft" if existing_draft else "Generate Research Draft"
+            if existing_draft:
+                debug_entry = dict(debug_store.get(selected_audit_ticker) or {})
+                debug_entry.update(
+                    {
+                        "ticker": selected_audit_ticker,
+                        "generated_at": existing_draft.get("generated_at"),
+                        "research_mode": existing_draft.get("research_mode"),
+                        "draft_source": "reused_session_draft",
+                    }
+                )
+                debug_store[selected_audit_ticker] = debug_entry
+            if st.button(generate_label):
+                try:
+                    with get_conn() as conn:
+                        draft, reused = get_or_create_scanner_research_draft(
+                            conn,
+                            selected_audit_ticker,
+                            existing_draft=existing_draft,
+                            force_refresh=bool(existing_draft),
+                        )
+                    draft_store[selected_audit_ticker] = draft
+                    debug_store[selected_audit_ticker] = {
+                        "ticker": selected_audit_ticker,
+                        "generated_at": draft.get("generated_at"),
+                        "research_mode": draft.get("research_mode"),
+                        "draft_source": "reused_session_draft" if reused else "fresh_generation",
+                    }
+                    st.session_state["scanner_research_feedback"] = {
+                        "level": "success",
+                        "message": (
+                            f"Reused existing advisory research draft for {selected_audit_ticker}."
+                            if reused
+                            else f"Generated advisory research draft for {selected_audit_ticker}."
+                        ),
+                    }
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not generate research draft. {exc}")
+
+            if existing_draft:
+                st.markdown("**Research Draft (Advisory Only)**")
+                st.caption(
+                    "This is an agent-assisted advisory draft grounded on the current governed theme catalog where practical. "
+                    "It is not a governed-theme assignment and still requires human review."
+                )
+                research_mode = str(existing_draft.get("research_mode") or "heuristic_fallback")
+                mode_label = "OpenAI" if research_mode == "openai" else "Heuristic fallback"
+                meta_caption = (
+                    f"Generated at `{existing_draft.get('generated_at') or 'n/a'}` | "
+                    f"Research Mode: `{mode_label}` | "
+                    f"recommended_action=`{existing_draft.get('recommended_action') or 'watch_only'}` | "
+                    f"confidence=`{existing_draft.get('confidence') or 'low'}`"
+                )
+                st.caption(meta_caption)
+                debug_entry = debug_store.get(selected_audit_ticker) or {}
+                if debug_entry:
+                    st.caption(
+                        "Debug: "
+                        f"ticker=`{debug_entry.get('ticker') or selected_audit_ticker}` | "
+                        f"generated_at=`{debug_entry.get('generated_at') or existing_draft.get('generated_at') or 'n/a'}` | "
+                        f"mode=`{debug_entry.get('research_mode') or research_mode}` | "
+                        f"draft_source=`{debug_entry.get('draft_source') or 'reused_session_draft'}`"
+                    )
+                if research_mode != "openai" and existing_draft.get("fallback_reason"):
+                    st.info(f"Used heuristic fallback: {existing_draft.get('fallback_reason')}")
+                rd1, rd2 = st.columns(2)
+                with rd1:
+                    st.write(f"**Company:** {existing_draft.get('company_name') or selected_audit_ticker}")
+                    st.write(f"**Description:** {existing_draft.get('short_company_description') or 'No description available.'}")
+                    st.write(
+                        "**Similar tickers:** "
+                        + (", ".join(existing_draft.get("possible_similar_tickers") or []) or "None suggested")
+                    )
+                    st.write(f"**Possible new theme:** {existing_draft.get('possible_new_theme') or 'None suggested'}")
+                with rd2:
+                    st.write(f"**Rationale:** {existing_draft.get('rationale') or 'No rationale provided.'}")
+                    caveats = existing_draft.get("caveats") or []
+                    st.write("**Caveats:** " + (" | ".join(caveats) if caveats else "None"))
+
+                suggested_themes = existing_draft.get("suggested_existing_themes") or []
+                if suggested_themes:
+                    st.markdown("**Suggested Existing Themes**")
+                    selected_suggested_theme_ids: list[int] = []
+                    for item in suggested_themes:
+                        theme_id = int(item.get("theme_id"))
+                        label = f"{item.get('theme_name')} ({item.get('category')})"
+                        checked = st.checkbox(
+                            label,
+                            value=False,
+                            key=f"scanner_suggested_theme_{selected_audit_ticker}_{theme_id}",
+                        )
+                        st.caption(
+                            (str(item.get("why_it_might_fit") or "Possible governed-theme fit.") + " | ")
+                            + ("representative tickers: " + ", ".join(item.get("representative_tickers") or []) if item.get("representative_tickers") else "no representative tickers shown")
+                        )
+                        if checked:
+                            selected_suggested_theme_ids.append(theme_id)
+                else:
+                    selected_suggested_theme_ids = []
+                    st.info("No strong existing governed-theme match was suggested from the available context.")
+
+                available_custom_existing = [
+                    option for option in theme_options if int(option["id"]) not in {int(item.get("theme_id")) for item in suggested_themes}
+                ]
+                custom_existing_selection = st.multiselect(
+                    "Add custom existing themes",
+                    options=available_custom_existing,
+                    format_func=lambda option: f"{option['name']} [{option['id']}]",
+                    key=f"scanner_custom_existing_{selected_audit_ticker}",
+                )
+                custom_existing_theme_ids = [int(item["id"]) for item in custom_existing_selection]
+                custom_new_theme_raw = st.text_input(
+                    "Add custom proposed new themes",
+                    value="",
+                    placeholder="Comma-separated new theme ideas",
+                    key=f"scanner_custom_new_{selected_audit_ticker}",
+                )
+                custom_new_themes = sorted(
+                    {
+                        item.strip()
+                        for item in custom_new_theme_raw.replace(";", ",").split(",")
+                        if item.strip()
+                    }
+                )
+                if selected_suggested_theme_ids or custom_existing_theme_ids or custom_new_themes:
+                    st.caption(
+                        "Selected for staged review: "
+                        + ", ".join(
+                            [theme_option_by_id[theme_id]["name"] for theme_id in custom_existing_theme_ids if theme_id in theme_option_by_id]
+                            + [item.get("theme_name") for item in suggested_themes if int(item.get("theme_id")) in selected_suggested_theme_ids]
+                            + custom_new_themes
+                        )
+                    )
+                else:
+                    st.caption("No theme ideas selected yet. You can choose suggested themes, add custom existing themes, or enter custom new-theme labels.")
+            else:
+                selected_suggested_theme_ids = []
+                custom_existing_theme_ids = []
+                custom_new_themes = []
+
             promotion_note = st.text_area(
                 "Promotion note (optional)",
                 value="",
@@ -544,19 +700,27 @@ with scanner_tab:
             can_promote = not bool(selected_audit_row["is_governed"])
             st.caption(
                 "Promotion creates or refreshes a staged review candidate only. "
-                "It does not modify governed theme membership."
+                "It carries forward the advisory draft and Scanner Audit evidence, and it does not modify governed theme membership."
             )
             if not can_promote:
                 st.info("This candidate is already governed. Promotion is reserved for uncovered candidates.")
-            if st.button("Send to Theme Review", disabled=not can_promote):
+            send_disabled = (not can_promote) or (existing_draft is None)
+            if existing_draft is None:
+                st.info("Generate a research draft first to promote an agent-assisted review candidate.")
+            if st.button("Send Selected Suggestions to Theme Review", disabled=send_disabled):
                 try:
                     with get_conn() as conn:
-                        result = promote_scanner_candidate_to_theme_review(conn, selected_audit_ticker, promotion_note)
-                    st.session_state["suggestions_feedback"] = {
-                        "level": "success",
-                        "message": str(result["message"]),
-                    }
-                    st.rerun()
+                        result = promote_scanner_candidate_to_theme_review(
+                            conn,
+                            selected_audit_ticker,
+                            promotion_note,
+                            research_draft=existing_draft,
+                            selected_suggested_theme_ids=selected_suggested_theme_ids,
+                            custom_existing_theme_ids=custom_existing_theme_ids,
+                            custom_new_themes=custom_new_themes,
+                        )
+                    st.success(str(result["message"]))
+                    st.caption("Selected ideas were sent to staged Theme Review only. No governed membership was changed.")
                 except Exception as exc:
                     st.error(f"Could not send candidate to Theme Review. {exc}")
 
