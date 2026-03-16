@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 import pandas as pd
@@ -244,6 +245,39 @@ def _build_filter_clauses(
     return clauses, params
 
 
+def _parse_source_context(raw_value: object) -> dict[str, object]:
+    if raw_value in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(raw_value))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _structured_review_theme_summary(context: dict[str, object]) -> dict[str, object]:
+    selected_suggested = list(context.get("selected_suggested_themes") or [])
+    custom_existing = list(context.get("custom_existing_themes") or [])
+    custom_new = [str(value).strip() for value in context.get("custom_new_themes") or [] if str(value).strip()]
+    selected_existing_entries = selected_suggested + custom_existing
+    selected_existing_theme_names = [
+        str(item.get("theme_name")).strip()
+        for item in selected_existing_entries
+        if isinstance(item, dict) and str(item.get("theme_name") or "").strip()
+    ]
+    promotion_note = str(context.get("promotion_note") or "").strip()
+    scanner_evidence = context.get("scanner_audit_evidence") if isinstance(context.get("scanner_audit_evidence"), dict) else {}
+    research_draft = context.get("research_draft") if isinstance(context.get("research_draft"), dict) else {}
+    return {
+        "selected_existing_theme_names": selected_existing_theme_names,
+        "custom_new_theme_names": custom_new,
+        "promotion_note": promotion_note,
+        "scanner_audit_recommendation": str(scanner_evidence.get("recommendation") or "").strip(),
+        "scanner_audit_reason": str(scanner_evidence.get("recommendation_reason") or "").strip(),
+        "research_summary": str(research_draft.get("rationale") or "").strip(),
+    }
+
+
 def list_suggestions(
     conn,
     status: str | None = None,
@@ -291,6 +325,17 @@ def list_suggestions(
         return df
 
     df = df.copy()
+    if "source_context_json" not in df.columns:
+        df["source_context_json"] = None
+    df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+    structured = df["source_context"].apply(_structured_review_theme_summary).apply(pd.Series)
+    df = pd.concat([df, structured], axis=1)
+    df["selected_existing_theme_names"] = df["selected_existing_theme_names"].apply(
+        lambda names: ", ".join(names) if isinstance(names, list) and names else None
+    )
+    df["custom_new_theme_names"] = df["custom_new_theme_names"].apply(
+        lambda names: ", ".join(names) if isinstance(names, list) and names else None
+    )
     df["validation_status"] = df.apply(lambda r: _compute_validation_status(conn, r), axis=1)
     return df
 
@@ -422,7 +467,7 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
     row = conn.execute(
         """
         SELECT suggestion_id, suggestion_type, status, source, proposed_theme_name, proposed_ticker,
-               existing_theme_id, proposed_target_theme_id, priority
+               existing_theme_id, proposed_target_theme_id, priority, source_context_json
         FROM theme_suggestions
         WHERE suggestion_id = ?
         """,
@@ -431,7 +476,7 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
     if row is None:
         raise ValueError("Suggestion not found")
 
-    _, suggestion_type, status, source, proposed_theme_name, proposed_ticker, existing_theme_id, target_theme_id, priority = row
+    _, suggestion_type, status, source, proposed_theme_name, proposed_ticker, existing_theme_id, target_theme_id, priority, source_context_json = row
     if status != "approved":
         raise ValueError("Only approved suggestions can be applied")
 
@@ -449,7 +494,7 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
         raise ValueError(f"Suggestion is no longer applicable: {reason}")
 
     if suggestion_type == "add_ticker_to_theme":
-        add_ticker(conn, int(existing_theme_id), proposed_ticker)
+        add_ticker(conn, int(existing_theme_id), proposed_ticker, onboarding_source=f"suggestion:{source}")
     elif suggestion_type == "remove_ticker_from_theme":
         remove_ticker(conn, int(existing_theme_id), proposed_ticker)
     elif suggestion_type == "create_theme":
@@ -462,9 +507,24 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
         update_theme(conn, int(existing_theme_id), proposed_theme_name, category, bool(is_active))
     elif suggestion_type == "move_ticker_between_themes":
         remove_ticker(conn, int(existing_theme_id), proposed_ticker)
-        add_ticker(conn, int(target_theme_id), proposed_ticker)
+        add_ticker(conn, int(target_theme_id), proposed_ticker, onboarding_source=f"suggestion:{source}")
     elif suggestion_type == "review_theme":
-        pass
+        context = _parse_source_context(source_context_json)
+        selected_existing = list(context.get("selected_suggested_themes") or []) + list(context.get("custom_existing_themes") or [])
+        applied_theme_ids: list[int] = []
+        for item in selected_existing:
+            if not isinstance(item, dict):
+                continue
+            theme_id = item.get("theme_id")
+            if theme_id in (None, ""):
+                continue
+            normalized_theme_id = int(theme_id)
+            if normalized_theme_id in applied_theme_ids:
+                continue
+            add_ticker(conn, normalized_theme_id, proposed_ticker, onboarding_source=f"suggestion:{source}")
+            applied_theme_ids.append(normalized_theme_id)
+        if not applied_theme_ids:
+            raise ValueError("Review suggestion has no selected existing themes to apply.")
     else:
         raise ValueError(f"Unsupported suggestion type: {suggestion_type}")
 

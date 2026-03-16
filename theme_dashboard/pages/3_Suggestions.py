@@ -12,6 +12,7 @@ from src.config import (
 from src.database import get_conn, init_db
 from src.rules_engine import run_rules_engine
 from src.scanner_audit import (
+    apply_scanner_candidate_selected_themes,
     import_tc2000_exports,
     promote_scanner_candidate_to_theme_review,
     recent_scanner_import_runs,
@@ -26,6 +27,8 @@ from src.suggestions_page_state import (
     resolve_scanner_audit_ticker,
 )
 from src.streamlit_utils import (
+    clear_scanner_candidate_summary_cache,
+    clear_current_market_view_caches,
     db_cache_token,
     load_scanner_candidate_summary_cached,
     load_theme_health_overview_cached,
@@ -93,6 +96,33 @@ def _render_ticker_membership_context(row) -> None:
             st.write(f"Themes: `{themes}`")
         if categories:
             st.write(f"Categories: `{categories}`")
+
+
+def _render_structured_review_context(row) -> None:
+    selected_existing = str(row.get("selected_existing_theme_names") or "").strip()
+    custom_new = str(row.get("custom_new_theme_names") or "").strip()
+    promotion_note = str(row.get("promotion_note") or "").strip()
+    scanner_recommendation = str(row.get("scanner_audit_recommendation") or "").strip()
+    scanner_reason = str(row.get("scanner_audit_reason") or "").strip()
+    research_summary = str(row.get("research_summary") or "").strip()
+    if not any([selected_existing, custom_new, promotion_note, scanner_recommendation, research_summary]):
+        return
+
+    with st.container(border=True):
+        st.write("**Structured Review Context**")
+        if selected_existing:
+            st.write(f"Selected existing themes: `{selected_existing}`")
+        if custom_new:
+            st.write(f"Custom new themes: `{custom_new}`")
+        if promotion_note:
+            st.write(f"Promotion note: {promotion_note}")
+        if scanner_recommendation or scanner_reason:
+            st.caption(
+                "Scanner Audit: "
+                + " | ".join(part for part in [scanner_recommendation, scanner_reason] if part)
+            )
+        if research_summary:
+            st.caption(f"Research summary: {research_summary}")
 
 try:
     init_db()
@@ -231,6 +261,7 @@ if active_suggestions_tab == "Queue":
             )
             if str(selected_row.get("proposed_ticker") or "").strip():
                 _render_ticker_membership_context(selected_row)
+            _render_structured_review_context(selected_row)
             rnotes = st.text_input("Review notes", value="", key="rnotes")
             c1, c2 = st.columns(2)
             with c1:
@@ -295,6 +326,7 @@ if active_suggestions_tab == "Queue":
             )
             if str(approved_row.get("proposed_ticker") or "").strip():
                 _render_ticker_membership_context(approved_row)
+            _render_structured_review_context(approved_row)
             anotes = st.text_input("Apply notes", value="", key="anotes")
             if st.button("Apply approved"):
                 with get_conn() as conn:
@@ -389,6 +421,7 @@ if active_suggestions_tab == "Scanner Audit":
     if st.button("Import latest TC2000 exports", type="primary"):
         with get_conn() as conn:
             result = import_tc2000_exports(conn)
+        clear_scanner_candidate_summary_cache()
         st.session_state["scanner_import_feedback"] = result
         st.rerun()
 
@@ -403,6 +436,7 @@ if active_suggestions_tab == "Scanner Audit":
             if st.button("Confirm Reset Scanner Audit Data", type="secondary"):
                 with get_conn() as conn:
                     result = reset_scanner_audit_data(conn)
+                clear_scanner_candidate_summary_cache()
                 st.session_state["scanner_reset_feedback"] = result
                 st.session_state["scanner_reset_armed"] = False
                 st.session_state.pop("scanner_import_feedback", None)
@@ -568,6 +602,7 @@ if active_suggestions_tab == "Scanner Audit":
                 try:
                     with get_conn() as conn:
                         result = set_scanner_candidate_review_state(conn, selected_audit_ticker, review_action, review_note)
+                    clear_scanner_candidate_summary_cache()
                     st.success(f"Saved `{result['review_state']}` state for {result['ticker']}.")
                     st.rerun()
                 except Exception as exc:
@@ -647,6 +682,16 @@ if active_suggestions_tab == "Scanner Audit":
                         f"mode=`{debug_entry.get('research_mode') or research_mode}` | "
                         f"draft_source=`{debug_entry.get('draft_source') or existing_draft.get('draft_source') or 'reused_session_draft'}`"
                     )
+                decision_trace = existing_draft.get("research_decision_trace") or {}
+                if decision_trace:
+                    st.caption(
+                        "Decision: "
+                        f"candidate_new_theme=`{decision_trace.get('candidate_new_theme') or 'None'}` | "
+                        f"roles=`{', '.join(decision_trace.get('candidate_roles_detected') or []) or 'none'}` | "
+                        f"adjacent_only_existing=`{decision_trace.get('adjacency_only_existing_fit')}` | "
+                        f"heuristic_prefers_new=`{decision_trace.get('heuristic_prefers_new_theme')}` | "
+                        f"should_promote_new=`{decision_trace.get('should_promote_new_theme')}`"
+                    )
                 context_meta = existing_draft.get("research_context_meta") or {}
                 if context_meta:
                     st.caption(
@@ -693,7 +738,8 @@ if active_suggestions_tab == "Scanner Audit":
                     selected_suggested_theme_ids: list[int] = []
                     for item in suggested_themes:
                         theme_id = int(item.get("theme_id"))
-                        label = f"{item.get('theme_name')} ({item.get('category')})"
+                        fit_label = str(item.get("fit_label") or "adjacent_fit")
+                        label = f"{item.get('theme_name')} ({item.get('category')}) [{fit_label}]"
                         checked = st.checkbox(
                             label,
                             value=False,
@@ -762,9 +808,13 @@ if active_suggestions_tab == "Scanner Audit":
             if not can_promote:
                 st.info("This candidate is already governed. Promotion is reserved for uncovered candidates.")
             send_disabled = (not can_promote) or (existing_draft is None)
+            apply_now_disabled = send_disabled or not bool(selected_suggested_theme_ids or custom_existing_theme_ids)
             if existing_draft is None:
                 st.info("Generate a research draft first to promote an agent-assisted review candidate.")
-            if st.button("Send Selected Suggestions to Theme Review", disabled=send_disabled):
+            if apply_now_disabled and existing_draft is not None:
+                st.caption("Direct apply requires at least one selected existing theme. Custom new-theme ideas can still be staged for later review.")
+            action_c1, action_c2 = st.columns(2)
+            if action_c1.button("Send Selected Suggestions to Theme Review", disabled=send_disabled):
                 try:
                     with get_conn() as conn:
                         result = promote_scanner_candidate_to_theme_review(
@@ -780,5 +830,37 @@ if active_suggestions_tab == "Scanner Audit":
                     st.caption("Selected ideas were sent to staged Theme Review only. No governed membership was changed.")
                 except Exception as exc:
                     st.error(f"Could not send candidate to Theme Review. {exc}")
+            if action_c2.button("Apply Selected Themes & Start Onboarding", disabled=apply_now_disabled, type="primary"):
+                try:
+                    with get_conn() as conn:
+                        result = apply_scanner_candidate_selected_themes(
+                            conn,
+                            selected_audit_ticker,
+                            promotion_note,
+                            research_draft=existing_draft,
+                            selected_suggested_theme_ids=selected_suggested_theme_ids,
+                            custom_existing_theme_ids=custom_existing_theme_ids,
+                            custom_new_themes=custom_new_themes,
+                        )
+                    clear_scanner_candidate_summary_cache()
+                    clear_current_market_view_caches()
+                    onboarding_state = result.get("onboarding_state") or {}
+                    theme_summary = ", ".join(result.get("applied_theme_names") or [])
+                    st.success(str(result["message"]))
+                    if theme_summary:
+                        st.caption(f"Applied themes: `{theme_summary}`")
+                    if onboarding_state:
+                        st.caption(
+                            "Onboarding: "
+                            f"history=`{onboarding_state.get('history_readiness_status') or 'unknown'}` | "
+                            f"backfill=`{onboarding_state.get('backfill_status') or 'unknown'}` | "
+                            f"downstream_refresh_needed=`{bool(onboarding_state.get('downstream_refresh_needed'))}`"
+                        )
+                    st.caption(
+                        "An auditable Scanner Audit review record was preserved automatically. "
+                        "Use Theme Review only when you want to defer the final apply decision."
+                    )
+                except Exception as exc:
+                    st.error(f"Could not apply selected themes from Scanner Audit. {exc}")
 
 show_perf_summary()

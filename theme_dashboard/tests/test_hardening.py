@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -1631,6 +1632,42 @@ class TestBootstrapAndHistoryFramework(unittest.TestCase):
                 with get_conn() as conn:
                     themes_count = int(conn.execute("select count(*) from themes").fetchone()[0])
                     self.assertGreater(themes_count, 0)
+
+    def test_init_db_skips_noncritical_symbol_refresh_status_conflict(self):
+        real_conn = duckdb.connect(":memory:")
+        conflict_calls = {"count": 0}
+
+        class WrappedConn:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def execute(self, sql, params=None):
+                normalized_sql = " ".join(str(sql).split())
+                if normalized_sql.startswith("UPDATE symbol_refresh_status SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL"):
+                    conflict_calls["count"] += 1
+                    raise duckdb.TransactionException("TransactionContext Error: Conflict on update")
+                if params is None:
+                    return self.inner.execute(sql)
+                return self.inner.execute(sql, params)
+
+        @contextmanager
+        def fake_get_conn():
+            try:
+                yield WrappedConn(real_conn)
+            finally:
+                pass
+
+        with patch("src.database.get_conn", fake_get_conn), patch("src.theme_service.seed_if_needed", return_value=False):
+            from src.database import init_db
+
+            init_db()
+
+        self.assertEqual(conflict_calls["count"], 1)
+        self.assertEqual(
+            real_conn.execute("select count(*) from duckdb_tables() where table_name = 'symbol_refresh_status'").fetchone()[0],
+            1,
+        )
+        real_conn.close()
 
     def test_history_helpers_return_recent_snapshots_and_latest(self):
         conn = duckdb.connect(":memory:")

@@ -72,6 +72,7 @@ def run_refresh(
     progress_callback: Callable[[dict], None] | None = None,
     scope_type: str | None = None,
     scope_theme_name: str | None = None,
+    persist_theme_snapshots: bool = True,
 ) -> int:
     mark_stale_running_runs(conn)
 
@@ -291,7 +292,7 @@ def run_refresh(
             ],
         )
 
-        if success_count > 0:
+        if success_count > 0 and persist_theme_snapshots:
             persist_theme_snapshot_for_run(conn, run_id)
     except Exception as exc:
         accounting = provider.get_call_accounting() if hasattr(provider, "get_call_accounting") else {"api_call_count": 0, "endpoint_counts": {}}
@@ -325,3 +326,48 @@ def run_refresh(
         raise
 
     return run_id
+
+
+def run_targeted_current_snapshot_hydration(
+    conn,
+    tickers: Iterable[str],
+    *,
+    provider_name: str,
+    scope_type: str = "governed_ticker_current_hydration",
+) -> dict[str, object]:
+    normalized_tickers = sorted({(ticker or "").strip().upper() for ticker in tickers if (ticker or "").strip()})
+    if not normalized_tickers:
+        return {"status": "no_scope", "tickers": [], "run_id": None}
+    required_tables = {"refresh_runs", "refresh_run_tickers", "ticker_snapshots"}
+    existing_tables = {
+        str(row[0]).strip()
+        for row in conn.execute("SELECT table_name FROM duckdb_tables()").fetchall()
+    }
+    if not required_tables.issubset(existing_tables):
+        return {
+            "status": "unavailable",
+            "tickers": normalized_tickers,
+            "run_id": None,
+            "message": "Current snapshot hydration requires refresh tracking tables.",
+        }
+    try:
+        run_id = run_refresh(
+            conn,
+            provider_name=provider_name,
+            tickers=normalized_tickers,
+            scope_type=scope_type,
+            scope_theme_name=None,
+            persist_theme_snapshots=False,
+        )
+    except RefreshBlockedError as exc:
+        return {
+            "status": "blocked",
+            "tickers": normalized_tickers,
+            "run_id": int(exc.running_run_id),
+            "message": str(exc),
+        }
+    return {
+        "status": "success",
+        "tickers": normalized_tickers,
+        "run_id": int(run_id),
+    }

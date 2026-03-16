@@ -145,6 +145,12 @@ def load_current_ranking_snapshot_cached(db_token: tuple[str, int]):
     return _timed_cached_load("current_ranking_snapshot", _load_current_ranking_snapshot_cached, db_token)
 
 
+def clear_current_market_view_caches() -> None:
+    _load_current_ranking_snapshot_cached.clear()
+    _load_theme_rankings_cached.clear()
+    _load_theme_health_overview_cached.clear()
+
+
 @st.cache_data(show_spinner=False)
 def _load_theme_rankings_cached(_db_token: tuple[str, int]):
     with get_conn() as conn:
@@ -199,3 +205,7 @@ def _load_scanner_candidate_summary_cached(_db_token: tuple[str, int]):
 
 def load_scanner_candidate_summary_cached(db_token: tuple[str, int]):
     return _timed_cached_load("scanner_candidate_summary", _load_scanner_candidate_summary_cached, db_token)
+
+
+def clear_scanner_candidate_summary_cache() -> None:
+    _load_scanner_candidate_summary_cached.clear()

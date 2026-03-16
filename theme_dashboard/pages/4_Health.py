@@ -33,6 +33,7 @@ from src.queries import (
     theme_member_hygiene_context,
 )
 from src.streamlit_utils import (
+    clear_current_market_view_caches,
     db_cache_token,
     extract_selected_row,
     load_theme_health_overview_cached,
@@ -57,6 +58,12 @@ from src.symbol_hygiene import (
 )
 from src.theme_selection import set_theme_selection_state
 from src.theme_service import get_theme_members, replace_ticker_in_theme, seed_if_needed, update_theme
+from src.ticker_onboarding import (
+    governed_ticker_onboarding_counts,
+    list_governed_ticker_onboarding,
+    run_governed_ticker_onboarding_backfill,
+    run_governed_ticker_onboarding_theme_reconstruction,
+)
 
 st.set_page_config(page_title="Health", layout="wide")
 st.title("Health & Operations")
@@ -80,6 +87,8 @@ try:
         source_audit = source_audit_status(conn)
         ticker_history_ready = ticker_history_readiness(conn, target_trading_days=30)
         sugg_counts = suggestion_status_counts(conn)
+        governed_onboarding = list_governed_ticker_onboarding(conn, limit=100)
+        governed_onboarding_counts_df = governed_ticker_onboarding_counts(conn)
 except Exception as exc:
     stop_for_database_error(exc)
 db_token = db_cache_token()
@@ -173,6 +182,134 @@ with ops_tab:
                 f"Stored trading-date range: `{readiness.get('earliest_trading_date') or 'n/a'}` to "
                 f"`{readiness.get('latest_trading_date') or 'n/a'}`"
             )
+
+    st.subheader("Newly governed ticker onboarding")
+    st.caption(
+        "Tracks post-addition history readiness for newly governed tickers. "
+        "This does not run on advisory review actions; it starts only when governed membership is actually written."
+    )
+    if governed_onboarding.empty:
+        st.success("No newly governed tickers are currently being tracked for onboarding.")
+    else:
+        onboarding_count = int(len(governed_onboarding))
+        needs_backfill = int(
+            len(
+                governed_onboarding[
+                    governed_onboarding["backfill_status"].isin(["needed", "running", "failed", "insufficient_after_attempt"])
+                ]
+            )
+        )
+        ready_count = int(len(governed_onboarding[governed_onboarding["history_readiness_status"] == "ready"]))
+        downstream_needed = int(len(governed_onboarding[governed_onboarding["downstream_refresh_needed"] == True]))
+        o1, o2, o3, o4 = st.columns(4)
+        o1.metric("Tracked tickers", onboarding_count)
+        o2.metric("History ready", ready_count)
+        o3.metric("Needs backfill", needs_backfill)
+        o4.metric("Downstream refresh needed", downstream_needed)
+        if not governed_onboarding_counts_df.empty:
+            st.caption(
+                "Status mix: "
+                + "; ".join(
+                    f"{row['history_readiness_status']}/{row['backfill_status']}={int(row['cnt'])}"
+                    for _, row in governed_onboarding_counts_df.iterrows()
+                )
+            )
+        pending_backfill_options = (
+            governed_onboarding[
+                governed_onboarding["backfill_status"].isin(["needed", "failed", "insufficient_after_attempt"])
+            ]["ticker"]
+            .astype(str)
+            .tolist()
+        )
+        selected_onboarding_tickers = st.multiselect(
+            "Tickers for onboarding history hydration",
+            options=pending_backfill_options,
+            default=pending_backfill_options[:5],
+            key="governed_onboarding_tickers",
+            help="Fetches and persists ticker daily history only for newly governed tickers that still need stored history depth.",
+        )
+        if st.button(
+            "Hydrate ticker history for onboarding",
+            type="primary",
+            disabled=not bool(selected_onboarding_tickers),
+            key="run_governed_onboarding_backfill",
+        ):
+            try:
+                with get_conn() as conn:
+                    result = run_governed_ticker_onboarding_backfill(conn, selected_onboarding_tickers)
+                updated_rows = result.get("updated_rows") or []
+                updated_summary = ", ".join(
+                    f"{row['ticker']}={row['backfill_status']}" for row in updated_rows[:5]
+                )
+                st.success(
+                    f"Onboarding history hydration finished with status `{result.get('status')}` for "
+                    f"{len(result.get('tickers') or [])} ticker(s). {updated_summary}"
+                )
+                current_snapshot_result = result.get("current_snapshot_result") or {}
+                if current_snapshot_result:
+                    st.caption(
+                        "Targeted current snapshot hydration: "
+                        f"status=`{current_snapshot_result.get('status') or 'unknown'}` | "
+                        f"run_id=`{current_snapshot_result.get('run_id') or 'n/a'}`"
+                    )
+                clear_current_market_view_caches()
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Onboarding history hydration failed: {exc}")
+        downstream_options = (
+            governed_onboarding[governed_onboarding["downstream_refresh_needed"] == True]["ticker"]
+            .astype(str)
+            .tolist()
+        )
+        selected_reconstruction_tickers = st.multiselect(
+            "Tickers for affected-theme reconstruction",
+            options=downstream_options,
+            default=downstream_options[:5],
+            key="governed_onboarding_reconstruction_tickers",
+            help="Rebuilds reconstructed theme history for themes affected by these newly governed tickers after ticker history is ready.",
+        )
+        if st.button(
+            "Run affected-theme reconstruction",
+            disabled=not bool(selected_reconstruction_tickers),
+            key="run_governed_onboarding_theme_reconstruction",
+        ):
+            try:
+                with get_conn() as conn:
+                    result = run_governed_ticker_onboarding_theme_reconstruction(conn, selected_reconstruction_tickers)
+                st.success(
+                    f"Affected-theme reconstruction finished with status `{result.get('status')}` for "
+                    f"{len(result.get('tickers') or [])} ticker(s)."
+                )
+                clear_current_market_view_caches()
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Affected-theme reconstruction failed: {exc}")
+        st.caption(
+            "History hydration is ticker-scoped. Affected-theme reconstruction is a separate explicit step once ticker history is ready."
+        )
+        render_dataframe(
+            "governed_ticker_onboarding",
+            governed_onboarding[
+                [
+                    "ticker",
+                    "added_at",
+                    "onboarding_source",
+                    "history_readiness_status",
+                    "backfill_status",
+                    "history_row_count",
+                    "history_target_days",
+                    "history_market_data_source",
+                    "history_latest_trading_date",
+                    "downstream_refresh_needed",
+                    "last_backfill_attempt_at",
+                    "last_backfill_error",
+                    "governed_assignment_count",
+                    "governed_themes",
+                ]
+            ],
+            width="stretch",
+            hide_index=True,
+        )
 
     with get_conn() as conn:
         reconstruction_runs = historical_reconstruction_runs(conn, limit=10)

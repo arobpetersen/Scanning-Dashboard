@@ -18,7 +18,7 @@ Return STRICT JSON with fields:
 - company_name
 - short_company_description
 - possible_similar_tickers (array of strings)
-- suggested_existing_themes (array of objects with theme_id, theme_name, category, why_it_might_fit)
+- suggested_existing_themes (array of objects with theme_id, theme_name, category, why_it_might_fit, fit_label)
 - possible_new_theme
 - confidence
 - rationale
@@ -211,6 +211,20 @@ ROLE_FAMILY = {
 }
 
 _PROFILE_CACHE: dict[str, dict[str, object]] = {}
+VAGUE_NEW_THEME_LABEL_TOKENS = {
+    "advanced",
+    "business services",
+    "future",
+    "next-gen",
+    "next generation",
+    "platform",
+    "platforms",
+    "services",
+    "solutions",
+    "technology services",
+    "infrastructure services",
+    "high growth",
+}
 
 
 def _normalize_text(value: object) -> str:
@@ -250,7 +264,32 @@ def _normalize_optional_theme_label(value: object) -> str | None:
         "na",
         "null",
     }
-    return None if normalized in empty_markers else text
+    if normalized in empty_markers:
+        return None
+    if any(token in normalized for token in VAGUE_NEW_THEME_LABEL_TOKENS):
+        return None
+    return text
+
+
+def _fit_label_from_details(fit_details: dict[str, object]) -> str:
+    if bool(fit_details.get("direct_role_fit")):
+        return "direct_fit"
+    if bool(fit_details.get("indirect_only_fit")) or bool(fit_details.get("market_overlap")):
+        return "adjacent_fit"
+    return "broad_fit"
+
+
+def _annotate_suggestion_fit(
+    suggestion: dict[str, object],
+    fit_details: dict[str, object],
+) -> dict[str, object]:
+    annotated = dict(suggestion)
+    annotated["fit_label"] = _fit_label_from_details(fit_details)
+    return annotated
+
+
+def _truncate_existing_theme_suggestions(suggestions: list[dict[str, object]], *, limit: int = 3) -> list[dict[str, object]]:
+    return list(suggestions or [])[:limit]
 
 
 def _extract_openai_error_details(exc: Exception) -> dict[str, object]:
@@ -388,23 +427,25 @@ def _theme_concepts(theme_entry: dict[str, object]) -> set[str]:
     ) | _representative_ticker_market_hints(list(theme_entry.get("representative_tickers") or []))
 
 
-def _candidate_roles(profile: dict[str, object], candidate: dict[str, object]) -> set[str]:
+def _candidate_roles(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> set[str]:
     return _infer_signals(
         ROLE_KEYWORDS,
         profile.get("company_name"),
         profile.get("description"),
         profile.get("sic_description"),
         candidate.get("recommendation_reason"),
+        *extra_parts,
     )
 
 
-def _candidate_end_markets(profile: dict[str, object], candidate: dict[str, object]) -> set[str]:
+def _candidate_end_markets(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> set[str]:
     return _infer_signals(
         END_MARKET_KEYWORDS,
         profile.get("company_name"),
         profile.get("description"),
         profile.get("sic_description"),
         candidate.get("recommendation_reason"),
+        *extra_parts,
     )
 
 
@@ -450,8 +491,8 @@ def _format_signal_names(values: set[str], display_map: dict[str, str], limit: i
     return ", ".join(display_map.get(value, value.replace("_", " ")) for value in sorted(values)[:limit])
 
 
-def _dominant_role(profile: dict[str, object], candidate: dict[str, object]) -> str:
-    roles = _candidate_roles(profile, candidate)
+def _dominant_role(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> str:
+    roles = _candidate_roles(profile, candidate, *extra_parts)
     if roles:
         return sorted(roles)[0]
     return ""
@@ -661,15 +702,16 @@ def _theme_fit_score(theme_entry: dict[str, object], profile: dict[str, object],
     return int(details["score"]), str(details["why"])
 
 
-def _candidate_new_theme_label(profile: dict[str, object], candidate: dict[str, object]) -> str | None:
-    roles = _candidate_roles(profile, candidate)
-    markets = _candidate_end_markets(profile, candidate)
+def _candidate_new_theme_label(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> str | None:
+    roles = _candidate_roles(profile, candidate, *extra_parts)
+    markets = _candidate_end_markets(profile, candidate, *extra_parts)
     description = " ".join(
         [
             _normalize_text(profile.get("company_name")).lower(),
             _normalize_text(profile.get("description")).lower(),
             _normalize_text(profile.get("sic_description")).lower(),
             _normalize_text(candidate.get("recommendation_reason")).lower(),
+            *[_normalize_text(part).lower() for part in extra_parts],
         ]
     )
     if "optical_networking" in roles:
@@ -688,17 +730,19 @@ def _candidate_new_theme_label(profile: dict[str, object], candidate: dict[str, 
         if "specialty" in description:
             return "Specialty Semiconductor Materials"
         return "Semiconductor Materials"
-    dominant_role = _dominant_role(profile, candidate)
+    dominant_role = _dominant_role(profile, candidate, *extra_parts)
     if dominant_role:
-        return ROLE_NEW_LABELS.get(dominant_role)
+        if dominant_role in {"software_tooling", "power_generation"}:
+            return None
+        return _normalize_optional_theme_label(ROLE_NEW_LABELS.get(dominant_role))
     concept = _concept_strength(_candidate_concepts(profile, candidate))
     if concept:
-        return THEME_NEW_LABELS.get(concept) or _normalize_text(profile.get("sic_description")).title() or None
+        return _normalize_optional_theme_label(THEME_NEW_LABELS.get(concept) or _normalize_text(profile.get("sic_description")).title())
     return None
 
 
-def _supports_distinct_new_theme_label(profile: dict[str, object], candidate: dict[str, object]) -> bool:
-    role = _dominant_role(profile, candidate)
+def _supports_distinct_new_theme_label(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> bool:
+    role = _dominant_role(profile, candidate, *extra_parts)
     if role in {"", "software_tooling", "power_generation"}:
         return False
     return True
@@ -845,6 +889,7 @@ def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[s
             "why_it_might_fit": why,
             "representative_tickers": list(entry.get("representative_tickers") or []),
         }
+        suggestion_payload = _annotate_suggestion_fit(suggestion_payload, fit_details)
         if (
             not fit_details.get("direct_role_fit")
             and (
@@ -964,7 +1009,7 @@ def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[s
         "company_name": _normalize_text(profile.get("company_name")) or candidate["ticker"],
         "short_company_description": _normalize_text(profile.get("description")) or _normalize_text(profile.get("sic_description")) or "No verified company description available.",
         "possible_similar_tickers": possible_similar,
-        "suggested_existing_themes": suggested_existing,
+        "suggested_existing_themes": _truncate_existing_theme_suggestions(suggested_existing),
         "possible_new_theme": possible_new_theme,
         "confidence": confidence,
         "rationale": " ".join(rationale_parts),
@@ -1033,6 +1078,27 @@ def _best_suggested_theme_fit_details(
         if int(fit_details.get("score") or 0) > int(best.get("score") or 0):
             best = fit_details
     return best
+
+
+def _annotate_existing_theme_suggestions(
+    suggestions: list[dict[str, object]],
+    catalog: list[dict[str, object]],
+    profile: dict[str, object],
+    candidate: dict[str, object],
+) -> list[dict[str, object]]:
+    by_id = {int(item["theme_id"]): item for item in catalog}
+    annotated: list[dict[str, object]] = []
+    for suggestion in list(suggestions or []):
+        try:
+            theme_id = int(suggestion.get("theme_id"))
+        except Exception:
+            continue
+        entry = by_id.get(theme_id)
+        if entry is None:
+            continue
+        fit_details = _theme_fit_details(entry, profile, candidate)
+        annotated.append(_annotate_suggestion_fit(suggestion, fit_details))
+    return _truncate_existing_theme_suggestions(annotated)
 
 
 def _precision_override_reason(
@@ -1127,12 +1193,16 @@ def _merge_ai_with_heuristic_draft(
     if not merged["possible_new_theme"] and merged["recommended_action"] == "consider_new_theme":
         merged["possible_new_theme"] = _normalize_optional_theme_label(heuristic_draft.get("possible_new_theme"))
 
+    ai_role_context = [
+        ai_draft.get("short_company_description"),
+        ai_draft.get("rationale"),
+    ]
     heuristic_prefers_new_theme = (
         _normalize_action(heuristic_draft.get("recommended_action")) == "consider_new_theme"
         and _normalize_text(heuristic_draft.get("possible_new_theme"))
     )
-    candidate_new_theme = _candidate_new_theme_label(profile, candidate)
-    supports_distinct_new_theme = _supports_distinct_new_theme_label(profile, candidate)
+    candidate_new_theme = _candidate_new_theme_label(profile, candidate, *ai_role_context)
+    supports_distinct_new_theme = _supports_distinct_new_theme_label(profile, candidate, *ai_role_context)
     ai_rationale_signals_gap = _rationale_signals_precision_gap(ai_rationale)
     merged_rationale_signals_gap = _rationale_signals_precision_gap(str(merged.get("rationale") or ""))
     best_ai_existing_fit = _best_suggested_theme_fit_details(
@@ -1142,7 +1212,10 @@ def _merge_ai_with_heuristic_draft(
         candidate,
     )
     adjacency_only_existing_fit = _existing_theme_fit_is_adjacent_only(best_ai_existing_fit)
-    role_specific_context_supports_new_theme = bool(_candidate_roles(profile, candidate)) and _profile_has_research_value(profile)
+    inferred_candidate_roles = _candidate_roles(profile, candidate, *ai_role_context)
+    role_specific_context_supports_new_theme = bool(inferred_candidate_roles) and (
+        _profile_has_research_value(profile) or any(_normalize_text(part) for part in ai_role_context)
+    )
     should_promote_new_theme = (
         bool(candidate_new_theme)
         and supports_distinct_new_theme
@@ -1161,6 +1234,19 @@ def _merge_ai_with_heuristic_draft(
             or adjacency_only_existing_fit
         )
     )
+    merged["research_decision_trace"] = {
+        "candidate_new_theme": candidate_new_theme,
+        "candidate_roles_detected": sorted(inferred_candidate_roles),
+        "supports_distinct_new_theme": supports_distinct_new_theme,
+        "ai_rationale_signals_gap": ai_rationale_signals_gap,
+        "merged_rationale_signals_gap": merged_rationale_signals_gap,
+        "best_existing_fit_score": int(best_ai_existing_fit.get("score") or 0),
+        "best_existing_fit_direct_role": bool(best_ai_existing_fit.get("direct_role_fit")),
+        "best_existing_fit_indirect_only": bool(best_ai_existing_fit.get("indirect_only_fit")),
+        "adjacency_only_existing_fit": adjacency_only_existing_fit,
+        "heuristic_prefers_new_theme": heuristic_prefers_new_theme,
+        "should_promote_new_theme": should_promote_new_theme,
+    }
     if should_promote_new_theme:
         merged["possible_new_theme"] = (
             _normalize_optional_theme_label(ai_draft.get("possible_new_theme"))
@@ -1186,6 +1272,13 @@ def _merge_ai_with_heuristic_draft(
 
     if not _normalize_text(merged.get("rationale")):
         merged["rationale"] = heuristic_rationale or "No strong governed-theme fit was identified; review the business role manually."
+
+    merged["suggested_existing_themes"] = _annotate_existing_theme_suggestions(
+        list(merged.get("suggested_existing_themes") or []),
+        catalog,
+        profile,
+        candidate,
+    )
 
     return merged
 
@@ -1218,9 +1311,10 @@ def _normalize_ai_theme_suggestions(raw_items: object, catalog: list[dict[str, o
                 "category": str(catalog_entry["category"]),
                 "why_it_might_fit": _normalize_text(item.get("why_it_might_fit")) or "AI suggested this as a possible governed-theme fit.",
                 "representative_tickers": list(catalog_entry.get("representative_tickers") or []),
+                "fit_label": _normalize_text(item.get("fit_label")),
             }
         )
-    return normalized[:3]
+    return _truncate_existing_theme_suggestions(normalized)
 
 
 def _ai_research_draft(candidate: dict[str, object], catalog: list[dict[str, object]], profile: dict[str, object]) -> dict[str, object]:

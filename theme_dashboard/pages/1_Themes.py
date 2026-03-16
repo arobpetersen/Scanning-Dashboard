@@ -13,6 +13,7 @@ from src.leaderboard_utils import (
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.queries import ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
 from src.streamlit_utils import (
+    clear_current_market_view_caches,
     db_cache_token,
     extract_selected_row,
     load_current_ranking_snapshot_cached,
@@ -501,7 +502,8 @@ with manage_tab:
         if add_submitted:
             try:
                 with get_conn() as conn:
-                    add_ticker(conn, selected_id, new_ticker)
+                    add_ticker(conn, selected_id, new_ticker, onboarding_source="themes_page_manual_add")
+                clear_current_market_view_caches()
                 st.success(f"Added {new_ticker.strip().upper()}")
                 st.rerun()
             except Exception as exc:
@@ -630,6 +632,7 @@ with manage_tab:
                                     run_kind="ticker_intake_backfill",
                                     replace_existing=True,
                                 )
+                        clear_current_market_view_caches()
                         if int(result["added_count"]) == 0 and int(result["removed_count"]) == 0:
                             st.session_state["manage_ticker_feedback"] = {
                                 "level": "warning",

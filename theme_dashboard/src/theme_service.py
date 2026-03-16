@@ -4,6 +4,7 @@ import pandas as pd
 
 from .config import SEED_PATH
 from .seed_loader import load_seed_file
+from .ticker_onboarding import record_new_governed_ticker_onboarding
 
 
 def _normalize_theme_name(name: str) -> str:
@@ -158,11 +159,35 @@ def delete_theme(conn, theme_id: int) -> None:
     conn.execute("DELETE FROM themes WHERE id = ?", [theme_id])
 
 
-def add_ticker(conn, theme_id: int, ticker: str) -> None:
+def add_ticker(conn, theme_id: int, ticker: str, *, onboarding_source: str = "governed_add") -> dict[str, object]:
+    normalized_ticker = _normalize_ticker(ticker)
+    existing_any = int(conn.execute("SELECT COUNT(*) FROM theme_membership WHERE ticker = ?", [normalized_ticker]).fetchone()[0] or 0)
+    existed_in_theme = conn.execute(
+        "SELECT 1 FROM theme_membership WHERE theme_id = ? AND ticker = ? LIMIT 1",
+        [theme_id, normalized_ticker],
+    ).fetchone()
     conn.execute(
         "INSERT OR IGNORE INTO theme_membership(theme_id, ticker) VALUES (?, ?)",
-        [theme_id, _normalize_ticker(ticker)],
+        [theme_id, normalized_ticker],
     )
+    added_to_theme = existed_in_theme is None
+    onboarding_created = False
+    onboarding_state = None
+    if added_to_theme and existing_any == 0:
+        onboarding_state = record_new_governed_ticker_onboarding(
+            conn,
+            normalized_ticker,
+            onboarding_source=onboarding_source,
+        )
+        onboarding_created = True
+    return {
+        "ticker": normalized_ticker,
+        "theme_id": int(theme_id),
+        "added_to_theme": added_to_theme,
+        "newly_governed": bool(added_to_theme and existing_any == 0),
+        "onboarding_created": onboarding_created,
+        "onboarding_state": onboarding_state,
+    }
 
 
 def remove_ticker(conn, theme_id: int, ticker: str) -> None:
@@ -192,6 +217,7 @@ def replace_ticker_in_theme(conn, theme_id: int, current_ticker: str, replacemen
     if replacement_row is not None:
         raise ValueError(f"{replacement} is already assigned to this theme.")
 
+    replacement_existing_any = int(conn.execute("SELECT COUNT(*) FROM theme_membership WHERE ticker = ?", [replacement]).fetchone()[0] or 0)
     conn.execute("BEGIN TRANSACTION")
     try:
         conn.execute(
@@ -202,6 +228,8 @@ def replace_ticker_in_theme(conn, theme_id: int, current_ticker: str, replacemen
             "INSERT INTO theme_membership(theme_id, ticker) VALUES (?, ?)",
             [theme_id, replacement],
         )
+        if replacement_existing_any == 0:
+            record_new_governed_ticker_onboarding(conn, replacement, onboarding_source="ticker_replacement")
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -244,6 +272,7 @@ def set_ticker_theme_assignments(conn, ticker: str, theme_ids: list[int]) -> dic
     to_add = [theme_id for theme_id in normalized_theme_ids if theme_id not in current_theme_ids]
     to_remove = [theme_id for theme_id in current_theme_ids if theme_id not in normalized_theme_ids]
 
+    was_ungoverned = not bool(current_theme_ids)
     conn.execute("BEGIN TRANSACTION")
     try:
         for theme_id in to_add:
@@ -256,6 +285,8 @@ def set_ticker_theme_assignments(conn, ticker: str, theme_ids: list[int]) -> dic
                 "DELETE FROM theme_membership WHERE theme_id = ? AND ticker = ?",
                 [theme_id, normalized_ticker],
             )
+        if was_ungoverned and to_add:
+            record_new_governed_ticker_onboarding(conn, normalized_ticker, onboarding_source="theme_assignment_update")
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")

@@ -6,16 +6,25 @@ import pandas as pd
 
 from src.database import SCHEMA_SQL
 from src.historical_backfill import rebuild_recent_reconstructed_history, reconstruct_theme_history_range
+from src.fetch_data import run_targeted_current_snapshot_hydration
 from src.momentum_engine import compute_theme_momentum
 from src.queries import (
     classify_ticker_history_readiness,
     historical_theme_boundary_debug,
+    latest_ticker_snapshots,
+    theme_ticker_metrics,
     theme_history_window,
     theme_snapshot_history,
     ticker_history_readiness,
 )
-from src.rankings import compute_theme_rankings
+from src.theme_service import add_ticker
 from src.ticker_history import persist_ticker_daily_history, ticker_daily_history_rows
+from src.ticker_onboarding import (
+    list_governed_ticker_onboarding,
+    run_governed_ticker_onboarding_backfill,
+    run_governed_ticker_onboarding_theme_reconstruction,
+)
+from src.rankings import compute_theme_rankings
 
 
 class TestHistoricalBackfill(unittest.TestCase):
@@ -114,6 +123,131 @@ class TestHistoricalBackfill(unittest.TestCase):
         self.assertEqual(third, {"rows_written": 1, "rows_skipped": 0})
         self.assertEqual(len(stored), 1)
         self.assertEqual(float(stored.iloc[0]["close"]), 111.0)
+        conn.close()
+
+    def test_newly_governed_ticker_creates_onboarding_state(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+
+        with patch("src.ticker_onboarding.DEFAULT_PROVIDER", "mock"):
+            result = add_ticker(conn, 1, "NEWT", onboarding_source="themes_page_manual_add")
+        onboarding = list_governed_ticker_onboarding(conn)
+        snapshot_count = int(conn.execute("select count(*) from ticker_snapshots where ticker = 'NEWT'").fetchone()[0])
+        ticker_view = theme_ticker_metrics(conn, 1)
+
+        self.assertTrue(result["newly_governed"])
+        self.assertEqual(len(onboarding), 1)
+        self.assertEqual(str(onboarding.iloc[0]["ticker"]), "NEWT")
+        self.assertEqual(str(onboarding.iloc[0]["onboarding_source"]), "themes_page_manual_add")
+        self.assertEqual(str(result["onboarding_state"]["current_snapshot_result"]["status"]), "success")
+        self.assertGreater(snapshot_count, 0)
+        self.assertEqual(str(ticker_view.iloc[0]["ticker"]), "NEWT")
+        self.assertIsNotNone(ticker_view.iloc[0]["price"])
+        conn.close()
+
+    def test_targeted_current_snapshot_hydration_updates_ticker_snapshot_layer_without_full_refresh(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'BOOT')")
+
+        result = run_targeted_current_snapshot_hydration(conn, ["BOOT"], provider_name="mock")
+        latest = latest_ticker_snapshots(conn)
+        ticker_view = theme_ticker_metrics(conn, 1)
+        theme_snapshot_count = int(conn.execute("select count(*) from theme_snapshots").fetchone()[0])
+        refresh_scope = conn.execute("select scope_type from refresh_runs where run_id = ?", [int(result["run_id"])]).fetchone()[0]
+
+        self.assertEqual(str(result["status"]), "success")
+        self.assertIn("BOOT", latest["ticker"].astype(str).tolist())
+        self.assertEqual(str(refresh_scope), "governed_ticker_current_hydration")
+        self.assertEqual(theme_snapshot_count, 0)
+        self.assertEqual(str(ticker_view.iloc[0]["ticker"]), "BOOT")
+        self.assertIsNotNone(ticker_view.iloc[0]["price"])
+        conn.close()
+
+    def test_newly_governed_ticker_with_sufficient_history_is_marked_ready(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        history_rows = pd.DataFrame(
+            [
+                {
+                    "ticker": "READY",
+                    "snapshot_date": f"2026-01-{day:02d}",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.0 + day,
+                    "volume": 1000.0,
+                    "vwap": 100.0,
+                    "trade_count": 10,
+                }
+                for day in range(1, 31)
+            ]
+        )
+        persist_ticker_daily_history(
+            conn,
+            history_rows,
+            ticker="READY",
+            provenance_source_label="seed_history",
+            market_data_source="live",
+            run_id=1,
+            replace_existing=False,
+        )
+
+        add_ticker(conn, 1, "READY", onboarding_source="themes_page_manual_add")
+        onboarding = list_governed_ticker_onboarding(conn)
+
+        self.assertEqual(str(onboarding.iloc[0]["history_readiness_status"]), "ready")
+        self.assertEqual(str(onboarding.iloc[0]["backfill_status"]), "not_needed")
+        self.assertTrue(bool(onboarding.iloc[0]["downstream_refresh_needed"]))
+        conn.close()
+
+    def test_newly_governed_ticker_without_history_is_marked_as_needing_backfill(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+
+        add_ticker(conn, 1, "NEEDS", onboarding_source="themes_page_manual_add")
+        onboarding = list_governed_ticker_onboarding(conn)
+
+        self.assertEqual(str(onboarding.iloc[0]["history_readiness_status"]), "needs_backfill")
+        self.assertEqual(str(onboarding.iloc[0]["backfill_status"]), "needed")
+        self.assertFalse(bool(onboarding.iloc[0]["downstream_refresh_needed"]))
+        conn.close()
+
+    def test_targeted_onboarding_backfill_updates_onboarding_state(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        add_ticker(conn, 1, "BOOT", onboarding_source="themes_page_manual_add")
+
+        result = run_governed_ticker_onboarding_backfill(conn, ["BOOT"], provider_name="mock")
+        onboarding = list_governed_ticker_onboarding(conn)
+
+        self.assertIn(result["status"], {"success", "partial"})
+        self.assertGreaterEqual(int(onboarding.iloc[0]["history_row_count"]), 30)
+        self.assertEqual(str(onboarding.iloc[0]["history_readiness_status"]), "ready")
+        self.assertEqual(str(onboarding.iloc[0]["backfill_status"]), "completed")
+        self.assertTrue(bool(onboarding.iloc[0]["downstream_refresh_needed"]))
+        self.assertIsNotNone(onboarding.iloc[0]["last_backfill_attempt_at"])
+        self.assertTrue(
+            int(result["backfill_result"]["ticker_history_rows_written"]) > 0
+            or int(result["backfill_result"]["ticker_history_rows_skipped"]) > 0
+        )
+        self.assertEqual(str(result["current_snapshot_result"]["status"]), "success")
+        ticker_view = theme_ticker_metrics(conn, 1)
+        self.assertEqual(str(ticker_view.iloc[0]["ticker"]), "BOOT")
+        self.assertIsNotNone(ticker_view.iloc[0]["price"])
+        conn.close()
+
+    def test_onboarding_theme_reconstruction_clears_downstream_refresh_flag(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        add_ticker(conn, 1, "BOOT", onboarding_source="themes_page_manual_add")
+        run_governed_ticker_onboarding_backfill(conn, ["BOOT"], provider_name="mock")
+
+        result = run_governed_ticker_onboarding_theme_reconstruction(conn, ["BOOT"], provider_name="mock")
+        onboarding = list_governed_ticker_onboarding(conn)
+
+        self.assertIn(result["status"], {"success", "partial"})
+        self.assertFalse(bool(onboarding.iloc[0]["downstream_refresh_needed"]))
         conn.close()
 
     def test_theme_history_window_uses_mixed_captured_and_reconstructed_history(self):

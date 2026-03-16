@@ -43,6 +43,20 @@ def _database_locked_message(db_path: str) -> str:
         f"Database path: {db_path}"
     )
 
+
+def _is_transaction_conflict_error(exc: Exception) -> bool:
+    return "conflict on update" in str(exc or "").lower()
+
+
+def _best_effort_init_update(conn, sql: str, params: list[object] | None = None) -> bool:
+    try:
+        conn.execute(sql, params or [])
+        return True
+    except duckdb.TransactionException as exc:
+        if _is_transaction_conflict_error(exc):
+            return False
+        raise
+
 SCHEMA_SQL = """
 CREATE SEQUENCE IF NOT EXISTS themes_id_seq;
 CREATE SEQUENCE IF NOT EXISTS snapshots_id_seq;
@@ -66,6 +80,23 @@ CREATE TABLE IF NOT EXISTS theme_membership (
     ticker VARCHAR NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(theme_id, ticker),
+    CHECK (length(trim(ticker)) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS governed_ticker_onboarding (
+    ticker VARCHAR PRIMARY KEY,
+    added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    onboarding_source VARCHAR NOT NULL,
+    history_readiness_status VARCHAR NOT NULL DEFAULT 'unknown',
+    backfill_status VARCHAR NOT NULL DEFAULT 'not_needed',
+    last_backfill_attempt_at TIMESTAMP,
+    last_backfill_error VARCHAR,
+    downstream_refresh_needed BOOLEAN NOT NULL DEFAULT FALSE,
+    history_row_count BIGINT NOT NULL DEFAULT 0,
+    history_target_days BIGINT NOT NULL DEFAULT 30,
+    history_market_data_source VARCHAR,
+    history_latest_trading_date DATE,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK (length(trim(ticker)) > 0)
 );
 
@@ -319,6 +350,7 @@ CREATE TABLE IF NOT EXISTS refresh_failures (
 
 CREATE INDEX IF NOT EXISTS idx_theme_membership_theme_id ON theme_membership(theme_id);
 CREATE INDEX IF NOT EXISTS idx_theme_membership_ticker ON theme_membership(ticker);
+CREATE INDEX IF NOT EXISTS idx_governed_ticker_onboarding_status ON governed_ticker_onboarding(history_readiness_status, backfill_status);
 CREATE INDEX IF NOT EXISTS idx_snapshots_run_id ON ticker_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_ticker ON ticker_snapshots(ticker);
 CREATE INDEX IF NOT EXISTS idx_theme_snapshots_run_id ON theme_snapshots(run_id);
@@ -442,7 +474,10 @@ def init_db() -> None:
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMP")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS last_run_id BIGINT")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
-        conn.execute("UPDATE symbol_refresh_status SET updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)")
+        _best_effort_init_update(
+            conn,
+            "UPDATE symbol_refresh_status SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL",
+        )
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS source_context_json VARCHAR")
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS source_updated_at TIMESTAMP")
@@ -455,6 +490,15 @@ def init_db() -> None:
         conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS scanner_name_basis VARCHAR DEFAULT 'file_column'")
         conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS observed_date_inferred BOOLEAN DEFAULT FALSE")
         conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS observed_date_basis VARCHAR DEFAULT 'file_column'")
+        conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS history_row_count BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS history_target_days BIGINT DEFAULT 30")
+        conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS history_market_data_source VARCHAR")
+        conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS history_latest_trading_date DATE")
+        conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
+        _best_effort_init_update(
+            conn,
+            "UPDATE governed_ticker_onboarding SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL",
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS scanner_imported_files (
@@ -475,13 +519,35 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scanner_imported_files_status ON scanner_imported_files(import_status)")
-        conn.execute("UPDATE ticker_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''")
-        conn.execute("UPDATE theme_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''")
-        conn.execute("UPDATE theme_suggestions SET priority='medium' WHERE priority IS NULL OR trim(priority)=''")
-        conn.execute("UPDATE scanner_hit_history SET scanner_name_inferred = COALESCE(scanner_name_inferred, FALSE)")
-        conn.execute("UPDATE scanner_hit_history SET scanner_name_basis = COALESCE(NULLIF(trim(scanner_name_basis), ''), CASE WHEN COALESCE(scanner_name_inferred, FALSE) THEN 'filename_parse' ELSE 'file_column' END)")
-        conn.execute("UPDATE scanner_hit_history SET observed_date_inferred = COALESCE(observed_date_inferred, FALSE)")
-        conn.execute("UPDATE scanner_hit_history SET observed_date_basis = COALESCE(NULLIF(trim(observed_date_basis), ''), CASE WHEN COALESCE(observed_date_inferred, FALSE) THEN 'modified_timestamp_fallback' ELSE 'file_column' END)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_governed_ticker_onboarding_status ON governed_ticker_onboarding(history_readiness_status, backfill_status)")
+        _best_effort_init_update(
+            conn,
+            "UPDATE ticker_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE theme_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE theme_suggestions SET priority='medium' WHERE priority IS NULL OR trim(priority)=''",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE scanner_hit_history SET scanner_name_inferred = COALESCE(scanner_name_inferred, FALSE)",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE scanner_hit_history SET scanner_name_basis = COALESCE(NULLIF(trim(scanner_name_basis), ''), CASE WHEN COALESCE(scanner_name_inferred, FALSE) THEN 'filename_parse' ELSE 'file_column' END)",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE scanner_hit_history SET observed_date_inferred = COALESCE(observed_date_inferred, FALSE)",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE scanner_hit_history SET observed_date_basis = COALESCE(NULLIF(trim(observed_date_basis), ''), CASE WHEN COALESCE(observed_date_inferred, FALSE) THEN 'modified_timestamp_fallback' ELSE 'file_column' END)",
+        )
 
         ddl = conn.execute("SELECT sql FROM duckdb_tables() WHERE table_name='theme_suggestions' LIMIT 1").fetchone()
         ddl_text = ddl[0].lower() if ddl and ddl[0] else ""

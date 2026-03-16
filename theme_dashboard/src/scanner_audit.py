@@ -264,6 +264,21 @@ def _file_fingerprint(path: Path) -> tuple[str, int, datetime]:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest(), int(stat.st_size), modified_at
 
 
+def _observed_date_diagnostics(parsed: pd.DataFrame, path: Path) -> tuple[str | None, str | None, int]:
+    if not parsed.empty and "observed_date" in parsed.columns:
+        values = sorted({str(value) for value in parsed["observed_date"].astype(str).tolist() if str(value).strip()})
+        if values:
+            return values[0], values[-1], len(values)
+
+    fallback_date = _parsed_filename_date(path)
+    if fallback_date is not None:
+        text = str(fallback_date)
+        return text, text, 1
+
+    modified_text = str(datetime.fromtimestamp(path.stat().st_mtime).date())
+    return modified_text, modified_text, 1
+
+
 def import_tc2000_exports(
     conn,
     *,
@@ -345,6 +360,7 @@ def import_tc2000_exports(
 
     for path in files:
         fingerprint, file_size, modified_at = _file_fingerprint(path)
+        observed_date_min, observed_date_max, observed_dates_count = _observed_date_diagnostics(pd.DataFrame(), path)
         try:
             already_imported = conn.execute(
                 """
@@ -380,11 +396,15 @@ def import_tc2000_exports(
                         "observed_date_inferred": True,
                         "scanner_name_basis": _scanner_name_from_filename(path, source_label)[1],
                         "observed_date_basis": "filename_parse" if _parsed_filename_date(path) is not None else "modified_timestamp_fallback",
+                        "observed_date_min": observed_date_min,
+                        "observed_date_max": observed_date_max,
+                        "observed_dates_count": observed_dates_count,
                     }
                 )
                 continue
 
             parsed, meta = parse_tc2000_export_file(path, imported_at=started_at, default_source_label=source_label)
+            observed_date_min, observed_date_max, observed_dates_count = _observed_date_diagnostics(parsed, path)
             file_result = {
                 "source_file": path.name,
                 "rows_read": int(meta["rows_read"]),
@@ -398,6 +418,9 @@ def import_tc2000_exports(
                 "scanner_name_basis": str(meta["scanner_name_basis"]),
                 "observed_date_inferred": bool(meta["observed_date_inferred"]),
                 "observed_date_basis": str(meta["observed_date_basis"]),
+                "observed_date_min": observed_date_min,
+                "observed_date_max": observed_date_max,
+                "observed_dates_count": observed_dates_count,
             }
             rows_read += int(meta["rows_read"])
             unique_tickers.update(parsed["normalized_ticker"].astype(str).tolist())
@@ -559,6 +582,9 @@ def import_tc2000_exports(
                     "scanner_name_basis": _scanner_name_from_filename(path, source_label)[1],
                     "observed_date_inferred": True,
                     "observed_date_basis": "filename_parse" if _parsed_filename_date(path) is not None else "modified_timestamp_fallback",
+                    "observed_date_min": observed_date_min,
+                    "observed_date_max": observed_date_max,
+                    "observed_dates_count": observed_dates_count,
                     "error": str(exc),
                 }
             )
@@ -1102,6 +1128,98 @@ def promote_scanner_candidate_to_theme_review(
         "suggestion_id": suggestion_id,
         "ticker": normalized,
         "message": f"Updated existing review candidate for {normalized}.",
+    }
+
+
+def apply_scanner_candidate_selected_themes(
+    conn,
+    ticker: str,
+    promotion_note: str = "",
+    research_draft: dict[str, object] | None = None,
+    selected_suggested_theme_ids: list[object] | None = None,
+    custom_existing_theme_ids: list[object] | None = None,
+    custom_new_themes: list[str] | None = None,
+) -> dict[str, object]:
+    suggested_ids = _normalize_theme_selection_ids(selected_suggested_theme_ids)
+    custom_existing_ids = _normalize_theme_selection_ids(custom_existing_theme_ids)
+    if not suggested_ids and not custom_existing_ids:
+        raise ValueError("Select at least one existing theme to apply now.")
+
+    staged = promote_scanner_candidate_to_theme_review(
+        conn,
+        ticker,
+        promotion_note,
+        research_draft=research_draft,
+        selected_suggested_theme_ids=suggested_ids,
+        custom_existing_theme_ids=custom_existing_ids,
+        custom_new_themes=custom_new_themes,
+    )
+    suggestion_id = int(staged["suggestion_id"])
+    row = conn.execute(
+        """
+        SELECT status, source_context_json
+        FROM theme_suggestions
+        WHERE suggestion_id = ?
+        """,
+        [suggestion_id],
+    ).fetchone()
+    if row is None:
+        raise ValueError("Direct-apply audit record was not found.")
+
+    status = str(row[0] or "").strip().lower()
+    context = {}
+    try:
+        parsed = json.loads(str(row[1] or "{}"))
+        if isinstance(parsed, dict):
+            context = parsed
+    except Exception:
+        context = {}
+
+    selected_existing = list(context.get("selected_suggested_themes") or []) + list(context.get("custom_existing_themes") or [])
+    selected_existing = [item for item in selected_existing if isinstance(item, dict) and item.get("theme_id")]
+    if not selected_existing:
+        raise ValueError("Direct apply requires at least one selected existing theme.")
+
+    from .suggestions_service import apply_suggestion, review_suggestion
+
+    audit_note = "Approved and applied directly from Scanner Audit."
+    if status == "pending":
+        review_suggestion(conn, suggestion_id, "approved", audit_note)
+    elif status != "approved":
+        raise ValueError(f"Scanner Audit direct apply expected a pending/approved review item, found `{status or 'unknown'}`.")
+
+    apply_suggestion(conn, suggestion_id, audit_note)
+    applied_theme_names = [
+        str(item.get("theme_name") or "").strip()
+        for item in selected_existing
+        if str(item.get("theme_name") or "").strip()
+    ]
+    onboarding_row = conn.execute(
+        """
+        SELECT history_readiness_status, backfill_status, downstream_refresh_needed
+        FROM governed_ticker_onboarding
+        WHERE ticker = ?
+        """,
+        [normalize_ticker(ticker)],
+    ).fetchone()
+    onboarding_state = (
+        {
+            "history_readiness_status": str(onboarding_row[0] or ""),
+            "backfill_status": str(onboarding_row[1] or ""),
+            "downstream_refresh_needed": bool(onboarding_row[2]),
+        }
+        if onboarding_row
+        else None
+    )
+    return {
+        "action": "applied",
+        "suggestion_id": suggestion_id,
+        "ticker": normalize_ticker(ticker),
+        "applied_theme_names": applied_theme_names,
+        "onboarding_state": onboarding_state,
+        "message": (
+            f"Applied selected themes for {normalize_ticker(ticker)} and started onboarding."
+        ),
     }
 
 
