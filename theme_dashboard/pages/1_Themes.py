@@ -11,10 +11,17 @@ from src.leaderboard_utils import (
     build_window_leaderboard,
 )
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
-from src.momentum_engine import compute_theme_momentum
-from src.rankings import compute_current_ranking_snapshot
 from src.queries import ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
-from src.streamlit_utils import extract_selected_row
+from src.streamlit_utils import (
+    db_cache_token,
+    extract_selected_row,
+    load_current_ranking_snapshot_cached,
+    load_theme_momentum_cached,
+    render_dataframe,
+    reset_perf_timings,
+    show_perf_summary,
+    stop_for_database_error,
+)
 from src.theme_selection import (
     SELECTED_THEME_ID_KEY,
     SELECTED_THEME_LABEL_KEY,
@@ -39,11 +46,16 @@ from src.theme_service import (
 
 st.set_page_config(page_title="Themes", layout="wide")
 st.title("Themes")
+reset_perf_timings("themes")
 
-init_db()
-with get_conn() as conn:
-    seed_if_needed(conn)
-    themes = list_themes(conn, active_only=False)
+try:
+    init_db()
+    with get_conn() as conn:
+        seed_if_needed(conn)
+        themes = list_themes(conn, active_only=False)
+except Exception as exc:
+    stop_for_database_error(exc)
+db_token = db_cache_token()
 
 if themes.empty:
     st.info("No themes found.")
@@ -83,7 +95,8 @@ def _render_leaderboard(title: str, key_prefix: str, leaderboard_df, label_by_id
     visible_cols = ["rank", "theme", "category", "performance", "momentum_score"]
     if show_advanced:
         visible_cols.extend(["rank_change", "breadth_1m"])
-    event = st.dataframe(
+    event = render_dataframe(
+        f"{key_prefix}_leaderboard",
         leaderboard_df[visible_cols],
         width="stretch",
         hide_index=True,
@@ -108,7 +121,8 @@ def _render_leaderboard(title: str, key_prefix: str, leaderboard_df, label_by_id
 
 def _render_category_leaderboard(title: str, leaderboard_df) -> None:
     st.markdown(f"**{title}**")
-    st.dataframe(
+    render_dataframe(
+        title,
         leaderboard_df[["rank", "category", "top_themes", "contributing_themes", "performance", "momentum_score", "breadth_1m"]],
         width="stretch",
         hide_index=True,
@@ -135,7 +149,8 @@ def _render_category_theme_drill(title: str, breakdown_df) -> None:
         )
         category_rows = breakdown_df[breakdown_df["category"] == picked_category].copy().reset_index(drop=True)
         category_rows["rank"] = category_rows.index + 1
-        st.dataframe(
+        render_dataframe(
+            f"{title}_category_drill",
             category_rows[["rank", "theme", "performance", "momentum_score", "breadth_1m"]],
             width="stretch",
             hide_index=True,
@@ -149,7 +164,8 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str]) -> No
         "Ranks active themes by current confidence-adjusted composite strength using only eligible preferred-source contributors. "
         "`eligible_contributors` shows how many names actually fed the current rank, while `eligible_breadth_pct` shows the share of governed members that passed live ranking filters."
     )
-    event = st.dataframe(
+    event = render_dataframe(
+        "current_leadership",
         leadership_df[
             [
                 "rank",
@@ -192,7 +208,8 @@ def _render_current_performance(title: str, key_prefix: str, leaderboard_df, lab
         "Ranks current active themes on the selected window return using eligible preferred-source contributors only. "
         "Displayed performance uses capped constituent returns for aggregation, but raw ticker rows remain unchanged in the detail table."
     )
-    event = st.dataframe(
+    event = render_dataframe(
+        f"{key_prefix}_current",
         leaderboard_df[
             [
                 "rank",
@@ -248,12 +265,11 @@ with explore_tab:
     if SELECTED_THEME_SOURCE_KEY not in st.session_state:
         st.session_state[SELECTED_THEME_SOURCE_KEY] = "default"
 
-    with get_conn() as conn:
-        current_snapshot = compute_current_ranking_snapshot(conn)
-        current_theme_metrics = current_snapshot["theme_metrics"]
-        current_rankings = current_snapshot["rankings"]
-        momentum_1w = compute_theme_momentum(conn, 7, top_n=20)
-        momentum_1m = compute_theme_momentum(conn, 30, top_n=20)
+    current_snapshot = load_current_ranking_snapshot_cached(db_token)
+    current_theme_metrics = current_snapshot["theme_metrics"]
+    current_rankings = current_snapshot["rankings"]
+    momentum_1w = load_theme_momentum_cached(db_token, 7, top_n=20)
+    momentum_1m = load_theme_momentum_cached(db_token, 30, top_n=20)
     leadership_df = build_current_leadership_table(current_rankings, top_k=12)
     current_1w_df = build_current_performance_table(current_theme_metrics, "avg_1w", top_k=10)
     current_1m_df = build_current_performance_table(current_theme_metrics, "avg_1m", top_k=10)
@@ -407,11 +423,11 @@ with explore_tab:
             "`snapshot_time` is when the preferred-source ticker snapshot row was captured. "
             "`last_refresh_time` is the latest completed refresh in the current ticker-source view."
         )
-        st.dataframe(view_df, width="stretch")
+        render_dataframe("theme_ticker_view", view_df, width="stretch")
         if not history_df.empty:
             hist = history_df.sort_values("snapshot_time")
             st.line_chart(hist.set_index("snapshot_time")[["composite_score", "avg_1m", "positive_1m_breadth_pct"]])
-            st.dataframe(history_df, width="stretch")
+            render_dataframe("theme_history_table", history_df, width="stretch")
 
 with manage_tab:
     ticker_feedback = st.session_state.pop("manage_ticker_feedback", None)
@@ -507,7 +523,7 @@ with manage_tab:
                 except Exception as exc:
                     st.error(f"Remove ticker failed: {exc}")
 
-    st.dataframe(members, width="stretch")
+    render_dataframe("manage_theme_members", members, width="stretch")
 
     st.divider()
     st.subheader("Ticker Lookup")
@@ -541,11 +557,12 @@ with manage_tab:
                 "latest_market_cap": human_readable_number(row.get("latest_market_cap")) or display_or_dash(None),
                 "latest_avg_volume": human_readable_number(row.get("latest_avg_volume")) or display_or_dash(None),
             }
-            st.dataframe([detail], width="stretch", hide_index=True)
+            render_dataframe("ticker_lookup_detail", [detail], width="stretch", hide_index=True)
 
             if not memberships.empty:
                 st.caption("Assigned themes")
-                st.dataframe(
+                render_dataframe(
+                    "ticker_lookup_memberships",
                     memberships[["theme_name", "category", "is_active"]],
                     width="stretch",
                     hide_index=True,
@@ -684,3 +701,5 @@ with manage_tab:
                 )
             except Exception as exc:
                 st.error(f"Manual ticker-history backfill failed: {exc}")
+
+show_perf_summary()

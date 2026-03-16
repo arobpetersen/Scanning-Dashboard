@@ -14,7 +14,7 @@ VALID_TYPES = {
     "move_ticker_between_themes",
     "review_theme",
 }
-VALID_SOURCES = {"manual", "rules_engine", "ai_proposal", "imported"}
+VALID_SOURCES = {"manual", "rules_engine", "ai_proposal", "imported", "scanner_audit"}
 VALID_PRIORITIES = {"low", "medium", "high"}
 VALID_STATUSES = {"pending", "approved", "rejected", "applied", "obsolete"}
 

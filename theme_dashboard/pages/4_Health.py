@@ -30,10 +30,17 @@ from src.queries import (
     snapshot_counts,
     source_audit_status,
     ticker_history_readiness,
-    theme_health_overview,
     theme_member_hygiene_context,
 )
-from src.streamlit_utils import extract_selected_row
+from src.streamlit_utils import (
+    db_cache_token,
+    extract_selected_row,
+    load_theme_health_overview_cached,
+    render_dataframe,
+    reset_perf_timings,
+    show_perf_summary,
+    stop_for_database_error,
+)
 from src.suggestions_service import suggestion_status_counts
 from src.symbol_hygiene import (
     OVERRIDE_ACTIONS,
@@ -53,24 +60,29 @@ from src.theme_service import get_theme_members, replace_ticker_in_theme, seed_i
 
 st.set_page_config(page_title="Health", layout="wide")
 st.title("Health & Operations")
+reset_perf_timings("health")
 
 
 def _display_placeholder(value) -> str:
     return "-" if value is None or value != value else str(value)
 
 
-init_db()
-with get_conn() as conn:
-    seed_if_needed(conn)
-    stale_marked = mark_stale_running_runs(conn)
-    last_run = last_refresh_run(conn)
-    history = refresh_history(conn, limit=30)
-    counts = row_counts(conn)
-    snaps = snapshot_counts(conn)
-    baseline = baseline_status(conn)
-    source_audit = source_audit_status(conn)
-    ticker_history_ready = ticker_history_readiness(conn, target_trading_days=30)
-    sugg_counts = suggestion_status_counts(conn)
+try:
+    init_db()
+    with get_conn() as conn:
+        seed_if_needed(conn)
+        stale_marked = mark_stale_running_runs(conn)
+        last_run = last_refresh_run(conn)
+        history = refresh_history(conn, limit=30)
+        counts = row_counts(conn)
+        snaps = snapshot_counts(conn)
+        baseline = baseline_status(conn)
+        source_audit = source_audit_status(conn)
+        ticker_history_ready = ticker_history_readiness(conn, target_trading_days=30)
+        sugg_counts = suggestion_status_counts(conn)
+except Exception as exc:
+    stop_for_database_error(exc)
+db_token = db_cache_token()
 
 ops_tab, themes_tab = st.tabs(["Operations", "Theme Health"])
 
@@ -170,7 +182,7 @@ with ops_tab:
             "Reconstructed history runs now log both stored ticker-day history and downstream reconstructed theme refresh results. "
             "This layer is additive, used for deeper movement analysis only, and never treated as true captured point-in-time composition."
         )
-        st.dataframe(reconstruction_runs, width="stretch", hide_index=True)
+        render_dataframe("health_reconstruction_runs", reconstruction_runs, width="stretch", hide_index=True)
 
     if not last_run.empty:
         run = last_run.iloc[0]
@@ -210,8 +222,8 @@ with ops_tab:
                 .rename(columns={"size": "cnt"})
                 .sort_values("cnt", ascending=False)
             )
-            st.dataframe(cats, width="stretch")
-            st.dataframe(recent_failures, width="stretch")
+            render_dataframe("health_failure_categories", cats, width="stretch")
+            render_dataframe("health_recent_failures", recent_failures, width="stretch")
 
     st.subheader("Symbol hygiene review queue")
     feedback = st.session_state.pop("symbol_hygiene_feedback", None)
@@ -383,9 +395,9 @@ with ops_tab:
                     )
 
     st.subheader("Refresh history")
-    st.dataframe(history, width="stretch")
+    render_dataframe("health_refresh_history", history, width="stretch")
     st.subheader("Table row counts")
-    st.dataframe(counts, width="stretch")
+    render_dataframe("health_row_counts", counts, width="stretch")
 
 with themes_tab:
     c1, c2 = st.columns(2)
@@ -394,8 +406,7 @@ with themes_tab:
     with c2:
         failure_window = st.number_input("Live failure lookback (days)", min_value=1, max_value=90, value=RULE_LIVE_FAILURE_WINDOW_DAYS)
 
-    with get_conn() as conn:
-        health = theme_health_overview(conn, int(low_threshold), int(failure_window))
+    health = load_theme_health_overview_cached(db_token, int(low_threshold), int(failure_window))
 
     if health.empty:
         st.info("No theme health data.")
@@ -443,7 +454,8 @@ with themes_tab:
             lambda v: short_timestamp(v) or "—"
         )
         st.caption("`latest_snapshot_time` uses the preferred current-view theme source, matching live-preferred Health diagnostics.")
-        health_event = st.dataframe(
+        health_event = render_dataframe(
+            "health_theme_table",
             health_view,
             width="stretch",
             on_select="rerun",
@@ -490,7 +502,7 @@ with themes_tab:
                 member_view["consecutive_failure_count"] = member_view["consecutive_failure_count"].map(_display_placeholder)
                 member_view["symbol_hygiene_status"] = member_view["symbol_hygiene_status"].map(_display_placeholder)
                 st.caption("Member ticker failure context. Tickers with the most recent failures are listed first.")
-                st.dataframe(member_view, width="stretch", hide_index=True)
+                render_dataframe("health_member_view", member_view, width="stretch", hide_index=True)
 
                 with st.form(f"health_theme_member_suppression_{theme_id}"):
                     st.write("Manual member calculation control")
@@ -661,3 +673,5 @@ with themes_tab:
                 st.session_state["manage_theme"] = f"{theme_name} [{theme_id}]"
                 set_theme_selection_state(st.session_state, theme_id, theme_label, "health_theme")
                 st.switch_page("pages/1_Themes.py")
+
+show_perf_summary()

@@ -862,6 +862,163 @@ def set_scanner_candidate_review_state(
     return {"ticker": normalized, "review_state": state, "review_note": review_note.strip()}
 
 
+def _scanner_audit_priority(recommendation: str) -> str:
+    return "high" if str(recommendation or "").strip().lower() == "high-persistence uncovered" else "medium"
+
+
+def _scanner_audit_rationale(row: pd.Series) -> str:
+    return (
+        f"Scanner Audit evidence: recommendation={row['recommendation']}; "
+        f"reason={row['recommendation_reason']}; "
+        f"persistence_score={int(row['persistence_score'])}; "
+        f"observed_days={int(row['observed_days'])}; "
+        f"last_5={int(row['observations_last_5d'])}; "
+        f"last_10={int(row['observations_last_10d'])}; "
+        f"streak={int(row['current_streak'])}; "
+        f"distinct_scanners={int(row['distinct_scanner_count'])}; "
+        f"scanners={row['scanners']}."
+    )
+
+
+def _parse_source_context(raw_value: object) -> dict[str, object]:
+    text = str(raw_value or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _merge_priority(existing_priority: object, next_priority: str) -> str:
+    current = str(existing_priority or "medium").strip().lower()
+    ranking = {"low": 0, "medium": 1, "high": 2}
+    return current if ranking.get(current, 1) >= ranking.get(next_priority, 1) else next_priority
+
+
+def promote_scanner_candidate_to_theme_review(
+    conn,
+    ticker: str,
+    promotion_note: str = "",
+) -> dict[str, object]:
+    normalized = normalize_ticker(ticker)
+    if not normalized:
+        raise ValueError("Ticker cannot be blank.")
+
+    candidates = scanner_candidate_summary(conn)
+    if candidates.empty:
+        raise ValueError("No Scanner Audit candidates are available.")
+
+    matches = candidates[candidates["ticker"] == normalized]
+    if matches.empty:
+        raise ValueError(f"Scanner Audit candidate not found for {normalized}.")
+
+    row = matches.iloc[0]
+    promoted_at = datetime.now(UTC).replace(tzinfo=None)
+    next_priority = _scanner_audit_priority(str(row["recommendation"]))
+    existing = conn.execute(
+        """
+        SELECT suggestion_id, source, status, rationale, reviewer_notes, priority, source_context_json
+        FROM theme_suggestions
+        WHERE suggestion_type = 'review_theme'
+          AND upper(COALESCE(proposed_ticker, '')) = ?
+          AND status = 'pending'
+        ORDER BY suggestion_id DESC
+        LIMIT 1
+        """,
+        [normalized],
+    ).fetchone()
+
+    existing_context = _parse_source_context(existing[6]) if existing else {}
+    previous_note = str(existing_context.get("promotion_note") or "").strip()
+    note_text = promotion_note.strip() or previous_note
+    evidence = {
+        "ticker": normalized,
+        "candidate_source": "scanner_audit",
+        "source_labels": str(row["source_labels"] or ""),
+        "recommendation": str(row["recommendation"] or ""),
+        "recommendation_reason": str(row["recommendation_reason"] or ""),
+        "persistence_score": int(row["persistence_score"]),
+        "observed_days": int(row["observed_days"]),
+        "observations_last_5d": int(row["observations_last_5d"]),
+        "observations_last_10d": int(row["observations_last_10d"]),
+        "current_streak": int(row["current_streak"]),
+        "distinct_scanner_count": int(row["distinct_scanner_count"]),
+        "first_seen": str(pd.to_datetime(row["first_seen"]).date()),
+        "last_seen": str(pd.to_datetime(row["last_seen"]).date()),
+        "scanners": str(row["scanners"] or ""),
+        "scanner_summary": str(row["scanners"] or ""),
+        "metadata_basis": str(row["metadata_basis"] or ""),
+        "promoted_at": promoted_at.isoformat(sep=" "),
+    }
+    context = dict(existing_context)
+    context.update(
+        {
+            "candidate_source": "scanner_audit",
+            "promotion_note": note_text,
+            "promoted_at": promoted_at.isoformat(sep=" "),
+            "scanner_audit_evidence": evidence,
+        }
+    )
+    context_json = json.dumps(context, sort_keys=True)
+    rationale = _scanner_audit_rationale(row)
+
+    if existing is None:
+        from .suggestions_service import SuggestionPayload, create_suggestion
+
+        suggestion_id = create_suggestion(
+            conn,
+            SuggestionPayload(
+                suggestion_type="review_theme",
+                source="scanner_audit",
+                priority=next_priority,
+                rationale=rationale,
+                proposed_ticker=normalized,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE theme_suggestions
+            SET source_context_json = ?,
+                source_updated_at = ?
+            WHERE suggestion_id = ?
+            """,
+            [context_json, promoted_at, suggestion_id],
+        )
+        return {
+            "action": "created",
+            "suggestion_id": int(suggestion_id),
+            "ticker": normalized,
+            "message": f"Created new review candidate for {normalized}.",
+        }
+
+    suggestion_id = int(existing[0])
+    existing_source = str(existing[1] or "").strip().lower()
+    existing_rationale = str(existing[3] or "").strip()
+    merged_priority = _merge_priority(existing[5], next_priority)
+    updated_rationale = rationale if existing_source in {"scanner_audit", "imported"} or not existing_rationale else existing_rationale
+    updated_source = "scanner_audit" if existing_source in {"", "scanner_audit", "imported"} else str(existing[1])
+    conn.execute(
+        """
+        UPDATE theme_suggestions
+        SET source = ?,
+            rationale = ?,
+            priority = ?,
+            source_context_json = ?,
+            source_updated_at = ?
+        WHERE suggestion_id = ?
+        """,
+        [updated_source, updated_rationale, merged_priority, context_json, promoted_at, suggestion_id],
+    )
+    return {
+        "action": "updated",
+        "suggestion_id": suggestion_id,
+        "ticker": normalized,
+        "message": f"Updated existing review candidate for {normalized}.",
+    }
+
+
 def reset_scanner_audit_data(conn) -> dict[str, object]:
     targets = [
         "scanner_hit_history",

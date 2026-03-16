@@ -1564,6 +1564,25 @@ if __name__ == "__main__":
 
 
 class TestBootstrapAndHistoryFramework(unittest.TestCase):
+    def test_get_conn_surfaces_friendly_database_locked_error(self):
+        with patch(
+            "src.database.duckdb.connect",
+            side_effect=duckdb.IOException(
+                "IO Error: Cannot open file 'theme_dashboard.duckdb': The process cannot access the file because it is being used by another process."
+            ),
+        ) as mock_connect, patch("src.database.time.sleep"):
+            from src.database import DatabaseLockedError, get_conn
+
+            with self.assertRaises(DatabaseLockedError) as ctx:
+                with get_conn():
+                    pass
+
+        self.assertEqual(mock_connect.call_count, 3)
+        message = str(ctx.exception)
+        self.assertIn("locked by another process", message)
+        self.assertIn("another Streamlit dashboard instance", message)
+        self.assertIn("Database path:", message)
+
     def test_init_db_bootstrap_after_file_delete_and_seed_idempotent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test_theme_dashboard.duckdb"

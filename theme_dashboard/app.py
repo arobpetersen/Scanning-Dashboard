@@ -6,7 +6,7 @@ from src.config import DEFAULT_PROVIDER, MASSIVE_API_KEY_ENV, massive_api_key
 from src.database import get_conn, init_db
 from src.fetch_data import RefreshBlockedError, run_refresh
 from src.queries import last_refresh_run, synthetic_data_active
-from src.rankings import compute_theme_rankings
+from src.streamlit_utils import db_cache_token, load_theme_rankings_cached, reset_perf_timings, render_dataframe, show_perf_summary, stop_for_database_error
 from src.symbol_hygiene import refresh_eligible_tickers
 from src.suggestions_service import suggestion_status_counts
 from src.theme_service import active_ticker_universe, get_theme_members, list_themes, refresh_active_ticker_universe, seed_if_needed
@@ -14,11 +14,16 @@ from src.theme_service import active_ticker_universe, get_theme_members, list_th
 st.set_page_config(page_title="Theme Ops Dashboard", layout="wide")
 st.title("Theme Operations Dashboard")
 st.caption("Control center for refresh, rankings, review queue, and health signals.")
+reset_perf_timings("app")
 
-init_db()
-with get_conn() as conn:
-    seeded = seed_if_needed(conn)
-    themes = list_themes(conn, active_only=False)
+try:
+    init_db()
+    with get_conn() as conn:
+        seeded = seed_if_needed(conn)
+        themes = list_themes(conn, active_only=False)
+except Exception as exc:
+    stop_for_database_error(exc)
+db_token = db_cache_token()
 
 if seeded:
     st.success("Theme registry imported from themes_seed_structured.json. DuckDB is source of truth.")
@@ -42,14 +47,17 @@ elif scope_mode == "Custom ticker list":
     raw = st.sidebar.text_area("Tickers", value="AAPL, MSFT, NVDA")
     selected_tickers = sorted(set([p.strip().upper() for p in raw.replace("\n", " ").replace(",", " ").split(" ") if p.strip()]))
 
-with get_conn() as conn:
-    requested_tickers = active_ticker_universe(conn) if scope_mode == active_scope_label else sorted(set(selected_tickers or []))
-    resolved_tickers = refresh_active_ticker_universe(conn) if scope_mode == active_scope_label else sorted(set(selected_tickers or []))
-    eligible_tickers, suppressed_scope_tickers = refresh_eligible_tickers(conn, requested_tickers)
-    last_run = last_refresh_run(conn)
-    rankings = compute_theme_rankings(conn)
-    sugg_counts = suggestion_status_counts(conn)
-    synthetic_active = synthetic_data_active(conn)
+try:
+    with get_conn() as conn:
+        requested_tickers = active_ticker_universe(conn) if scope_mode == active_scope_label else sorted(set(selected_tickers or []))
+        resolved_tickers = refresh_active_ticker_universe(conn) if scope_mode == active_scope_label else sorted(set(selected_tickers or []))
+        eligible_tickers, suppressed_scope_tickers = refresh_eligible_tickers(conn, requested_tickers)
+        last_run = last_refresh_run(conn)
+        sugg_counts = suggestion_status_counts(conn)
+        synthetic_active = synthetic_data_active(conn)
+except Exception as exc:
+    stop_for_database_error(exc)
+rankings = load_theme_rankings_cached(db_token)
 
 if provider_name == "live" and not massive_api_key():
     st.warning(f"Live selected but {MASSIVE_API_KEY_ENV} is missing. Refresh will fall back to mock provider behavior, which is intended mainly for development/testing.")
@@ -146,10 +154,12 @@ if rankings.empty:
 
 top_n = st.slider("Top themes to display", min_value=5, max_value=50, value=20, step=5)
 view = rankings.head(top_n).copy()
-st.dataframe(
+render_dataframe(
+    "app_current_rankings",
     view[["theme", "category", "ticker_count", "avg_1m", "positive_1m_breadth_pct", "composite_score", "delta_composite_score"]],
     width="stretch",
 )
 st.line_chart(view[["theme", "composite_score"]].set_index("theme"))
 
 st.caption("Navigation: Themes, Historical Performance, Suggestions, and Health.")
+show_perf_summary()

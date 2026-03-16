@@ -11,6 +11,7 @@ from src.database import SCHEMA_SQL
 from src.scanner_audit import (
     import_tc2000_exports,
     parse_tc2000_export_file,
+    promote_scanner_candidate_to_theme_review,
     recent_scanner_import_runs,
     reset_scanner_audit_data,
     scanner_candidate_summary,
@@ -331,6 +332,161 @@ class TestScannerAudit(unittest.TestCase):
         self.assertEqual(second["files_processed"], 1)
         self.assertEqual(second["files_skipped"], 0)
         self.assertEqual(conn.execute("select count(*) from scanner_hit_history").fetchone()[0], 1)
+        conn.close()
+
+    def test_promote_scanner_candidate_creates_new_review_candidate_without_touching_membership(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAPL')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'PLTR', 'PLTR', '2026-03-10', '2026-03-10 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'pltr-1'),
+            (1, 'tc2000', 'PLTR', 'PLTR', '2026-03-11', '2026-03-11 08:00:00', 'f2.csv', 'tc2000', 'Momentum', 'pltr-2'),
+            (1, 'tc2000', 'PLTR', 'PLTR', '2026-03-12', '2026-03-12 08:00:00', 'f3.csv', 'tc2000', 'Breakout', 'pltr-3')
+            """
+        )
+
+        result = promote_scanner_candidate_to_theme_review(conn, "PLTR", "Possible AI infrastructure fit")
+
+        stored = conn.execute(
+            """
+            select suggestion_type, status, source, proposed_ticker, reviewer_notes, source_context_json
+            from theme_suggestions
+            where suggestion_id = ?
+            """,
+            [result["suggestion_id"]],
+        ).fetchone()
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(stored[0], "review_theme")
+        self.assertEqual(stored[1], "pending")
+        self.assertEqual(stored[2], "scanner_audit")
+        self.assertEqual(stored[3], "PLTR")
+        self.assertIsNone(stored[4])
+        self.assertEqual(conn.execute("select count(*) from theme_membership").fetchone()[0], 1)
+        context = stored[5]
+        self.assertIn('"candidate_source": "scanner_audit"', context)
+        self.assertIn('"promotion_note": "Possible AI infrastructure fit"', context)
+        conn.close()
+
+    def test_promote_scanner_candidate_updates_existing_pending_review_instead_of_duplicating(self):
+        conn = self._conn()
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'IONQ', 'IONQ', '2026-03-10', '2026-03-10 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'ionq-1'),
+            (1, 'tc2000', 'IONQ', 'IONQ', '2026-03-11', '2026-03-11 08:00:00', 'f2.csv', 'tc2000', 'Breakout', 'ionq-2')
+            """
+        )
+        first = promote_scanner_candidate_to_theme_review(conn, "IONQ", "First note")
+        conn.execute(
+            "update theme_suggestions set reviewer_notes = 'human note' where suggestion_id = ?",
+            [first["suggestion_id"]],
+        )
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (2, 'tc2000', 'IONQ', 'IONQ', '2026-03-12', '2026-03-12 08:00:00', 'f3.csv', 'tc2000', 'Trend', 'ionq-3')
+            """
+        )
+
+        second = promote_scanner_candidate_to_theme_review(conn, "IONQ", "")
+
+        stored = conn.execute(
+            """
+            select count(*), max(source_context_json), max(reviewer_notes)
+            from theme_suggestions
+            where upper(proposed_ticker) = 'IONQ' and suggestion_type = 'review_theme'
+            """
+        ).fetchone()
+        self.assertEqual(first["suggestion_id"], second["suggestion_id"])
+        self.assertEqual(second["action"], "updated")
+        self.assertEqual(int(stored[0]), 1)
+        self.assertEqual(stored[2], "human note")
+        self.assertIn('"observed_days": 3', stored[1])
+        self.assertIn('"promotion_note": "First note"', stored[1])
+        conn.close()
+
+    def test_promote_scanner_candidate_carries_forward_scanner_evidence_fields(self):
+        conn = self._conn()
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, scanner_name_inferred, scanner_name_basis,
+                observed_date_inferred, observed_date_basis, row_hash
+            ) values
+            (1, 'tc2000', 'RKLB', 'RKLB', '2026-03-10', '2026-03-10 08:00:00', 'f1.csv', 'tc2000_export', 'tc2000_export', true, 'default_source_label_fallback', true, 'filename_parse', 'rklb-1'),
+            (1, 'tc2000', 'RKLB', 'RKLB', '2026-03-11', '2026-03-11 08:00:00', 'f2.csv', 'tc2000_export', 'tc2000_export', true, 'default_source_label_fallback', true, 'filename_parse', 'rklb-2'),
+            (1, 'tc2000', 'RKLB', 'RKLB', '2026-03-12', '2026-03-12 08:00:00', 'f3.csv', 'tc2000_export', 'tc2000_export', true, 'default_source_label_fallback', true, 'filename_parse', 'rklb-3')
+            """
+        )
+
+        result = promote_scanner_candidate_to_theme_review(conn, "RKLB", "Space infra watch")
+        stored = conn.execute(
+            "select rationale, source_context_json, source_updated_at from theme_suggestions where suggestion_id = ?",
+            [result["suggestion_id"]],
+        ).fetchone()
+
+        self.assertIn("Scanner Audit evidence", stored[0])
+        self.assertIn('"ticker": "RKLB"', stored[1])
+        self.assertIn('"recommendation_reason"', stored[1])
+        self.assertIn('"persistence_score"', stored[1])
+        self.assertIn('"observations_last_5d"', stored[1])
+        self.assertIn('"observations_last_10d"', stored[1])
+        self.assertIn('"current_streak"', stored[1])
+        self.assertIn('"distinct_scanner_count"', stored[1])
+        self.assertIn('"first_seen": "2026-03-10"', stored[1])
+        self.assertIn('"last_seen": "2026-03-12"', stored[1])
+        self.assertIn('"metadata_basis"', stored[1])
+        self.assertIn('"promotion_note": "Space infra watch"', stored[1])
+        self.assertIsNotNone(stored[2])
+        conn.close()
+
+    def test_promote_scanner_candidate_creates_new_pending_row_after_rejected_history(self):
+        conn = self._conn()
+        conn.execute(
+            """
+            insert into theme_suggestions(
+                suggestion_type, status, source, rationale, priority, proposed_ticker
+            ) values
+            ('review_theme', 'rejected', 'manual', 'old review', 'medium', 'ASTS')
+            """
+        )
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'ASTS', 'ASTS', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'asts-1')
+            """
+        )
+
+        result = promote_scanner_candidate_to_theme_review(conn, "ASTS", "Retry after fresh scanner activity")
+
+        rows = conn.execute(
+            """
+            select suggestion_id, status, source
+            from theme_suggestions
+            where upper(proposed_ticker) = 'ASTS'
+            order by suggestion_id
+            """
+        ).fetchall()
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][1:], ("rejected", "manual"))
+        self.assertEqual(rows[1][1], "pending")
+        self.assertEqual(rows[1][2], "scanner_audit")
         conn.close()
 
 

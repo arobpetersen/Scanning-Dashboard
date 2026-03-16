@@ -3,12 +3,19 @@ import pandas as pd
 import streamlit as st
 
 from src.database import get_conn, init_db
-from src.inflection_engine import compute_theme_inflections
 from src.leaderboard_utils import build_window_leaderboard
-from src.momentum_engine import compute_theme_momentum
 from src.queries import historical_theme_boundary_debug, theme_snapshot_history
 from src.rotation_engine import compute_theme_rotation
-from src.streamlit_utils import extract_selected_row
+from src.streamlit_utils import (
+    db_cache_token,
+    extract_selected_row,
+    load_theme_inflections_cached,
+    load_theme_momentum_cached,
+    render_dataframe,
+    reset_perf_timings,
+    show_perf_summary,
+    stop_for_database_error,
+)
 from src.theme_selection import set_theme_selection_state
 from src.theme_service import list_themes, seed_if_needed
 
@@ -54,7 +61,7 @@ def _render_explained_table(title: str, description: str, df: pd.DataFrame, colu
     st.caption(description)
     shaped = df.reindex(columns=columns)
     show_df = shaped if limit is None else shaped.head(limit)
-    st.dataframe(show_df, width="stretch", column_config=_config_for_columns(columns))
+    render_dataframe(f"explained_{title}", show_df, width="stretch", column_config=_config_for_columns(columns))
 
 
 def _signal_reason_text(row: pd.Series) -> str:
@@ -99,7 +106,8 @@ def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, mes
 
     display = leaders.rename(columns={perf_col: "window_perf"})
     cols = ["rank", "theme", "window_perf", "momentum_score", "rank_change"]
-    event = st.dataframe(
+    event = render_dataframe(
+        f"{key_prefix}_overview",
         display[cols],
         hide_index=True,
         width="stretch",
@@ -119,18 +127,22 @@ st.set_page_config(page_title="Historical Performance", layout="wide")
 st.title("Historical Performance & Theme Momentum")
 st.caption("Audit historical theme movement, leadership rotation, and provenance-aware change across resolved boundary windows.")
 st.caption("Use the Themes page for current leadership and strongest-now views. This page is for what changed across a historical window and how trustworthy that change is.")
+reset_perf_timings("historical_performance")
 
-init_db()
-with get_conn() as conn:
-    seed_if_needed(conn)
-    themes = list_themes(conn, active_only=False)
+try:
+    init_db()
+    with get_conn() as conn:
+        seed_if_needed(conn)
+        themes = list_themes(conn, active_only=False)
+except Exception as exc:
+    stop_for_database_error(exc)
+db_token = db_cache_token()
 theme_label_by_name = {str(r["name"]): f"{r['name']} ({r['category']})" for _, r in themes.iterrows()}
 theme_id_by_name = {str(r["name"]): int(r["id"]) for _, r in themes.iterrows()}
 
-with get_conn() as conn:
-    overview_1w = compute_theme_momentum(conn, 7, top_n=10)
-    overview_1m = compute_theme_momentum(conn, 30, top_n=10)
-    overview_3m = compute_theme_momentum(conn, 90, top_n=10)
+overview_1w = load_theme_momentum_cached(db_token, 7, top_n=10)
+overview_1m = load_theme_momentum_cached(db_token, 30, top_n=10)
+overview_3m = load_theme_momentum_cached(db_token, 90, top_n=10)
 
 st.subheader("Theme Movement Analysis")
 st.caption(
@@ -161,8 +173,8 @@ st.caption(
     "The chart controls only change how the chart/filtering view is built."
 )
 
+momentum = load_theme_momentum_cached(db_token, int(lookback_days), top_n=analysis_top_n)
 with get_conn() as conn:
-    momentum = compute_theme_momentum(conn, int(lookback_days), top_n=analysis_top_n)
     total_theme_snapshot_sets = int(conn.execute("SELECT COUNT(DISTINCT snapshot_time) FROM theme_snapshots").fetchone()[0] or 0)
 
 history = momentum["history"]
@@ -183,8 +195,7 @@ if snapshot_count < 2:
 
 summary = momentum["window_summary"]
 rotation = compute_theme_rotation(summary, analysis_top_n, momentum["new_leaders"], momentum["dropped_leaders"])
-with get_conn() as conn:
-    inflections = compute_theme_inflections(conn, int(lookback_days), top_n=analysis_top_n)
+inflections = load_theme_inflections_cached(db_token, int(lookback_days), top_n=analysis_top_n)
 window_meta = momentum.get("meta", {})
 history_depth_quality = _history_depth_quality(window_meta, summary)
 
@@ -233,7 +244,8 @@ leaders_cols = ["rank", "theme", "rank_change", "delta_composite", "momentum_sco
 if show_leaderboard_advanced:
     leaders_cols.extend(["delta_avg_1m", "delta_breadth"])
 leaders_tbl = leaders_tbl[leaders_cols]
-leaders_event = st.dataframe(
+leaders_event = render_dataframe(
+    "historical_momentum_leaderboard",
     leaders_tbl,
     width="stretch",
     column_config=_config_for_columns(leaders_tbl.columns.tolist()),
@@ -252,7 +264,8 @@ st.caption(
     "These are the strongest themes by the page's deterministic momentum model for the selected window. "
     "Use this as the clearest model-based companion to the improving-themes leaderboard."
 )
-st.dataframe(
+render_dataframe(
+    "historical_top_momentum",
     momentum["top_momentum"][["theme", "momentum_score", "delta_composite", "rank_change", "delta_breadth"]].head(analysis_top_n),
     width="stretch",
     column_config=_config_for_columns(["theme", "momentum_score", "delta_composite", "rank_change", "delta_breadth"]),
@@ -399,7 +412,8 @@ else:
         "delta_breadth",
     ]
     signal_df = inflections["signals"][signal_cols].head(30).reset_index(drop=True)
-    signal_event = st.dataframe(
+    signal_event = render_dataframe(
+        "historical_signal_table",
         signal_df,
         width="stretch",
         hide_index=True,
@@ -451,7 +465,8 @@ detail_cols = [
     "momentum_score",
 ]
 detail_df = summary[detail_cols].reset_index(drop=True)
-detail_event = st.dataframe(
+detail_event = render_dataframe(
+    "historical_detail_table",
     detail_df,
     width="stretch",
     column_config=_config_for_columns(detail_cols),
@@ -497,7 +512,7 @@ with st.expander("Advanced historical diagnostics", expanded=False):
             reasons = rotation["emerging"].head(5).copy()
             reasons["trigger_reason"] = reasons.apply(_signal_reason_text, axis=1)
             with st.expander("Why these themes are marked Emerging"):
-                st.dataframe(reasons[["theme", "trigger_reason"]], width="stretch")
+                render_dataframe("historical_emerging_reasons", reasons[["theme", "trigger_reason"]], width="stretch")
         _render_explained_table(
             "Largest Rank Improvers",
             "Themes with the largest positive rank change over the selected lookback window.",
@@ -536,7 +551,9 @@ with st.expander("Advanced historical diagnostics", expanded=False):
             weak_reasons = momentum["weakening_themes"].head(5).copy()
             weak_reasons["trigger_reason"] = weak_reasons.apply(_signal_reason_text, axis=1)
             with st.expander("Why these themes are marked Weakening"):
-                st.dataframe(weak_reasons[["theme", "trigger_reason"]], width="stretch")
+                render_dataframe("historical_weakening_reasons", weak_reasons[["theme", "trigger_reason"]], width="stretch")
+
+show_perf_summary()
 
 st.subheader("Single Theme Historical Snapshot Detail")
 if themes.empty:

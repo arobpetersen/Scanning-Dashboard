@@ -1,10 +1,46 @@
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import duckdb
 
 from .config import DB_PATH
+
+
+DB_CONNECT_RETRY_ATTEMPTS = 3
+DB_CONNECT_RETRY_SLEEP_SECONDS = 0.15
+
+
+class DatabaseLockedError(RuntimeError):
+    """Raised when the local DuckDB file cannot be opened due to concurrent access."""
+
+
+def database_path_str() -> str:
+    return str(Path(DB_PATH))
+
+
+def _is_lock_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return any(
+        token in message
+        for token in [
+            "being used by another process",
+            "cannot access the file because it is being used by another process",
+            "access is denied",
+            "used by another process",
+        ]
+    )
+
+
+def _database_locked_message(db_path: str) -> str:
+    return (
+        "The local DuckDB file is locked by another process and could not be opened. "
+        "Likely causes: another Streamlit dashboard instance is running, a test run still has the DB open, "
+        "or another Python session is connected to the file. "
+        f"Database path: {db_path}"
+    )
 
 SCHEMA_SQL = """
 CREATE SEQUENCE IF NOT EXISTS themes_id_seq;
@@ -170,6 +206,8 @@ CREATE TABLE IF NOT EXISTS theme_suggestions (
     proposed_target_theme_id BIGINT,
     reviewer_notes VARCHAR,
     priority VARCHAR NOT NULL DEFAULT 'medium',
+    source_context_json VARCHAR,
+    source_updated_at TIMESTAMP,
     CHECK (status IN ('pending','approved','rejected','applied','obsolete')),
     CHECK (suggestion_type IN (
         'add_ticker_to_theme',
@@ -179,7 +217,7 @@ CREATE TABLE IF NOT EXISTS theme_suggestions (
         'move_ticker_between_themes',
         'review_theme'
     )),
-    CHECK (source IN ('manual','rules_engine','ai_proposal','imported'))
+    CHECK (source IN ('manual','rules_engine','ai_proposal','imported','scanner_audit'))
 );
 
 CREATE TABLE IF NOT EXISTS scanner_import_runs (
@@ -306,7 +344,23 @@ CREATE INDEX IF NOT EXISTS idx_scanner_candidate_review_state_state ON scanner_c
 
 @contextmanager
 def get_conn():
-    conn = duckdb.connect(str(DB_PATH))
+    db_path = database_path_str()
+    conn = None
+    last_exc: Exception | None = None
+    for attempt in range(DB_CONNECT_RETRY_ATTEMPTS):
+        try:
+            conn = duckdb.connect(db_path)
+            break
+        except duckdb.IOException as exc:
+            if not _is_lock_error(exc):
+                raise
+            last_exc = exc
+            if attempt + 1 < DB_CONNECT_RETRY_ATTEMPTS:
+                time.sleep(DB_CONNECT_RETRY_SLEEP_SECONDS)
+                continue
+            raise DatabaseLockedError(_database_locked_message(db_path)) from exc
+    if conn is None:
+        raise DatabaseLockedError(_database_locked_message(db_path)) from last_exc
     try:
         yield conn
     finally:
@@ -330,6 +384,8 @@ def _rebuild_theme_suggestions(conn) -> None:
             proposed_target_theme_id BIGINT,
             reviewer_notes VARCHAR,
             priority VARCHAR NOT NULL DEFAULT 'medium',
+            source_context_json VARCHAR,
+            source_updated_at TIMESTAMP,
             CHECK (status IN ('pending','approved','rejected','applied','obsolete')),
             CHECK (suggestion_type IN (
                 'add_ticker_to_theme',
@@ -339,7 +395,7 @@ def _rebuild_theme_suggestions(conn) -> None:
                 'move_ticker_between_themes',
                 'review_theme'
             )),
-            CHECK (source IN ('manual','rules_engine','ai_proposal','imported'))
+            CHECK (source IN ('manual','rules_engine','ai_proposal','imported','scanner_audit'))
         )
         """
     )
@@ -348,11 +404,12 @@ def _rebuild_theme_suggestions(conn) -> None:
         INSERT INTO theme_suggestions_migrated(
             suggestion_id, suggestion_type, status, created_at, reviewed_at, source,
             rationale, proposed_theme_name, proposed_ticker, existing_theme_id,
-            proposed_target_theme_id, reviewer_notes, priority
+            proposed_target_theme_id, reviewer_notes, priority, source_context_json, source_updated_at
         )
         SELECT suggestion_id, suggestion_type, status, created_at, reviewed_at, source,
                rationale, proposed_theme_name, proposed_ticker, existing_theme_id,
-               proposed_target_theme_id, reviewer_notes, COALESCE(priority, 'medium')
+               proposed_target_theme_id, reviewer_notes, COALESCE(priority, 'medium'),
+               NULL, NULL
         FROM theme_suggestions
         """
     )
@@ -386,6 +443,8 @@ def init_db() -> None:
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
         conn.execute("UPDATE symbol_refresh_status SET updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)")
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
+        conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS source_context_json VARCHAR")
+        conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS source_updated_at TIMESTAMP")
         conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
         conn.execute("ALTER TABLE theme_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
         conn.execute("ALTER TABLE historical_reconstruction_runs ADD COLUMN IF NOT EXISTS ticker_history_rows_written BIGINT DEFAULT 0")
@@ -425,7 +484,10 @@ def init_db() -> None:
 
         ddl = conn.execute("SELECT sql FROM duckdb_tables() WHERE table_name='theme_suggestions' LIMIT 1").fetchone()
         ddl_text = ddl[0].lower() if ddl and ddl[0] else ""
-        needs_rebuild = any(token not in ddl_text for token in ["review_theme", "obsolete", "priority"])
+        needs_rebuild = any(
+            token not in ddl_text
+            for token in ["review_theme", "obsolete", "priority", "scanner_audit", "source_context_json", "source_updated_at"]
+        )
         if needs_rebuild:
             _rebuild_theme_suggestions(conn)
 

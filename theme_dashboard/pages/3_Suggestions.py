@@ -10,16 +10,24 @@ from src.config import (
     openai_api_key,
 )
 from src.database import get_conn, init_db
-from src.queries import theme_health_overview
-from src.rankings import compute_theme_rankings
 from src.rules_engine import run_rules_engine
 from src.scanner_audit import (
     import_tc2000_exports,
+    promote_scanner_candidate_to_theme_review,
     recent_scanner_import_runs,
     reset_scanner_audit_data,
-    scanner_candidate_summary,
     scanner_import_overview,
     set_scanner_candidate_review_state,
+)
+from src.streamlit_utils import (
+    db_cache_token,
+    load_scanner_candidate_summary_cached,
+    load_theme_health_overview_cached,
+    load_theme_rankings_cached,
+    render_dataframe,
+    reset_perf_timings,
+    show_perf_summary,
+    stop_for_database_error,
 )
 from src.suggestions_service import (
     SuggestionPayload,
@@ -36,6 +44,7 @@ from src.theme_service import get_theme_members, list_themes, seed_if_needed
 
 st.set_page_config(page_title="Suggestions", layout="wide")
 st.title("Suggestions")
+reset_perf_timings("suggestions")
 
 feedback = st.session_state.pop("suggestions_feedback", None)
 if feedback:
@@ -69,10 +78,14 @@ def _render_ticker_membership_context(row) -> None:
         if categories:
             st.write(f"Categories: `{categories}`")
 
-init_db()
-with get_conn() as conn:
-    seed_if_needed(conn)
-    themes = list_themes(conn, active_only=False)
+try:
+    init_db()
+    with get_conn() as conn:
+        seed_if_needed(conn)
+        themes = list_themes(conn, active_only=False)
+except Exception as exc:
+    stop_for_database_error(exc)
+db_token = db_cache_token()
 
 theme_options = themes[["id", "name"]].to_dict("records")
 
@@ -80,7 +93,7 @@ manual_tab, queue_tab, rules_tab, ai_tab, scanner_tab = st.tabs(["Manual", "Queu
 
 with manual_tab:
     suggestion_type = st.selectbox("Suggestion type", ["add_ticker_to_theme", "remove_ticker_from_theme", "create_theme", "rename_theme", "move_ticker_between_themes", "review_theme"])
-    source = st.selectbox("Source", ["manual", "rules_engine", "ai_proposal", "imported"], index=0)
+    source = st.selectbox("Source", ["manual", "rules_engine", "ai_proposal", "imported", "scanner_audit"], index=0)
     priority = st.selectbox("Priority", ["low", "medium", "high"], index=1)
     rationale = st.text_area("Rationale", value="")
 
@@ -134,7 +147,7 @@ with queue_tab:
     with fc2:
         type_filter = st.selectbox("Type", ["all", "add_ticker_to_theme", "remove_ticker_from_theme", "create_theme", "rename_theme", "move_ticker_between_themes", "review_theme"], index=0)
     with fc3:
-        source_filter = st.selectbox("Source", ["all", "manual", "rules_engine", "ai_proposal", "imported"], index=0)
+        source_filter = st.selectbox("Source", ["all", "manual", "rules_engine", "ai_proposal", "imported", "scanner_audit"], index=0)
     with fc4:
         search_filter = st.text_input("Search", value="")
 
@@ -172,7 +185,11 @@ with queue_tab:
     if queue.empty:
         st.info("No queue rows for filters.")
     else:
-        st.dataframe(queue[["suggestion_id", "status", "priority", "validation_status", "suggestion_type", "source", "proposed_ticker", "existing_theme_name", "proposed_theme_name", "rationale", "created_at", "reviewer_notes"]], width="stretch")
+        render_dataframe(
+            "suggestions_queue",
+            queue[["suggestion_id", "status", "priority", "validation_status", "suggestion_type", "source", "proposed_ticker", "existing_theme_name", "proposed_theme_name", "rationale", "created_at", "reviewer_notes"]],
+            width="stretch",
+        )
 
         pending = queue[queue["status"] == "pending"]
         approved = queue[queue["status"] == "approved"]
@@ -257,14 +274,14 @@ with queue_tab:
 
     if not recent_applied.empty:
         st.subheader("Recently applied")
-        st.dataframe(recent_applied, width="stretch")
+        render_dataframe("suggestions_recent_applied", recent_applied, width="stretch")
 
 with rules_tab:
     if st.button("Run deterministic rules engine", type="primary"):
         with get_conn() as conn:
             summary = run_rules_engine(conn)
         st.success(f"Rules run: created={summary['created']} evaluated={summary['evaluated']} duplicates={summary['duplicates_skipped']} invalid={summary['invalid_or_skipped']}")
-        st.dataframe(summary.get("rule_results", []), width="stretch", hide_index=True)
+        render_dataframe("rules_engine_results", summary.get("rule_results", []), width="stretch", hide_index=True)
         signal = summary.get("provider_failure_signal") or {}
         if signal:
             st.caption(f"Provider signal: {signal}")
@@ -289,9 +306,8 @@ with ai_tab:
     instruction = st.text_area("AI instruction", value="Focus on high-quality actionable proposals with evidence.")
     max_props = st.slider("Max proposals", min_value=1, max_value=20, value=AI_MAX_PROPOSALS)
 
-    with get_conn() as conn:
-        rankings = compute_theme_rankings(conn)
-        health = theme_health_overview(conn, low_constituent_threshold=3, failure_window_days=14)
+    rankings = load_theme_rankings_cached(db_token)
+    health = load_theme_health_overview_cached(db_token, low_constituent_threshold=3, failure_window_days=14)
 
     if st.button("Generate AI proposals", type="primary", disabled=not key_present):
         context = sanitize_context(
@@ -339,7 +355,7 @@ with scanner_tab:
             st.error(import_feedback["message"])
         file_results = import_feedback.get("file_results") or []
         if file_results:
-            st.dataframe(file_results, width="stretch", hide_index=True)
+            render_dataframe("scanner_import_file_results", file_results, width="stretch", hide_index=True)
 
     if st.button("Import latest TC2000 exports", type="primary"):
         with get_conn() as conn:
@@ -373,7 +389,7 @@ with scanner_tab:
     with get_conn() as conn:
         import_runs = recent_scanner_import_runs(conn, limit=10)
         overview = scanner_import_overview(conn)
-        candidates = scanner_candidate_summary(conn)
+    candidates = load_scanner_candidate_summary_cached(db_token)
 
     o1, o2, o3, o4, o5, o6 = st.columns(6)
     o1.metric("Last import", str(overview["last_import_time"] or "—"))
@@ -389,7 +405,7 @@ with scanner_tab:
 
     if not import_runs.empty:
         st.caption("Recent import runs")
-        st.dataframe(import_runs, width="stretch", hide_index=True)
+        render_dataframe("scanner_import_runs", import_runs, width="stretch", hide_index=True)
 
     if candidates.empty:
         st.info("No scanner-hit history yet. Import TC2000 exports to start building recurrence evidence.")
@@ -491,9 +507,8 @@ with scanner_tab:
                 "metadata_basis",
             ]
         ].copy()
-        st.dataframe(display, width="stretch", hide_index=True)
+        render_dataframe("scanner_candidate_display", display, width="stretch", hide_index=True)
 
-        actionable = view[view["is_governed"] == False]
         if not view.empty:
             selected_audit_ticker = st.selectbox("Selected scanner candidate", options=view["ticker"].tolist())
             selected_audit_row = view[view["ticker"] == selected_audit_ticker].iloc[0]
@@ -520,34 +535,29 @@ with scanner_tab:
                 except Exception as exc:
                     st.error(f"Could not save candidate review state. {exc}")
 
-        if not actionable.empty:
-            selected_ticker = st.selectbox(
-                "Create imported review suggestion for uncovered ticker",
-                options=actionable["ticker"].tolist(),
+            promotion_note = st.text_area(
+                "Promotion note (optional)",
+                value="",
+                placeholder="Why it looks interesting, suspected theme/category, or any caution/uncertainty.",
+                key=f"scanner_audit_promotion_note_{selected_audit_ticker}",
             )
-            selected_row = actionable[actionable["ticker"] == selected_ticker].iloc[0]
+            can_promote = not bool(selected_audit_row["is_governed"])
             st.caption(
-                f"{selected_ticker}: seen {int(selected_row['observations_last_10d'])} of last 10 observed days | "
-                f"streak {int(selected_row['current_streak'])} | scanners `{selected_row['scanners']}` | "
-                f"{selected_row['recommendation_reason']}"
+                "Promotion creates or refreshes a staged review candidate only. "
+                "It does not modify governed theme membership."
             )
-            if st.button("Create imported review suggestion"):
+            if not can_promote:
+                st.info("This candidate is already governed. Promotion is reserved for uncovered candidates.")
+            if st.button("Send to Theme Review", disabled=not can_promote):
                 try:
-                    payload = SuggestionPayload(
-                        suggestion_type="review_theme",
-                        source="imported",
-                        priority="high" if selected_row["recommendation"] == "high-persistence uncovered" else "medium",
-                        rationale=(
-                            f"TC2000 recurrence evidence: persistence_score={int(selected_row['persistence_score'])}, "
-                            f"observed_days={int(selected_row['observed_days'])}, "
-                            f"last_10={int(selected_row['observations_last_10d'])}, "
-                            f"streak={int(selected_row['current_streak'])}, "
-                            f"scanners={selected_row['scanners']}."
-                        ),
-                        proposed_ticker=str(selected_ticker),
-                    )
                     with get_conn() as conn:
-                        sid = create_suggestion(conn, payload)
-                    st.success(f"Created imported review suggestion #{sid} for {selected_ticker}.")
+                        result = promote_scanner_candidate_to_theme_review(conn, selected_audit_ticker, promotion_note)
+                    st.session_state["suggestions_feedback"] = {
+                        "level": "success",
+                        "message": str(result["message"]),
+                    }
+                    st.rerun()
                 except Exception as exc:
-                    st.error(f"Could not create imported review suggestion. {exc}")
+                    st.error(f"Could not send candidate to Theme Review. {exc}")
+
+show_perf_summary()
