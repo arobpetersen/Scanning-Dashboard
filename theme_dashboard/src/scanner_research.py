@@ -210,6 +210,8 @@ ROLE_FAMILY = {
     "healthcare_equipment": "healthcare_devices",
 }
 
+_PROFILE_CACHE: dict[str, dict[str, object]] = {}
+
 
 def _normalize_text(value: object) -> str:
     return str(value or "").strip()
@@ -231,6 +233,24 @@ def _sanitize_error_text(text: object, *, limit: int = 200) -> str:
     text = re.sub(r"(?i)bearer\s+[a-z0-9_\-\.]+", "bearer [redacted]", text)
     text = re.sub(r"(?i)api[_ -]?key[=:]\s*[^ ,;]+", "api_key=[redacted]", text)
     return text[:limit]
+
+
+def _normalize_optional_theme_label(value: object) -> str | None:
+    text = _normalize_text(value)
+    if not text:
+        return None
+    normalized = text.lower()
+    empty_markers = {
+        "none",
+        "none suggested",
+        "no suggestion",
+        "no strong fit",
+        "no strong existing fit",
+        "n/a",
+        "na",
+        "null",
+    }
+    return None if normalized in empty_markers else text
 
 
 def _extract_openai_error_details(exc: Exception) -> dict[str, object]:
@@ -580,6 +600,35 @@ def _load_company_profile(ticker: str) -> dict[str, object]:
     }
 
 
+def _profile_has_research_value(profile: dict[str, object] | None) -> bool:
+    if not isinstance(profile, dict):
+        return False
+    return bool(
+        _normalize_text(profile.get("company_name"))
+        or _normalize_text(profile.get("description"))
+        or _normalize_text(profile.get("sic_description"))
+    )
+
+
+def _load_company_profile_with_cache(ticker: str) -> dict[str, object]:
+    normalized_ticker = str(ticker or "").strip().upper()
+    cached = _PROFILE_CACHE.get(normalized_ticker)
+    fresh = _load_company_profile(normalized_ticker)
+    if _profile_has_research_value(fresh):
+        profile = dict(fresh)
+        profile["_profile_source"] = "live_lookup"
+        _PROFILE_CACHE[normalized_ticker] = profile
+        return profile
+    if _profile_has_research_value(cached):
+        profile = dict(cached)
+        profile["_profile_source"] = "cached_live_lookup"
+        return profile
+    profile = dict(fresh) if isinstance(fresh, dict) else {}
+    if profile:
+        profile["_profile_source"] = "live_lookup_empty"
+    return profile
+
+
 def _candidate_context(conn, ticker: str) -> dict[str, object]:
     candidates = scanner_candidate_summary(conn)
     if candidates.empty:
@@ -646,6 +695,13 @@ def _candidate_new_theme_label(profile: dict[str, object], candidate: dict[str, 
     if concept:
         return THEME_NEW_LABELS.get(concept) or _normalize_text(profile.get("sic_description")).title() or None
     return None
+
+
+def _supports_distinct_new_theme_label(profile: dict[str, object], candidate: dict[str, object]) -> bool:
+    role = _dominant_role(profile, candidate)
+    if role in {"", "software_tooling", "power_generation"}:
+        return False
+    return True
 
 
 def _should_prioritize_new_theme(
@@ -991,6 +1047,36 @@ def _precision_override_reason(
     return f"{possible_new_theme} is a more precise description of the company's direct role than the current governed taxonomy."
 
 
+def _rationale_signals_precision_gap(rationale: str) -> bool:
+    normalized = _normalize_text(rationale).lower()
+    if not normalized:
+        return False
+    precision_markers = [
+        "more precise",
+        "more specific",
+        "narrow business-role",
+        "current governed taxonomy",
+        "direct role",
+        "actual role in the stack",
+        "actual role",
+        "value-chain position",
+    ]
+    adjacency_markers = [
+        "adjacent",
+        "indirect",
+        "end-market adjacency",
+        "end market adjacency",
+        "adjacency fit",
+        "adjacency fits",
+        "end-market based",
+        "end market based",
+        "weaker",
+        "broad alternatives",
+        "secondary",
+    ]
+    return any(marker in normalized for marker in precision_markers) and any(marker in normalized for marker in adjacency_markers)
+
+
 def _merge_ai_with_heuristic_draft(
     ai_draft: dict[str, object],
     heuristic_draft: dict[str, object],
@@ -1010,7 +1096,7 @@ def _merge_ai_with_heuristic_draft(
     ai_suggested = list(ai_draft.get("suggested_existing_themes") or [])
     merged["suggested_existing_themes"] = ai_suggested if ai_suggested else list(heuristic_draft.get("suggested_existing_themes") or [])
 
-    merged["possible_new_theme"] = _normalize_text(ai_draft.get("possible_new_theme")) or heuristic_draft.get("possible_new_theme")
+    merged["possible_new_theme"] = _normalize_optional_theme_label(ai_draft.get("possible_new_theme")) or _normalize_optional_theme_label(heuristic_draft.get("possible_new_theme"))
     merged["confidence"] = _normalize_text(ai_draft.get("confidence")) or heuristic_draft.get("confidence") or "low"
     merged["recommended_action"] = _normalize_action(ai_draft.get("recommended_action"), heuristic_draft.get("recommended_action") or "watch_only")
 
@@ -1023,26 +1109,44 @@ def _merge_ai_with_heuristic_draft(
     merged["caveats"] = ai_caveats or heuristic_caveats
 
     if not merged["possible_new_theme"] and merged["recommended_action"] == "consider_new_theme":
-        merged["possible_new_theme"] = heuristic_draft.get("possible_new_theme")
+        merged["possible_new_theme"] = _normalize_optional_theme_label(heuristic_draft.get("possible_new_theme"))
 
     heuristic_prefers_new_theme = (
         _normalize_action(heuristic_draft.get("recommended_action")) == "consider_new_theme"
         and _normalize_text(heuristic_draft.get("possible_new_theme"))
     )
+    candidate_new_theme = _candidate_new_theme_label(profile, candidate)
+    supports_distinct_new_theme = _supports_distinct_new_theme_label(profile, candidate)
+    ai_rationale_signals_gap = _rationale_signals_precision_gap(ai_rationale)
+    merged_rationale_signals_gap = _rationale_signals_precision_gap(str(merged.get("rationale") or ""))
     best_ai_existing_fit = _best_suggested_theme_fit_details(
         list(merged.get("suggested_existing_themes") or []),
         catalog,
         profile,
         candidate,
     )
-    if heuristic_prefers_new_theme and (
-        not merged.get("suggested_existing_themes")
-        or not bool(best_ai_existing_fit.get("direct_role_fit"))
-        or int(best_ai_existing_fit.get("score") or 0) < 12
-    ):
-        merged["possible_new_theme"] = _normalize_text(ai_draft.get("possible_new_theme")) or heuristic_draft.get("possible_new_theme")
+    should_promote_new_theme = (
+        bool(candidate_new_theme)
+        and supports_distinct_new_theme
+        and (
+            heuristic_prefers_new_theme
+            or ai_rationale_signals_gap
+            or merged_rationale_signals_gap
+        )
+        and (
+            not merged.get("suggested_existing_themes")
+            or not bool(best_ai_existing_fit.get("direct_role_fit"))
+            or int(best_ai_existing_fit.get("score") or 0) < 12
+        )
+    )
+    if should_promote_new_theme:
+        merged["possible_new_theme"] = (
+            _normalize_optional_theme_label(ai_draft.get("possible_new_theme"))
+            or _normalize_optional_theme_label(heuristic_draft.get("possible_new_theme"))
+            or candidate_new_theme
+        )
         merged["recommended_action"] = "consider_new_theme"
-        if _normalize_text(merged.get("confidence")) == "high":
+        if _normalize_text(merged.get("confidence")) in {"high", ""}:
             merged["confidence"] = "medium"
         precision_sentence = _precision_override_reason(
             str(merged["possible_new_theme"]),
@@ -1055,6 +1159,8 @@ def _merge_ai_with_heuristic_draft(
         if list(merged.get("suggested_existing_themes") or []) and adjacency_caveat not in caveats:
             caveats.append(adjacency_caveat)
         merged["caveats"] = caveats
+    elif not supports_distinct_new_theme and _normalize_action(ai_draft.get("recommended_action"), "watch_only") == "watch_only":
+        merged["possible_new_theme"] = None
 
     if not _normalize_text(merged.get("rationale")):
         merged["rationale"] = heuristic_rationale or "No strong governed-theme fit was identified; review the business role manually."
@@ -1121,7 +1227,7 @@ def _ai_research_draft(candidate: dict[str, object], catalog: list[dict[str, obj
         "short_company_description": _normalize_text(raw.get("short_company_description")) or _normalize_text(profile.get("description")) or "No verified company description available.",
         "possible_similar_tickers": [str(value).strip().upper() for value in raw.get("possible_similar_tickers") or [] if str(value).strip()][:5],
         "suggested_existing_themes": suggested_existing,
-        "possible_new_theme": _normalize_text(raw.get("possible_new_theme")) or None,
+        "possible_new_theme": _normalize_optional_theme_label(raw.get("possible_new_theme")),
         "confidence": _normalize_text(raw.get("confidence")) or "low",
         "rationale": _normalize_text(raw.get("rationale")),
         "caveats": [str(value).strip() for value in raw.get("caveats") or [] if str(value).strip()],
@@ -1139,7 +1245,7 @@ def _ai_research_draft(candidate: dict[str, object], catalog: list[dict[str, obj
 def generate_scanner_research_draft(conn, ticker: str) -> dict[str, object]:
     candidate = _candidate_context(conn, ticker)
     catalog = theme_catalog_context(conn)
-    profile = _load_company_profile(candidate["ticker"])
+    profile = _load_company_profile_with_cache(candidate["ticker"])
     generated_at = datetime.now(UTC).replace(tzinfo=None).isoformat(sep=" ")
 
     research_mode = "heuristic_fallback"

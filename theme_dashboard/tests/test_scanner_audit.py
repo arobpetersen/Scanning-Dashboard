@@ -11,7 +11,7 @@ import requests
 
 from src.config import AI_MODEL
 from src.database import SCHEMA_SQL
-from src.scanner_research import generate_scanner_research_draft, get_or_create_scanner_research_draft, theme_catalog_context
+from src.scanner_research import _PROFILE_CACHE, generate_scanner_research_draft, get_or_create_scanner_research_draft, theme_catalog_context
 from src.scanner_audit import (
     import_tc2000_exports,
     parse_tc2000_export_file,
@@ -22,6 +22,7 @@ from src.scanner_audit import (
     scanner_import_overview,
     set_scanner_candidate_review_state,
 )
+from src.suggestions_page_state import build_scanner_research_debug_entry
 
 
 class TestScannerAudit(unittest.TestCase):
@@ -48,6 +49,12 @@ class TestScannerAudit(unittest.TestCase):
         conn = duckdb.connect(":memory:")
         conn.execute(SCHEMA_SQL)
         return conn
+
+    def setUp(self):
+        _PROFILE_CACHE.clear()
+
+    def tearDown(self):
+        _PROFILE_CACHE.clear()
 
     def test_parse_tc2000_export_file_handles_basic_csv(self):
         tmp = self._tmpdir()
@@ -969,6 +976,58 @@ class TestScannerAudit(unittest.TestCase):
     @patch(
         "src.scanner_research._load_company_profile",
         return_value={
+            "ticker": "AAOI",
+            "company_name": "Applied Optoelectronics",
+            "description": "Designs optical transceivers, fiber interconnect modules, and related networking products for data-center and telecom deployments.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Applied Optoelectronics",
+            "short_company_description": "Optical transceiver and fiber interconnect supplier for data-center and telecom networks.",
+            "possible_similar_tickers": ["LITE", "CIEN"],
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Adjacent data-center demand exposure."},
+                {"theme_id": 2, "theme_name": "AI - Edge Computing", "why_it_might_fit": "Broad communications infrastructure adjacency."},
+            ],
+            "possible_new_theme": "None suggested",
+            "confidence": "low",
+            "rationale": "The company appears to serve data-center and telecom end markets through optical networking and interconnect products. AI - Infrastructure and AI - Edge Computing are weaker adjacent fits because they describe end-market exposure rather than the company's actual role in the stack, and a narrower direct role would be more precise than the current governed taxonomy.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_placeholder_none_suggested_does_not_block_narrow_new_theme_override(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'AI - Edge Computing', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'SMCI')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOI', 'AAOI', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoi-openai-none-suggested')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "AAOI")
+
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertTrue(draft["suggested_existing_themes"])
+        self.assertNotEqual(str(draft["possible_new_theme"]).lower(), "none suggested")
+        conn.close()
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
             "ticker": "ROLEY",
             "company_name": "Role Yield",
             "description": "Produces compound semiconductor substrates and wafer materials for communications and sensing applications.",
@@ -1106,6 +1165,152 @@ class TestScannerAudit(unittest.TestCase):
         )
         self.assertTrue(draft["suggested_existing_themes"])
         self.assertIn("adjacent", " ".join(draft["caveats"]).lower())
+        conn.close()
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "ROLELINK",
+            "company_name": "Role Link",
+            "description": "Supplies optical transceivers and interconnect modules for data-center communications infrastructure.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Role Link",
+            "short_company_description": "Communications hardware supplier.",
+            "possible_similar_tickers": ["NVDA"],
+            "suggested_existing_themes": [
+                {"theme_id": 4, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Data-center adjacency."}
+            ],
+            "possible_new_theme": "",
+            "confidence": "low",
+            "rationale": "The company provides optical networking and interconnect products. AI - Infrastructure is a weaker end-market adjacency fit, while the direct business role is more precise than the current governed taxonomy.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_merge_promotes_narrow_new_theme_when_rationale_identifies_precision_gap(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (4, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (4, 'NVDA')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'ROLELINK', 'ROLELINK', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'rolelink-openai-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "ROLELINK")
+
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+        self.assertTrue(draft["suggested_existing_themes"])
+        self.assertIn("more precise", draft["rationale"])
+        conn.close()
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "ROLEMAT",
+            "company_name": "Role Materials",
+            "description": "Produces compound semiconductor substrates and wafer materials for communications and sensing applications.",
+            "sic_description": "Semiconductor Materials",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Role Materials",
+            "short_company_description": "Materials supplier serving semiconductor applications.",
+            "possible_similar_tickers": ["SHW"],
+            "suggested_existing_themes": [
+                {"theme_id": 5, "theme_name": "Chemicals - Diversified", "why_it_might_fit": "Broad materials adjacency."}
+            ],
+            "possible_new_theme": "",
+            "confidence": "low",
+            "rationale": "The company provides semiconductor materials and substrates. Chemicals - Diversified is only an adjacent fit, and the direct role is more specific than the current governed taxonomy.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_merge_surfaces_semiconductor_materials_new_theme_from_adjacent_only_output(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (5, 'Chemicals - Diversified', 'Materials', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (5, 'SHW')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'ROLEMAT', 'ROLEMAT', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'rolemat-openai-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "ROLEMAT")
+
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertIn(
+            draft["possible_new_theme"],
+            {"Semiconductor Materials", "Semiconductor Substrates", "Compound Semiconductor Materials", "Specialty Semiconductor Materials"},
+        )
+        self.assertTrue(draft["suggested_existing_themes"])
+        self.assertIn("adjacent", draft["rationale"].lower())
+        conn.close()
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "DAVEY",
+            "company_name": "Davey Example",
+            "description": "Provides branch and ATM banking software for regional financial institutions.",
+            "sic_description": "Business Services",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Davey Example",
+            "short_company_description": "Software provider for bank operations.",
+            "possible_similar_tickers": [],
+            "suggested_existing_themes": [],
+            "possible_new_theme": "",
+            "confidence": "low",
+            "rationale": "No strong governed-theme fit was identified from the available profile and taxonomy context.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_merge_keeps_conservative_no_fit_behavior_without_precision_gap(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (6, 'Space Infrastructure', 'Industrial', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (6, 'RKLB')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'DAVEY', 'DAVEY', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'davey-openai-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "DAVEY")
+
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertEqual(draft["recommended_action"], "watch_only")
+        self.assertIsNone(draft["possible_new_theme"])
         conn.close()
 
     @patch("src.scanner_research.openai_api_key", return_value="test-key")
@@ -1320,6 +1525,66 @@ class TestScannerAudit(unittest.TestCase):
         self.assertEqual(mock_call.call_count, 2)
         self.assertEqual(first["rationale"], "First draft.")
         self.assertEqual(refreshed["rationale"], "Refreshed draft.")
+        conn.close()
+
+    def test_build_scanner_research_debug_entry_preserves_forced_regeneration_source_on_rerender(self):
+        draft = {
+            "ticker": "AAOI",
+            "generated_at": "2026-03-16 09:15:00",
+            "research_mode": "openai",
+            "draft_source": "forced_regeneration",
+        }
+
+        first = build_scanner_research_debug_entry("AAOI", draft, draft_source="forced_regeneration")
+        rerendered = build_scanner_research_debug_entry("AAOI", draft, prior_debug=first)
+
+        self.assertEqual(first["draft_source"], "forced_regeneration")
+        self.assertEqual(rerendered["draft_source"], "forced_regeneration")
+        self.assertEqual(rerendered["generated_at"], "2026-03-16 09:15:00")
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        side_effect=[
+            {
+                "ticker": "AAOI",
+                "company_name": "Applied Optoelectronics",
+                "description": "Designs optical transceivers, fiber interconnect modules, and related networking products for data-center and telecom deployments.",
+                "sic_description": "Communications Equipment",
+            },
+            {},
+        ],
+    )
+    def test_forced_regeneration_reuses_last_good_profile_context_when_live_lookup_degrades(self, mock_profile, _mock_key):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOI', 'AAOI', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoi-profile-cache-1')
+            """
+        )
+
+        first, reused_first = get_or_create_scanner_research_draft(conn, "AAOI")
+        refreshed, reused_second = get_or_create_scanner_research_draft(
+            conn,
+            "AAOI",
+            existing_draft=first,
+            force_refresh=True,
+        )
+
+        self.assertFalse(reused_first)
+        self.assertFalse(reused_second)
+        self.assertEqual(mock_profile.call_count, 2)
+        self.assertEqual(first["company_name"], "Applied Optoelectronics")
+        self.assertIn("optical transceivers", first["short_company_description"].lower())
+        self.assertEqual(refreshed["company_name"], "Applied Optoelectronics")
+        self.assertIn("optical transceivers", refreshed["short_company_description"].lower())
+        self.assertNotEqual(refreshed["short_company_description"], "No verified company description available.")
         conn.close()
 
     @patch("src.scanner_research.openai_api_key", return_value=None)

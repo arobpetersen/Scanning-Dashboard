@@ -20,7 +20,11 @@ from src.scanner_audit import (
     set_scanner_candidate_review_state,
 )
 from src.scanner_research import get_or_create_scanner_research_draft
-from src.suggestions_page_state import resolve_active_suggestions_tab, resolve_scanner_audit_ticker
+from src.suggestions_page_state import (
+    build_scanner_research_debug_entry,
+    resolve_active_suggestions_tab,
+    resolve_scanner_audit_ticker,
+)
 from src.streamlit_utils import (
     db_cache_token,
     load_scanner_candidate_summary_cached,
@@ -573,16 +577,11 @@ if active_suggestions_tab == "Scanner Audit":
             debug_store = st.session_state.setdefault("scanner_research_debug", {})
             existing_draft = draft_store.get(selected_audit_ticker)
             if existing_draft:
-                debug_entry = dict(debug_store.get(selected_audit_ticker) or {})
-                debug_entry.update(
-                    {
-                        "ticker": selected_audit_ticker,
-                        "generated_at": existing_draft.get("generated_at"),
-                        "research_mode": existing_draft.get("research_mode"),
-                        "draft_source": "reused_session_draft",
-                    }
+                debug_store[selected_audit_ticker] = build_scanner_research_debug_entry(
+                    selected_audit_ticker,
+                    existing_draft,
+                    prior_debug=debug_store.get(selected_audit_ticker),
                 )
-                debug_store[selected_audit_ticker] = debug_entry
             draft_action_cols = st.columns(2 if existing_draft else 1)
             with draft_action_cols[0]:
                 generate_clicked = st.button("Generate Research Draft")
@@ -599,13 +598,15 @@ if active_suggestions_tab == "Scanner Audit":
                             existing_draft=existing_draft,
                             force_refresh=regenerate_clicked,
                         )
+                    draft_source = "reused_session_draft" if reused else ("forced_regeneration" if regenerate_clicked else "fresh_generation")
+                    draft["draft_source"] = draft_source
                     draft_store[selected_audit_ticker] = draft
-                    debug_store[selected_audit_ticker] = {
-                        "ticker": selected_audit_ticker,
-                        "generated_at": draft.get("generated_at"),
-                        "research_mode": draft.get("research_mode"),
-                        "draft_source": "reused_session_draft" if reused else "fresh_generation",
-                    }
+                    debug_store[selected_audit_ticker] = build_scanner_research_debug_entry(
+                        selected_audit_ticker,
+                        draft,
+                        prior_debug=debug_store.get(selected_audit_ticker),
+                        draft_source=draft_source,
+                    )
                     st.session_state["scanner_research_feedback"] = {
                         "level": "success",
                         "message": (
@@ -644,7 +645,7 @@ if active_suggestions_tab == "Scanner Audit":
                         f"ticker=`{debug_entry.get('ticker') or selected_audit_ticker}` | "
                         f"generated_at=`{debug_entry.get('generated_at') or existing_draft.get('generated_at') or 'n/a'}` | "
                         f"mode=`{debug_entry.get('research_mode') or research_mode}` | "
-                        f"draft_source=`{debug_entry.get('draft_source') or 'reused_session_draft'}`"
+                        f"draft_source=`{debug_entry.get('draft_source') or existing_draft.get('draft_source') or 'reused_session_draft'}`"
                     )
                 context_meta = existing_draft.get("research_context_meta") or {}
                 if context_meta:
