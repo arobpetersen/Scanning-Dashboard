@@ -45,6 +45,7 @@ from src.symbol_hygiene import (
     symbol_hygiene_queue,
 )
 from src.suggestions_service import list_suggestions, review_suggestion
+from src.suggestions_page_state import resolve_active_suggestions_tab, resolve_scanner_audit_ticker
 from src.theme_service import refresh_active_ticker_universe, replace_ticker_in_theme, seed_if_needed
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
@@ -75,6 +76,34 @@ class TestLeaderboardUtils(unittest.TestCase):
 
         self.assertEqual(ranked_1w.iloc[0]["theme"], "B")
         self.assertEqual(ranked_1m.iloc[0]["theme"], "A")
+
+
+class TestSuggestionsPageState(unittest.TestCase):
+    def test_resolve_active_suggestions_tab_preserves_valid_selection(self):
+        options = ["Manual", "Queue", "Rules", "AI", "Scanner Audit"]
+        self.assertEqual(
+            resolve_active_suggestions_tab("Scanner Audit", options, "Manual"),
+            "Scanner Audit",
+        )
+
+    def test_resolve_active_suggestions_tab_falls_back_to_default(self):
+        options = ["Manual", "Queue", "Rules", "AI", "Scanner Audit"]
+        self.assertEqual(
+            resolve_active_suggestions_tab("Unknown", options, "Manual"),
+            "Manual",
+        )
+
+    def test_resolve_scanner_audit_ticker_preserves_valid_selection(self):
+        self.assertEqual(
+            resolve_scanner_audit_ticker("NVDA", ["AAPL", "NVDA", "PLTR"]),
+            "NVDA",
+        )
+
+    def test_resolve_scanner_audit_ticker_falls_back_to_first_option(self):
+        self.assertEqual(
+            resolve_scanner_audit_ticker("MISSING", ["AAPL", "NVDA", "PLTR"]),
+            "AAPL",
+        )
 
     def test_window_leaderboard_explains_true_boundary_requirement(self):
         history = pd.DataFrame(

@@ -20,6 +20,7 @@ from src.scanner_audit import (
     set_scanner_candidate_review_state,
 )
 from src.scanner_research import get_or_create_scanner_research_draft
+from src.suggestions_page_state import resolve_active_suggestions_tab, resolve_scanner_audit_ticker
 from src.streamlit_utils import (
     db_cache_token,
     load_scanner_candidate_summary_cached,
@@ -101,9 +102,21 @@ db_token = db_cache_token()
 theme_options = themes[["id", "name"]].to_dict("records")
 theme_option_by_id = {int(row["id"]): row for row in theme_options}
 
-manual_tab, queue_tab, rules_tab, ai_tab, scanner_tab = st.tabs(["Manual", "Queue", "Rules", "AI", "Scanner Audit"])
+suggestions_tab_options = ["Manual", "Queue", "Rules", "AI", "Scanner Audit"]
+st.session_state["suggestions_active_tab"] = resolve_active_suggestions_tab(
+    st.session_state.get("suggestions_active_tab"),
+    suggestions_tab_options,
+    "Manual",
+)
+active_suggestions_tab = st.radio(
+    "Suggestions section",
+    suggestions_tab_options,
+    horizontal=True,
+    key="suggestions_active_tab",
+    label_visibility="collapsed",
+)
 
-with manual_tab:
+if active_suggestions_tab == "Manual":
     suggestion_type = st.selectbox("Suggestion type", ["add_ticker_to_theme", "remove_ticker_from_theme", "create_theme", "rename_theme", "move_ticker_between_themes", "review_theme"])
     source = st.selectbox("Source", ["manual", "rules_engine", "ai_proposal", "imported", "scanner_audit"], index=0)
     priority = st.selectbox("Priority", ["low", "medium", "high"], index=1)
@@ -152,7 +165,7 @@ with manual_tab:
         except Exception as exc:
             st.error(f"Create failed: {exc}")
 
-with queue_tab:
+if active_suggestions_tab == "Queue":
     fc1, fc2, fc3, fc4 = st.columns(4)
     with fc1:
         status_filter = st.selectbox("Status", ["all", "pending", "approved", "rejected", "applied", "obsolete"], index=0)
@@ -288,7 +301,7 @@ with queue_tab:
         st.subheader("Recently applied")
         render_dataframe("suggestions_recent_applied", recent_applied, width="stretch")
 
-with rules_tab:
+if active_suggestions_tab == "Rules":
     if st.button("Run deterministic rules engine", type="primary"):
         with get_conn() as conn:
             summary = run_rules_engine(conn)
@@ -298,7 +311,7 @@ with rules_tab:
         if signal:
             st.caption(f"Provider signal: {signal}")
 
-with ai_tab:
+if active_suggestions_tab == "AI":
     key_present = bool(openai_api_key())
     if key_present:
         st.success(f"AI key detected via {OPENAI_API_KEY_ENV}.")
@@ -342,7 +355,7 @@ with ai_tab:
         except Exception as exc:
             st.error(f"AI generation failed: {exc}")
 
-with scanner_tab:
+if active_suggestions_tab == "Scanner Audit":
     st.subheader("TC2000 Universe Audit Foundation")
     st.caption("Manual import only for now. This ingests TC2000 export files, tracks recurrence over time, and surfaces uncovered scanner names for review.")
 
@@ -522,7 +535,16 @@ with scanner_tab:
         render_dataframe("scanner_candidate_display", display, width="stretch", hide_index=True)
 
         if not view.empty:
-            selected_audit_ticker = st.selectbox("Selected scanner candidate", options=view["ticker"].tolist(), key="scanner_audit_selected_ticker")
+            scanner_ticker_options = view["ticker"].tolist()
+            st.session_state["scanner_audit_selected_ticker"] = resolve_scanner_audit_ticker(
+                st.session_state.get("scanner_audit_selected_ticker"),
+                scanner_ticker_options,
+            )
+            selected_audit_ticker = st.selectbox(
+                "Selected scanner candidate",
+                options=scanner_ticker_options,
+                key="scanner_audit_selected_ticker",
+            )
             selected_audit_row = view[view["ticker"] == selected_audit_ticker].iloc[0]
             st.caption(
                 f"{selected_audit_ticker}: {selected_audit_row['recommendation_reason']} | "
@@ -550,7 +572,6 @@ with scanner_tab:
             draft_store = st.session_state.setdefault("scanner_research_drafts", {})
             debug_store = st.session_state.setdefault("scanner_research_debug", {})
             existing_draft = draft_store.get(selected_audit_ticker)
-            generate_label = "Regenerate Research Draft" if existing_draft else "Generate Research Draft"
             if existing_draft:
                 debug_entry = dict(debug_store.get(selected_audit_ticker) or {})
                 debug_entry.update(
@@ -562,14 +583,21 @@ with scanner_tab:
                     }
                 )
                 debug_store[selected_audit_ticker] = debug_entry
-            if st.button(generate_label):
+            draft_action_cols = st.columns(2 if existing_draft else 1)
+            with draft_action_cols[0]:
+                generate_clicked = st.button("Generate Research Draft")
+            regenerate_clicked = False
+            if existing_draft:
+                with draft_action_cols[1]:
+                    regenerate_clicked = st.button("Regenerate Research Draft", type="secondary")
+            if generate_clicked or regenerate_clicked:
                 try:
                     with get_conn() as conn:
                         draft, reused = get_or_create_scanner_research_draft(
                             conn,
                             selected_audit_ticker,
                             existing_draft=existing_draft,
-                            force_refresh=bool(existing_draft),
+                            force_refresh=regenerate_clicked,
                         )
                     draft_store[selected_audit_ticker] = draft
                     debug_store[selected_audit_ticker] = {
@@ -583,7 +611,11 @@ with scanner_tab:
                         "message": (
                             f"Reused existing advisory research draft for {selected_audit_ticker}."
                             if reused
-                            else f"Generated advisory research draft for {selected_audit_ticker}."
+                            else (
+                                f"Regenerated advisory research draft for {selected_audit_ticker}."
+                                if regenerate_clicked
+                                else f"Generated advisory research draft for {selected_audit_ticker}."
+                            )
                         ),
                     }
                     st.rerun()
@@ -614,8 +646,32 @@ with scanner_tab:
                         f"mode=`{debug_entry.get('research_mode') or research_mode}` | "
                         f"draft_source=`{debug_entry.get('draft_source') or 'reused_session_draft'}`"
                     )
+                context_meta = existing_draft.get("research_context_meta") or {}
+                if context_meta:
+                    st.caption(
+                        "Context: "
+                        f"themes_sent=`{context_meta.get('filtered_theme_count')}` / "
+                        f"catalog_total=`{context_meta.get('full_catalog_theme_count')}` | "
+                        f"prefiltered=`{context_meta.get('catalog_was_prefiltered')}` | "
+                        f"estimated_chars=`{context_meta.get('estimated_context_chars', 'n/a')}`"
+                    )
                 if research_mode != "openai" and existing_draft.get("fallback_reason"):
                     st.info(f"Used heuristic fallback: {existing_draft.get('fallback_reason')}")
+                research_error = existing_draft.get("research_error") or {}
+                if research_error:
+                    debug_parts = []
+                    if research_error.get("status_code") is not None:
+                        debug_parts.append(f"status=`{research_error.get('status_code')}`")
+                    if research_error.get("error_type"):
+                        debug_parts.append(f"type=`{research_error.get('error_type')}`")
+                    if research_error.get("error_class"):
+                        debug_parts.append(f"class=`{research_error.get('error_class')}`")
+                    if research_error.get("model"):
+                        debug_parts.append(f"model=`{research_error.get('model')}`")
+                    if research_error.get("error_message"):
+                        debug_parts.append(f"message=`{research_error.get('error_message')}`")
+                    if debug_parts:
+                        st.caption("OpenAI error: " + " | ".join(debug_parts))
                 rd1, rd2 = st.columns(2)
                 with rd1:
                     st.write(f"**Company:** {existing_draft.get('company_name') or selected_audit_ticker}")

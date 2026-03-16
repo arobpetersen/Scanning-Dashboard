@@ -28,8 +28,9 @@ def _is_lock_error(exc: Exception) -> bool:
         for token in [
             "being used by another process",
             "cannot access the file because it is being used by another process",
-            "access is denied",
             "used by another process",
+            "file is locked",
+            "database is locked",
         ]
     )
 
