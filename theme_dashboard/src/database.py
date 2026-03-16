@@ -12,6 +12,8 @@ CREATE SEQUENCE IF NOT EXISTS snapshots_id_seq;
 CREATE SEQUENCE IF NOT EXISTS refresh_run_id_seq;
 CREATE SEQUENCE IF NOT EXISTS suggestion_id_seq;
 CREATE SEQUENCE IF NOT EXISTS historical_reconstruction_run_id_seq;
+CREATE SEQUENCE IF NOT EXISTS scanner_import_run_id_seq;
+CREATE SEQUENCE IF NOT EXISTS scanner_hit_id_seq;
 
 CREATE TABLE IF NOT EXISTS themes (
     id BIGINT PRIMARY KEY DEFAULT nextval('themes_id_seq'),
@@ -180,6 +182,78 @@ CREATE TABLE IF NOT EXISTS theme_suggestions (
     CHECK (source IN ('manual','rules_engine','ai_proposal','imported'))
 );
 
+CREATE TABLE IF NOT EXISTS scanner_import_runs (
+    import_run_id BIGINT PRIMARY KEY DEFAULT nextval('scanner_import_run_id_seq'),
+    import_source VARCHAR NOT NULL,
+    folder_path VARCHAR NOT NULL,
+    file_pattern VARCHAR NOT NULL,
+    started_at TIMESTAMP NOT NULL,
+    finished_at TIMESTAMP,
+    status VARCHAR NOT NULL,
+    files_seen BIGINT NOT NULL DEFAULT 0,
+    files_processed BIGINT NOT NULL DEFAULT 0,
+    files_skipped BIGINT NOT NULL DEFAULT 0,
+    files_failed BIGINT NOT NULL DEFAULT 0,
+    rows_read BIGINT NOT NULL DEFAULT 0,
+    rows_imported BIGINT NOT NULL DEFAULT 0,
+    rows_skipped BIGINT NOT NULL DEFAULT 0,
+    unique_tickers_observed BIGINT NOT NULL DEFAULT 0,
+    notes VARCHAR,
+    error_message VARCHAR,
+    CHECK (status IN ('running','success','partial','no_files','failed'))
+);
+
+CREATE TABLE IF NOT EXISTS scanner_hit_history (
+    hit_id BIGINT PRIMARY KEY DEFAULT nextval('scanner_hit_id_seq'),
+    import_run_id BIGINT,
+    import_source VARCHAR NOT NULL,
+    normalized_ticker VARCHAR NOT NULL,
+    raw_ticker VARCHAR,
+    observed_date DATE NOT NULL,
+    observed_at TIMESTAMP NOT NULL,
+    source_file VARCHAR NOT NULL,
+    source_label VARCHAR NOT NULL,
+    scanner_name VARCHAR NOT NULL,
+    file_modified_at TIMESTAMP,
+    scanner_name_inferred BOOLEAN NOT NULL DEFAULT FALSE,
+    scanner_name_basis VARCHAR NOT NULL DEFAULT 'file_column',
+    observed_date_inferred BOOLEAN NOT NULL DEFAULT FALSE,
+    observed_date_basis VARCHAR NOT NULL DEFAULT 'file_column',
+    row_hash VARCHAR NOT NULL UNIQUE,
+    supporting_fields_json VARCHAR,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (length(trim(normalized_ticker)) > 0),
+    CHECK (length(trim(source_file)) > 0),
+    CHECK (length(trim(scanner_name)) > 0),
+    CHECK (scanner_name_basis IN ('file_column','filename_parse','default_source_label_fallback')),
+    CHECK (observed_date_basis IN ('file_column','filename_parse','modified_timestamp_fallback'))
+);
+
+CREATE TABLE IF NOT EXISTS scanner_imported_files (
+    file_fingerprint VARCHAR PRIMARY KEY,
+    source_file VARCHAR NOT NULL,
+    file_name VARCHAR NOT NULL,
+    file_size BIGINT,
+    modified_at TIMESTAMP,
+    first_import_run_id BIGINT,
+    last_seen_run_id BIGINT,
+    import_status VARCHAR NOT NULL DEFAULT 'success',
+    processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (length(trim(file_fingerprint)) > 0),
+    CHECK (length(trim(source_file)) > 0),
+    CHECK (length(trim(file_name)) > 0),
+    CHECK (import_status IN ('success','failed'))
+);
+
+CREATE TABLE IF NOT EXISTS scanner_candidate_review_state (
+    normalized_ticker VARCHAR PRIMARY KEY,
+    review_state VARCHAR NOT NULL DEFAULT 'active',
+    review_note VARCHAR,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (length(trim(normalized_ticker)) > 0),
+    CHECK (review_state IN ('active','ignored','reviewed'))
+);
+
 CREATE TABLE IF NOT EXISTS symbol_refresh_status (
     ticker VARCHAR PRIMARY KEY,
     status VARCHAR NOT NULL DEFAULT 'active',
@@ -221,6 +295,12 @@ CREATE INDEX IF NOT EXISTS idx_refresh_run_tickers_run_id ON refresh_run_tickers
 CREATE INDEX IF NOT EXISTS idx_symbol_refresh_status_status ON symbol_refresh_status(status);
 CREATE INDEX IF NOT EXISTS idx_theme_suggestions_status ON theme_suggestions(status);
 CREATE INDEX IF NOT EXISTS idx_theme_suggestions_type ON theme_suggestions(suggestion_type);
+CREATE INDEX IF NOT EXISTS idx_scanner_import_runs_status ON scanner_import_runs(status);
+CREATE INDEX IF NOT EXISTS idx_scanner_imported_files_status ON scanner_imported_files(import_status);
+CREATE INDEX IF NOT EXISTS idx_scanner_hit_history_ticker ON scanner_hit_history(normalized_ticker);
+CREATE INDEX IF NOT EXISTS idx_scanner_hit_history_observed_date ON scanner_hit_history(observed_date);
+CREATE INDEX IF NOT EXISTS idx_scanner_hit_history_scanner_name ON scanner_hit_history(scanner_name);
+CREATE INDEX IF NOT EXISTS idx_scanner_candidate_review_state_state ON scanner_candidate_review_state(review_state);
 """
 
 
@@ -310,9 +390,38 @@ def init_db() -> None:
         conn.execute("ALTER TABLE theme_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
         conn.execute("ALTER TABLE historical_reconstruction_runs ADD COLUMN IF NOT EXISTS ticker_history_rows_written BIGINT DEFAULT 0")
         conn.execute("ALTER TABLE historical_reconstruction_runs ADD COLUMN IF NOT EXISTS ticker_history_rows_skipped BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE scanner_import_runs ADD COLUMN IF NOT EXISTS files_failed BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS scanner_name_inferred BOOLEAN DEFAULT FALSE")
+        conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS scanner_name_basis VARCHAR DEFAULT 'file_column'")
+        conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS observed_date_inferred BOOLEAN DEFAULT FALSE")
+        conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS observed_date_basis VARCHAR DEFAULT 'file_column'")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scanner_imported_files (
+                file_fingerprint VARCHAR PRIMARY KEY,
+                source_file VARCHAR NOT NULL,
+                file_name VARCHAR NOT NULL,
+                file_size BIGINT,
+                modified_at TIMESTAMP,
+                first_import_run_id BIGINT,
+                last_seen_run_id BIGINT,
+                import_status VARCHAR NOT NULL DEFAULT 'success',
+                processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK (length(trim(file_fingerprint)) > 0),
+                CHECK (length(trim(source_file)) > 0),
+                CHECK (length(trim(file_name)) > 0),
+                CHECK (import_status IN ('success','failed'))
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_scanner_imported_files_status ON scanner_imported_files(import_status)")
         conn.execute("UPDATE ticker_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''")
         conn.execute("UPDATE theme_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''")
         conn.execute("UPDATE theme_suggestions SET priority='medium' WHERE priority IS NULL OR trim(priority)=''")
+        conn.execute("UPDATE scanner_hit_history SET scanner_name_inferred = COALESCE(scanner_name_inferred, FALSE)")
+        conn.execute("UPDATE scanner_hit_history SET scanner_name_basis = COALESCE(NULLIF(trim(scanner_name_basis), ''), CASE WHEN COALESCE(scanner_name_inferred, FALSE) THEN 'filename_parse' ELSE 'file_column' END)")
+        conn.execute("UPDATE scanner_hit_history SET observed_date_inferred = COALESCE(observed_date_inferred, FALSE)")
+        conn.execute("UPDATE scanner_hit_history SET observed_date_basis = COALESCE(NULLIF(trim(observed_date_basis), ''), CASE WHEN COALESCE(observed_date_inferred, FALSE) THEN 'modified_timestamp_fallback' ELSE 'file_column' END)")
 
         ddl = conn.execute("SELECT sql FROM duckdb_tables() WHERE table_name='theme_suggestions' LIMIT 1").fetchone()
         ddl_text = ddl[0].lower() if ddl and ddl[0] else ""

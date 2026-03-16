@@ -1,11 +1,26 @@
 import streamlit as st
 
 from src.ai_proposals import generate_ai_suggestions, sanitize_context
-from src.config import AI_MAX_PROPOSALS, OPENAI_API_KEY_ENV, openai_api_key
+from src.config import (
+    AI_MAX_PROPOSALS,
+    OPENAI_API_KEY_ENV,
+    TC2000_DEFAULT_SOURCE_LABEL,
+    TC2000_FILE_GLOB,
+    TC2000_IMPORT_DIR,
+    openai_api_key,
+)
 from src.database import get_conn, init_db
 from src.queries import theme_health_overview
 from src.rankings import compute_theme_rankings
 from src.rules_engine import run_rules_engine
+from src.scanner_audit import (
+    import_tc2000_exports,
+    recent_scanner_import_runs,
+    reset_scanner_audit_data,
+    scanner_candidate_summary,
+    scanner_import_overview,
+    set_scanner_candidate_review_state,
+)
 from src.suggestions_service import (
     SuggestionPayload,
     apply_suggestion,
@@ -61,7 +76,7 @@ with get_conn() as conn:
 
 theme_options = themes[["id", "name"]].to_dict("records")
 
-manual_tab, queue_tab, rules_tab, ai_tab = st.tabs(["Manual", "Queue", "Rules", "AI"])
+manual_tab, queue_tab, rules_tab, ai_tab, scanner_tab = st.tabs(["Manual", "Queue", "Rules", "AI", "Scanner Audit"])
 
 with manual_tab:
     suggestion_type = st.selectbox("Suggestion type", ["add_ticker_to_theme", "remove_ticker_from_theme", "create_theme", "rename_theme", "move_ticker_between_themes", "review_theme"])
@@ -298,3 +313,241 @@ with ai_tab:
                 st.code("\n".join(summary["errors"]))
         except Exception as exc:
             st.error(f"AI generation failed: {exc}")
+
+with scanner_tab:
+    st.subheader("TC2000 Universe Audit Foundation")
+    st.caption("Manual import only for now. This ingests TC2000 export files, tracks recurrence over time, and surfaces uncovered scanner names for review.")
+
+    sc1, sc2, sc3 = st.columns(3)
+    sc1.metric("Import folder", str(TC2000_IMPORT_DIR))
+    sc2.metric("File pattern", TC2000_FILE_GLOB)
+    sc3.metric("Default source label", TC2000_DEFAULT_SOURCE_LABEL)
+
+    reset_feedback = st.session_state.pop("scanner_reset_feedback", None)
+    if reset_feedback:
+        st.warning(reset_feedback["message"])
+
+    import_feedback = st.session_state.pop("scanner_import_feedback", None)
+    if import_feedback:
+        if import_feedback["status"] == "success":
+            st.success(import_feedback["message"])
+        elif import_feedback["status"] == "partial":
+            st.warning(import_feedback["message"])
+        elif import_feedback["status"] == "no_files":
+            st.info(import_feedback["message"])
+        else:
+            st.error(import_feedback["message"])
+        file_results = import_feedback.get("file_results") or []
+        if file_results:
+            st.dataframe(file_results, width="stretch", hide_index=True)
+
+    if st.button("Import latest TC2000 exports", type="primary"):
+        with get_conn() as conn:
+            result = import_tc2000_exports(conn)
+        st.session_state["scanner_import_feedback"] = result
+        st.rerun()
+
+    if st.session_state.get("scanner_reset_armed", False):
+        st.warning(
+            "Reset Scanner Audit Data will remove scanner hit history, scanner import run history, "
+            "scanner candidate review states, and imported file ledger entries. "
+            "Use this only to rebuild Scanner Audit imports after fixing import metadata inference."
+        )
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            if st.button("Confirm Reset Scanner Audit Data", type="secondary"):
+                with get_conn() as conn:
+                    result = reset_scanner_audit_data(conn)
+                st.session_state["scanner_reset_feedback"] = result
+                st.session_state["scanner_reset_armed"] = False
+                st.session_state.pop("scanner_import_feedback", None)
+                st.rerun()
+        with rc2:
+            if st.button("Cancel Scanner Audit Reset"):
+                st.session_state["scanner_reset_armed"] = False
+                st.rerun()
+    elif st.button("Reset Scanner Audit Data", type="secondary"):
+        st.session_state["scanner_reset_armed"] = True
+        st.rerun()
+
+    with get_conn() as conn:
+        import_runs = recent_scanner_import_runs(conn, limit=10)
+        overview = scanner_import_overview(conn)
+        candidates = scanner_candidate_summary(conn)
+
+    o1, o2, o3, o4, o5, o6 = st.columns(6)
+    o1.metric("Last import", str(overview["last_import_time"] or "—"))
+    o2.metric("Files seen", int(overview["files_seen"] or 0))
+    o3.metric("Files processed", int(overview["files_processed"] or 0))
+    o4.metric("Files skipped", int(overview["files_skipped"] or 0))
+    o5.metric("Files failed", int(overview["files_failed"] or 0))
+    o6.metric("Rows imported", int(overview["rows_imported"] or 0))
+    st.caption(
+        f"Uncovered surfacing: {int(overview['uncovered_candidates'] or 0)} | "
+        f"Ignored: {int(overview['ignored_candidates'] or 0)}"
+    )
+
+    if not import_runs.empty:
+        st.caption("Recent import runs")
+        st.dataframe(import_runs, width="stretch", hide_index=True)
+
+    if candidates.empty:
+        st.info("No scanner-hit history yet. Import TC2000 exports to start building recurrence evidence.")
+    else:
+        fc1, fc2, fc3, fc4 = st.columns(4)
+        with fc1:
+            recommendation_filter = st.selectbox(
+                "Recommendation filter",
+                ["all", "high-persistence uncovered", "review for addition", "monitor", "already covered"],
+                index=0,
+            )
+        with fc2:
+            coverage_filter = st.selectbox("Coverage filter", ["all", "uncovered", "already governed"], index=1)
+        with fc3:
+            review_state_filter = st.selectbox("Review state", ["active only", "all", "ignored", "reviewed"], index=0)
+        with fc4:
+            scanner_filter = st.selectbox(
+                "Scanner/source",
+                ["all"] + sorted(
+                    {
+                        item.strip()
+                        for value in candidates["scanners"].astype(str).tolist()
+                        for item in value.split(",")
+                        if item.strip()
+                    }
+                ),
+                index=0,
+            )
+
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        with mc1:
+            min_persistence_score = st.number_input("Min persistence score", min_value=0, value=3, step=1)
+        with mc2:
+            min_observed_days = st.number_input("Min observed days", min_value=0, value=1, step=1)
+        with mc3:
+            min_last_5d = st.number_input("Min obs last 5d", min_value=0, value=0, step=1)
+        with mc4:
+            min_last_10d = st.number_input("Min obs last 10d", min_value=0, value=1, step=1)
+
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            sort_by = st.selectbox(
+                "Sort by",
+                ["persistence_score", "last_seen", "observed_days", "current_streak", "distinct_scanner_count"],
+                index=0,
+            )
+        with sc2:
+            sort_desc = st.checkbox("Descending", value=True)
+
+        view = candidates.copy()
+        if recommendation_filter != "all":
+            view = view[view["recommendation"] == recommendation_filter]
+        if coverage_filter == "uncovered":
+            view = view[view["is_governed"] == False]
+        elif coverage_filter == "already governed":
+            view = view[view["is_governed"] == True]
+        if review_state_filter == "active only":
+            view = view[view["review_state"] == "active"]
+        elif review_state_filter == "ignored":
+            view = view[view["review_state"] == "ignored"]
+        elif review_state_filter == "reviewed":
+            view = view[view["review_state"] == "reviewed"]
+        if scanner_filter != "all":
+            view = view[view["scanners"].astype(str).str.contains(scanner_filter, case=False, na=False)]
+        view = view[
+            (view["persistence_score"] >= int(min_persistence_score))
+            & (view["observed_days"] >= int(min_observed_days))
+            & (view["observations_last_5d"] >= int(min_last_5d))
+            & (view["observations_last_10d"] >= int(min_last_10d))
+        ]
+        view = view.sort_values([sort_by, "ticker"], ascending=[not sort_desc, True]).reset_index(drop=True)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Observed tickers", int(view.shape[0]))
+        m2.metric("High-persistence uncovered", int((view["recommendation"] == "high-persistence uncovered").sum()))
+        m3.metric("Review for addition", int((view["recommendation"] == "review for addition").sum()))
+        m4.metric("Ignored in view", int((view["review_state"] == "ignored").sum()))
+
+        display = view[
+            [
+                "ticker",
+                "recommendation",
+                "recommendation_reason",
+                "review_state",
+                "persistence_score",
+                "observed_days",
+                "observations_last_5d",
+                "observations_last_10d",
+                "current_streak",
+                "distinct_scanner_count",
+                "first_seen",
+                "last_seen",
+                "governed_status",
+                "active_theme_count",
+                "current_theme_names",
+                "current_categories",
+                "scanners",
+                "source_labels",
+                "metadata_basis",
+            ]
+        ].copy()
+        st.dataframe(display, width="stretch", hide_index=True)
+
+        actionable = view[view["is_governed"] == False]
+        if not view.empty:
+            selected_audit_ticker = st.selectbox("Selected scanner candidate", options=view["ticker"].tolist())
+            selected_audit_row = view[view["ticker"] == selected_audit_ticker].iloc[0]
+            st.caption(
+                f"{selected_audit_ticker}: {selected_audit_row['recommendation_reason']} | "
+                f"days={int(selected_audit_row['observed_days'])}, last10={int(selected_audit_row['observations_last_10d'])}, "
+                f"streak={int(selected_audit_row['current_streak'])}, scanners=`{selected_audit_row['scanners']}`"
+            )
+            rs1, rs2 = st.columns(2)
+            with rs1:
+                review_action = st.selectbox(
+                    "Candidate review state",
+                    ["active", "ignored", "reviewed"],
+                    index=["active", "ignored", "reviewed"].index(str(selected_audit_row["review_state"])),
+                )
+            with rs2:
+                review_note = st.text_input("Review note", value=str(selected_audit_row.get("review_note") or ""))
+            if st.button("Save candidate review state"):
+                try:
+                    with get_conn() as conn:
+                        result = set_scanner_candidate_review_state(conn, selected_audit_ticker, review_action, review_note)
+                    st.success(f"Saved `{result['review_state']}` state for {result['ticker']}.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not save candidate review state. {exc}")
+
+        if not actionable.empty:
+            selected_ticker = st.selectbox(
+                "Create imported review suggestion for uncovered ticker",
+                options=actionable["ticker"].tolist(),
+            )
+            selected_row = actionable[actionable["ticker"] == selected_ticker].iloc[0]
+            st.caption(
+                f"{selected_ticker}: seen {int(selected_row['observations_last_10d'])} of last 10 observed days | "
+                f"streak {int(selected_row['current_streak'])} | scanners `{selected_row['scanners']}` | "
+                f"{selected_row['recommendation_reason']}"
+            )
+            if st.button("Create imported review suggestion"):
+                try:
+                    payload = SuggestionPayload(
+                        suggestion_type="review_theme",
+                        source="imported",
+                        priority="high" if selected_row["recommendation"] == "high-persistence uncovered" else "medium",
+                        rationale=(
+                            f"TC2000 recurrence evidence: persistence_score={int(selected_row['persistence_score'])}, "
+                            f"observed_days={int(selected_row['observed_days'])}, "
+                            f"last_10={int(selected_row['observations_last_10d'])}, "
+                            f"streak={int(selected_row['current_streak'])}, "
+                            f"scanners={selected_row['scanners']}."
+                        ),
+                        proposed_ticker=str(selected_ticker),
+                    )
+                    with get_conn() as conn:
+                        sid = create_suggestion(conn, payload)
+                    st.success(f"Created imported review suggestion #{sid} for {selected_ticker}.")
+                except Exception as exc:
+                    st.error(f"Could not create imported review suggestion. {exc}")

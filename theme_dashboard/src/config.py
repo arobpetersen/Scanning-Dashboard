@@ -23,6 +23,9 @@ AIRTABLE_EXPORT_SNAPSHOT_LIMIT = int(os.getenv("AIRTABLE_EXPORT_SNAPSHOT_LIMIT",
 OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
 AI_MODEL = "gpt-5-mini"
 AI_MAX_PROPOSALS = 8
+TC2000_IMPORT_DIR = Path(os.getenv("TC2000_IMPORT_DIR", str(BASE_DIR / "imports" / "tc2000"))).expanduser()
+TC2000_FILE_GLOB = os.getenv("TC2000_FILE_GLOB", "*.csv,*.txt,*.tsv,*.xlsx").strip() or "*.csv,*.txt,*.tsv,*.xlsx"
+TC2000_DEFAULT_SOURCE_LABEL = os.getenv("TC2000_DEFAULT_SOURCE_LABEL", "tc2000_export").strip() or "tc2000_export"
 
 # Rules engine configuration
 RULE_LOW_CONSTITUENT_THRESHOLD = 3
