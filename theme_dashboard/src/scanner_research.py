@@ -1059,7 +1059,10 @@ def _rationale_signals_precision_gap(rationale: str) -> bool:
         "direct role",
         "actual role in the stack",
         "actual role",
+        "role in the stack",
         "value-chain position",
+        "what the company actually provides",
+        "what the company provides",
     ]
     adjacency_markers = [
         "adjacent",
@@ -1073,8 +1076,21 @@ def _rationale_signals_precision_gap(rationale: str) -> bool:
         "weaker",
         "broad alternatives",
         "secondary",
+        "broader adjacency fit",
+        "broader adjacency fits",
+        "broader fit",
     ]
     return any(marker in normalized for marker in precision_markers) and any(marker in normalized for marker in adjacency_markers)
+
+
+def _existing_theme_fit_is_adjacent_only(best_fit: dict[str, object]) -> bool:
+    if not isinstance(best_fit, dict):
+        return False
+    if bool(best_fit.get("direct_role_fit")):
+        return False
+    if bool(best_fit.get("indirect_only_fit")):
+        return True
+    return int(best_fit.get("score") or 0) < 12
 
 
 def _merge_ai_with_heuristic_draft(
@@ -1125,6 +1141,8 @@ def _merge_ai_with_heuristic_draft(
         profile,
         candidate,
     )
+    adjacency_only_existing_fit = _existing_theme_fit_is_adjacent_only(best_ai_existing_fit)
+    role_specific_context_supports_new_theme = bool(_candidate_roles(profile, candidate)) and _profile_has_research_value(profile)
     should_promote_new_theme = (
         bool(candidate_new_theme)
         and supports_distinct_new_theme
@@ -1132,11 +1150,15 @@ def _merge_ai_with_heuristic_draft(
             heuristic_prefers_new_theme
             or ai_rationale_signals_gap
             or merged_rationale_signals_gap
+            or (
+                role_specific_context_supports_new_theme
+                and list(merged.get("suggested_existing_themes") or [])
+                and adjacency_only_existing_fit
+            )
         )
         and (
             not merged.get("suggested_existing_themes")
-            or not bool(best_ai_existing_fit.get("direct_role_fit"))
-            or int(best_ai_existing_fit.get("score") or 0) < 12
+            or adjacency_only_existing_fit
         )
     )
     if should_promote_new_theme:

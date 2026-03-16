@@ -1028,6 +1028,57 @@ class TestScannerAudit(unittest.TestCase):
     @patch(
         "src.scanner_research._load_company_profile",
         return_value={
+            "ticker": "ROLEAA",
+            "company_name": "Role Actual",
+            "description": "Designs optical transceivers, fiber interconnect modules, and related networking products for data-center and telecom deployments.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Role Actual",
+            "short_company_description": "Communications hardware supplier.",
+            "possible_similar_tickers": ["LITE", "CIEN"],
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Broader data-center adjacency."},
+                {"theme_id": 2, "theme_name": "AI - Edge Computing", "why_it_might_fit": "Communications adjacency."},
+            ],
+            "possible_new_theme": "",
+            "confidence": "low",
+            "rationale": "The company provides optical networking and interconnect products into data-center and telecom markets. AI - Infrastructure and AI - Edge Computing are broader adjacency fits tied to end markets rather than what the company actually provides in the stack.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_adjacent_existing_themes_do_not_block_consider_new_theme_when_role_is_clear(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'AI - Edge Computing', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'SMCI')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'ROLEAA', 'ROLEAA', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'roleaa-openai-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "ROLEAA")
+
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+        self.assertTrue(draft["suggested_existing_themes"])
+        conn.close()
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
             "ticker": "ROLEY",
             "company_name": "Role Yield",
             "description": "Produces compound semiconductor substrates and wafer materials for communications and sensing applications.",
