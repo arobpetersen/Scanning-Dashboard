@@ -210,6 +210,283 @@ ROLE_FAMILY = {
     "healthcare_equipment": "healthcare_devices",
 }
 
+ARCHETYPE_KEYWORDS: dict[str, set[str]] = {
+    "fintech_payments_lending": {
+        "payments",
+        "payment",
+        "merchant",
+        "checkout",
+        "transaction",
+        "transactions",
+        "fintech",
+        "lending",
+        "loan",
+        "loans",
+        "installment",
+        "installments",
+        "buy now pay later",
+        "bnpl",
+        "consumer finance",
+    },
+    "digital_identity_security": {
+        "identity",
+        "verification",
+        "verify",
+        "verified",
+        "credential",
+        "credentials",
+        "biometric",
+        "biometrics",
+        "authentication",
+        "identity platform",
+        "access control",
+        "secure identity",
+    },
+    "semiconductor_materials_electronics_materials": {
+        "semiconductor materials",
+        "compound semiconductor",
+        "compound semiconductors",
+        "electronics materials",
+        "electronic materials",
+        "substrate",
+        "substrates",
+        "wafer",
+        "wafers",
+        "epitaxy",
+        "ingot",
+        "gallium arsenide",
+        "indium phosphide",
+        "packaging materials",
+        "specialty materials",
+    },
+    "ai_infrastructure_data_centers": {
+        "data center",
+        "data centers",
+        "data-center",
+        "datacenter",
+        "datacenters",
+        "hyperscale",
+        "ai infrastructure",
+        "gpu cluster",
+        "compute cluster",
+        "data-center capacity",
+        "colocation",
+        "server infrastructure",
+    },
+    "aerospace_defense_space_systems": {
+        "defense",
+        "mission",
+        "satellite",
+        "payload",
+        "space systems",
+        "defense systems",
+        "aerospace",
+        "government programs",
+        "orbital",
+    },
+    "networking_interconnect": {
+        "optical",
+        "optics",
+        "transceiver",
+        "transceivers",
+        "fiber",
+        "interconnect",
+        "coherent",
+        "networking",
+        "communications infrastructure",
+    },
+    "software_devops_cloud": {
+        "software",
+        "cloud",
+        "devops",
+        "observability",
+        "saas",
+        "platform",
+        "workflow",
+        "enterprise software",
+        "tooling",
+    },
+    "healthcare_devices_services": {
+        "animal health",
+        "cro",
+        "cmo",
+        "dental",
+        "medical",
+        "healthcare",
+        "clinical",
+        "diagnostic",
+        "hospital",
+        "medical device",
+    },
+    "industrial_materials_chemicals": {
+        "chemicals",
+        "chemical",
+        "coatings",
+        "paints",
+        "specialty chemicals",
+        "materials",
+        "industrial materials",
+        "specialty materials",
+    },
+}
+
+ARCHETYPE_DISPLAY_NAMES = {
+    "fintech_payments_lending": "fintech/payments/lending",
+    "digital_identity_security": "digital identity/security",
+    "semiconductor_materials_electronics_materials": "semiconductor and electronics materials",
+    "ai_infrastructure_data_centers": "AI infrastructure/data centers",
+    "aerospace_defense_space_systems": "aerospace/defense/space systems",
+    "networking_interconnect": "networking/interconnect",
+    "software_devops_cloud": "software/devops/cloud",
+    "healthcare_devices_services": "healthcare devices/services",
+    "industrial_materials_chemicals": "industrial materials/chemicals",
+}
+
+ARCHETYPE_FAMILY = {
+    "fintech_payments_lending": "finance",
+    "digital_identity_security": "identity_security",
+    "semiconductor_materials_electronics_materials": "semiconductor_materials",
+    "ai_infrastructure_data_centers": "ai_infrastructure",
+    "aerospace_defense_space_systems": "defense_space",
+    "networking_interconnect": "communications_hardware",
+    "software_devops_cloud": "software",
+    "healthcare_devices_services": "healthcare",
+    "industrial_materials_chemicals": "materials",
+}
+
+ARCHETYPE_ADJACENCY = {
+    ("ai_infrastructure", "communications_hardware"),
+    ("ai_infrastructure", "semiconductor_materials"),
+    ("communications_hardware", "semiconductor_materials"),
+    ("finance", "software"),
+    ("identity_security", "software"),
+    ("materials", "semiconductor_materials"),
+}
+
+ECONOMIC_ROLE_KEYWORDS: dict[str, set[str]] = {
+    "component_supplier": {
+        "component",
+        "components",
+        "module",
+        "modules",
+        "engine",
+        "engines",
+        "transceiver",
+        "transceivers",
+        "interposer",
+        "optical engine",
+        "light source",
+        "supplier",
+        "supplies",
+    },
+    "materials_supplier": {
+        "materials",
+        "substrate",
+        "substrates",
+        "wafer",
+        "wafers",
+        "compound semiconductor",
+        "electronic materials",
+        "electronics materials",
+        "specialty chemicals",
+        "packaging materials",
+    },
+    "end_platform_operator": {
+        "operates",
+        "operator",
+        "platform operator",
+        "marketplace",
+        "network operator",
+        "runs",
+        "operates and builds",
+        "campus",
+        "campuses",
+        "capacity",
+    },
+    "infrastructure_operator": {
+        "builds and operates",
+        "owns and operates",
+        "data-center capacity",
+        "hyperscale campus",
+        "server campus",
+        "infrastructure operator",
+        "colocation",
+    },
+    "software_service_provider": {
+        "software",
+        "platform",
+        "service",
+        "services",
+        "saas",
+        "workflow",
+        "observability",
+        "analytics platform",
+    },
+    "financial_platform": {
+        "payments platform",
+        "digital checkout",
+        "consumer lending",
+        "merchant",
+        "fintech platform",
+        "installment payments",
+        "financial platform",
+    },
+    "identity_verification_platform": {
+        "identity verification",
+        "biometric",
+        "authentication",
+        "credential",
+        "member authentication",
+        "identity platform",
+    },
+    "defense_systems_manufacturer": {
+        "defense systems",
+        "mission systems",
+        "satellite systems",
+        "space systems",
+        "payload",
+        "aircraft systems",
+        "defense manufacturer",
+        "aerospace systems",
+        "mission hardware",
+        "aerospace and government",
+    },
+}
+
+ECONOMIC_ROLE_DISPLAY_NAMES = {
+    "component_supplier": "component supplier",
+    "materials_supplier": "materials supplier",
+    "end_platform_operator": "end platform/operator",
+    "infrastructure_operator": "infrastructure/operator",
+    "software_service_provider": "software/service provider",
+    "financial_platform": "financial platform",
+    "identity_verification_platform": "identity verification platform",
+    "defense_systems_manufacturer": "defense/space systems manufacturer",
+}
+
+ROLE_ALIGNMENT = {
+    "optical_networking": {"component_supplier"},
+    "semiconductor_materials": {"materials_supplier"},
+    "semiconductor_equipment": {"component_supplier"},
+    "chip_designer": {"component_supplier"},
+    "server_systems": {"end_platform_operator", "infrastructure_operator", "component_supplier"},
+    "software_tooling": {"software_service_provider"},
+    "power_generation": {"infrastructure_operator"},
+    "power_equipment": {"component_supplier"},
+    "healthcare_equipment": {"component_supplier"},
+}
+
+ARCHETYPE_ALIGNMENT = {
+    "fintech_payments_lending": {"financial_platform"},
+    "digital_identity_security": {"identity_verification_platform", "software_service_provider"},
+    "semiconductor_materials_electronics_materials": {"materials_supplier", "component_supplier"},
+    "ai_infrastructure_data_centers": {"infrastructure_operator", "end_platform_operator"},
+    "networking_interconnect": {"component_supplier"},
+    "software_devops_cloud": {"software_service_provider"},
+    "healthcare_devices_services": {"component_supplier", "software_service_provider"},
+    "aerospace_defense_space_systems": {"defense_systems_manufacturer"},
+}
+
 _PROFILE_CACHE: dict[str, dict[str, object]] = {}
 VAGUE_NEW_THEME_LABEL_TOKENS = {
     "advanced",
@@ -224,6 +501,20 @@ VAGUE_NEW_THEME_LABEL_TOKENS = {
     "technology services",
     "infrastructure services",
     "high growth",
+}
+
+GENERIC_FACTOR_THEME_TOKENS = {
+    "growth",
+    "high growth",
+    "momentum",
+    "quality",
+    "value",
+    "large cap",
+    "small cap",
+    "mid cap",
+    "factor",
+    "style",
+    "leaders",
 }
 
 
@@ -274,7 +565,12 @@ def _normalize_optional_theme_label(value: object) -> str | None:
 def _fit_label_from_details(fit_details: dict[str, object]) -> str:
     if bool(fit_details.get("direct_role_fit")):
         return "direct_fit"
-    if bool(fit_details.get("indirect_only_fit")) or bool(fit_details.get("market_overlap")):
+    if (
+        bool(fit_details.get("indirect_only_fit"))
+        or bool(fit_details.get("market_overlap"))
+        or str(fit_details.get("archetype_relation") or "") == "direct"
+        or str(fit_details.get("archetype_relation") or "") == "adjacent"
+    ):
         return "adjacent_fit"
     return "broad_fit"
 
@@ -375,6 +671,16 @@ def _infer_signals(keyword_map: dict[str, set[str]], *parts: object) -> set[str]
     return signals
 
 
+def _count_signal_hits(keyword_map: dict[str, set[str]], *parts: object) -> dict[str, int]:
+    text = " ".join(_normalize_text(part).lower() for part in parts if _normalize_text(part))
+    counts: dict[str, int] = {}
+    for signal, keywords in keyword_map.items():
+        count = sum(1 for keyword in keywords if _contains_phrase(text, keyword))
+        if count:
+            counts[signal] = count
+    return counts
+
+
 def _representative_ticker_role_hints(tickers: list[object]) -> set[str]:
     hints: set[str] = set()
     joined = " ".join(str(value or "").strip().upper() for value in tickers if str(value or "").strip())
@@ -428,14 +734,29 @@ def _theme_concepts(theme_entry: dict[str, object]) -> set[str]:
 
 
 def _candidate_roles(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> set[str]:
-    return _infer_signals(
-        ROLE_KEYWORDS,
+    parts = (
         profile.get("company_name"),
         profile.get("description"),
         profile.get("sic_description"),
         candidate.get("recommendation_reason"),
         *extra_parts,
     )
+    roles = _infer_signals(ROLE_KEYWORDS, *parts)
+    role_counts = _count_signal_hits(ROLE_KEYWORDS, *parts)
+    combined_text = " ".join(_normalize_text(part).lower() for part in parts if _normalize_text(part))
+    strong_optical_terms = {"optical", "optics", "fiber", "transceiver", "transceivers", "photonic", "photonics", "coherent"}
+    if "optical_networking" in roles:
+        optical_hits = int(role_counts.get("optical_networking") or 0)
+        has_strong_optical_term = any(_contains_phrase(combined_text, term) for term in strong_optical_terms)
+        if optical_hits < 2 and not has_strong_optical_term:
+            roles.discard("optical_networking")
+    strong_device_terms = {"endpoint", "endpoints", "consumer electronics", "handset"}
+    if "devices_endpoints" in roles:
+        device_hits = int(role_counts.get("devices_endpoints") or 0)
+        has_strong_device_term = any(_contains_phrase(combined_text, term) for term in strong_device_terms)
+        if device_hits < 2 and not has_strong_device_term:
+            roles.discard("devices_endpoints")
+    return roles
 
 
 def _candidate_end_markets(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> set[str]:
@@ -467,6 +788,166 @@ def _theme_end_markets(theme_entry: dict[str, object]) -> set[str]:
     ) | _representative_ticker_market_hints(list(theme_entry.get("representative_tickers") or []))
 
 
+def _ranked_archetypes(scores: dict[str, int], *, threshold: int) -> set[str]:
+    if not scores:
+        return set()
+    strongest = max(scores.values())
+    return {
+        archetype
+        for archetype, score in scores.items()
+        if score >= threshold and score >= strongest - 1
+    }
+
+
+def _infer_archetype_scores(
+    *parts: object,
+    roles: set[str] | None = None,
+    concepts: set[str] | None = None,
+    markets: set[str] | None = None,
+) -> dict[str, int]:
+    scores = _count_signal_hits(ARCHETYPE_KEYWORDS, *parts)
+    roles = roles or set()
+    concepts = concepts or set()
+    markets = markets or set()
+    if "semiconductor_materials" in roles:
+        scores["semiconductor_materials_electronics_materials"] = scores.get("semiconductor_materials_electronics_materials", 0) + 5
+    if "optical_networking" in roles:
+        scores["networking_interconnect"] = scores.get("networking_interconnect", 0) + 4
+    if "software_tooling" in roles:
+        scores["software_devops_cloud"] = scores.get("software_devops_cloud", 0) + 3
+    if "healthcare_equipment" in roles:
+        scores["healthcare_devices_services"] = scores.get("healthcare_devices_services", 0) + 4
+    if "payments" in concepts:
+        scores["fintech_payments_lending"] = scores.get("fintech_payments_lending", 0) + 4
+    if "cybersecurity" in concepts and any(
+        _contains_phrase(" ".join(_normalize_text(part).lower() for part in parts), token)
+        for token in {"identity", "verification", "biometric", "authentication"}
+    ):
+        scores["digital_identity_security"] = scores.get("digital_identity_security", 0) + 4
+    if "data_center" in markets or "ai_compute" in concepts:
+        scores["ai_infrastructure_data_centers"] = scores.get("ai_infrastructure_data_centers", 0) + 3
+    if "defense" in concepts or "space" in concepts or "defense_market" in markets:
+        scores["aerospace_defense_space_systems"] = scores.get("aerospace_defense_space_systems", 0) + 4
+    if "healthcare" in markets or "biotech" in concepts:
+        scores["healthcare_devices_services"] = scores.get("healthcare_devices_services", 0) + 2
+    if "telecom" in markets:
+        scores["networking_interconnect"] = scores.get("networking_interconnect", 0) + 1
+    if "semiconductor_market" in markets or "semiconductor" in concepts:
+        scores["semiconductor_materials_electronics_materials"] = scores.get("semiconductor_materials_electronics_materials", 0) + 1
+    if "cloud" in concepts or "software" in concepts:
+        scores["software_devops_cloud"] = scores.get("software_devops_cloud", 0) + 1
+    if "energy_market" in markets and "networking_interconnect" in scores:
+        scores["networking_interconnect"] -= 1
+    return {key: value for key, value in scores.items() if value > 0}
+
+
+def _candidate_archetypes(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> set[str]:
+    parts = (
+        profile.get("company_name"),
+        profile.get("description"),
+        profile.get("sic_description"),
+        candidate.get("recommendation_reason"),
+        *extra_parts,
+    )
+    return _ranked_archetypes(
+        _infer_archetype_scores(
+            *parts,
+            roles=_candidate_roles(profile, candidate, *extra_parts),
+            concepts=_candidate_concepts(profile, candidate),
+            markets=_candidate_end_markets(profile, candidate, *extra_parts),
+        ),
+        threshold=3,
+    )
+
+
+def _theme_archetypes(theme_entry: dict[str, object]) -> set[str]:
+    parts = (
+        theme_entry.get("theme_name"),
+        theme_entry.get("category"),
+        theme_entry.get("theme_description"),
+        " ".join(str(value or "") for value in list(theme_entry.get("representative_tickers") or [])),
+    )
+    return _ranked_archetypes(
+        _infer_archetype_scores(
+            *parts,
+            roles=_theme_roles(theme_entry),
+            concepts=_theme_concepts(theme_entry),
+            markets=_theme_end_markets(theme_entry),
+        ),
+        threshold=2,
+    )
+
+
+def _archetype_relation(candidate_archetypes: set[str], theme_archetypes: set[str]) -> str:
+    if not candidate_archetypes or not theme_archetypes:
+        return "unknown"
+    if candidate_archetypes & theme_archetypes:
+        return "direct"
+    candidate_families = {ARCHETYPE_FAMILY.get(value) for value in candidate_archetypes if ARCHETYPE_FAMILY.get(value)}
+    theme_families = {ARCHETYPE_FAMILY.get(value) for value in theme_archetypes if ARCHETYPE_FAMILY.get(value)}
+    if candidate_families & theme_families:
+        return "adjacent"
+    for left in candidate_families:
+        for right in theme_families:
+            pair = tuple(sorted((left, right)))
+            if pair in ARCHETYPE_ADJACENCY:
+                return "adjacent"
+    return "incompatible"
+
+
+def _infer_economic_role_scores(
+    *parts: object,
+    roles: set[str] | None = None,
+    archetypes: set[str] | None = None,
+) -> dict[str, int]:
+    scores = _count_signal_hits(ECONOMIC_ROLE_KEYWORDS, *parts)
+    roles = roles or set()
+    archetypes = archetypes or set()
+    for role in roles:
+        for economic_role in ROLE_ALIGNMENT.get(role, set()):
+            scores[economic_role] = scores.get(economic_role, 0) + 3
+    for archetype in archetypes:
+        for economic_role in ARCHETYPE_ALIGNMENT.get(archetype, set()):
+            scores[economic_role] = scores.get(economic_role, 0) + 2
+    return {key: value for key, value in scores.items() if value > 0}
+
+
+def _candidate_economic_roles(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> set[str]:
+    parts = (
+        profile.get("company_name"),
+        profile.get("description"),
+        profile.get("sic_description"),
+        candidate.get("recommendation_reason"),
+        *extra_parts,
+    )
+    scores = _infer_economic_role_scores(
+        *parts,
+        roles=_candidate_roles(profile, candidate, *extra_parts),
+        archetypes=_candidate_archetypes(profile, candidate, *extra_parts),
+    )
+    return _ranked_archetypes(scores, threshold=3)
+
+
+def _theme_economic_roles(theme_entry: dict[str, object]) -> set[str]:
+    parts = (
+        theme_entry.get("theme_name"),
+        theme_entry.get("category"),
+        theme_entry.get("theme_description"),
+        " ".join(str(value or "") for value in list(theme_entry.get("representative_tickers") or [])),
+    )
+    scores = _infer_economic_role_scores(
+        *parts,
+        roles=_theme_roles(theme_entry),
+        archetypes=_theme_archetypes(theme_entry),
+    )
+    return _ranked_archetypes(scores, threshold=2)
+
+
+def _dominant_economic_role(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> str:
+    roles = sorted(_candidate_economic_roles(profile, candidate, *extra_parts))
+    return roles[0] if roles else ""
+
+
 def _looks_generic_theme(theme_entry: dict[str, object]) -> bool:
     theme_text = " ".join(
         [
@@ -476,6 +957,29 @@ def _looks_generic_theme(theme_entry: dict[str, object]) -> bool:
         ]
     )
     return any(token in theme_text for token in ["software", "cloud", "technology", "tech", "platform"])
+
+
+def _is_generic_factor_theme(theme_entry: dict[str, object]) -> bool:
+    theme_text = " ".join(
+        [
+            _normalize_text(theme_entry.get("theme_name")).lower(),
+            _normalize_text(theme_entry.get("category")).lower(),
+            _normalize_text(theme_entry.get("theme_description")).lower(),
+        ]
+    )
+    return any(token in theme_text for token in GENERIC_FACTOR_THEME_TOKENS)
+
+
+def _has_strong_role_evidence(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> bool:
+    roles = _candidate_roles(profile, candidate, *extra_parts)
+    archetypes = _candidate_archetypes(profile, candidate, *extra_parts)
+    economic_roles = _candidate_economic_roles(profile, candidate, *extra_parts)
+    concepts = _candidate_concepts(profile, candidate)
+    specific_concepts = concepts - GENERIC_CONCEPTS
+    return bool(
+        (len(roles) >= 1 or len(economic_roles) >= 1)
+        and (len(archetypes) >= 1 or len(specific_concepts) >= 1 or len(economic_roles) >= 1)
+    )
 
 
 def _candidate_concepts(profile: dict[str, object], candidate: dict[str, object]) -> set[str]:
@@ -510,17 +1014,34 @@ def _theme_fit_details(theme_entry: dict[str, object], profile: dict[str, object
     theme_concepts = _theme_concepts(theme_entry)
     candidate_roles = _candidate_roles(profile, candidate)
     candidate_markets = _candidate_end_markets(profile, candidate)
+    candidate_archetypes = _candidate_archetypes(profile, candidate)
+    candidate_economic_roles = _candidate_economic_roles(profile, candidate)
+    strong_role_evidence = _has_strong_role_evidence(profile, candidate)
     theme_roles = _theme_roles(theme_entry)
     theme_markets = _theme_end_markets(theme_entry)
+    theme_archetypes = _theme_archetypes(theme_entry)
+    theme_economic_roles = _theme_economic_roles(theme_entry)
     specific_overlap = sorted((candidate_concepts & theme_concepts) - GENERIC_CONCEPTS)
     generic_overlap = sorted((candidate_concepts & theme_concepts) & GENERIC_CONCEPTS)
     role_overlap = sorted(candidate_roles & theme_roles)
     market_overlap = sorted(candidate_markets & theme_markets)
     token_overlap = sorted((theme_tokens & profile_tokens) - STOPWORDS)
+    archetype_overlap = sorted(candidate_archetypes & theme_archetypes)
+    economic_role_overlap = sorted(candidate_economic_roles & theme_economic_roles)
+    archetype_relation = _archetype_relation(candidate_archetypes, theme_archetypes)
+    dominant_economic_role = _dominant_economic_role(profile, candidate)
 
-    score = len(role_overlap) * 14 + len(specific_overlap) * 7 + len(market_overlap) * 3 + len(generic_overlap) + min(2, len(token_overlap))
+    score = (
+        len(role_overlap) * 14
+        + len(economic_role_overlap) * 12
+        + len(archetype_overlap) * 10
+        + len(specific_overlap) * 7
+        + len(market_overlap) * 3
+        + len(generic_overlap)
+        + min(2, len(token_overlap))
+    )
     direct_role_fit = bool(role_overlap)
-    indirect_only_fit = not direct_role_fit and bool(market_overlap or generic_overlap or specific_overlap)
+    indirect_only_fit = not direct_role_fit and bool(market_overlap or generic_overlap or specific_overlap or archetype_relation == "adjacent")
     if theme_roles and candidate_roles and not role_overlap:
         candidate_families = {ROLE_FAMILY.get(role) for role in candidate_roles}
         theme_families = {ROLE_FAMILY.get(role) for role in theme_roles}
@@ -528,19 +1049,61 @@ def _theme_fit_details(theme_entry: dict[str, object], profile: dict[str, object
             score -= 4 if market_overlap else 10
         else:
             score -= 4
+    if archetype_relation == "direct":
+        score += 4
+    elif archetype_relation == "adjacent":
+        score += 1
+    elif archetype_relation == "incompatible":
+        score -= 18 if candidate_archetypes and theme_archetypes else 8
+    if candidate_economic_roles and theme_economic_roles and not economic_role_overlap:
+        score -= 10 if dominant_economic_role else 6
     if not role_overlap and market_overlap:
         score -= 4
     if _looks_generic_theme(theme_entry) and not role_overlap:
         score -= 4
+    if _is_generic_factor_theme(theme_entry):
+        if strong_role_evidence:
+            score -= 16
+        elif not role_overlap and not archetype_overlap:
+            score -= 8
+    if (
+        "networking_interconnect" in candidate_archetypes
+        and candidate_archetypes - {"networking_interconnect"}
+        and not archetype_overlap
+        and archetype_relation != "adjacent"
+    ):
+        score -= 6
     if not role_overlap and not specific_overlap and generic_overlap and len(token_overlap) <= 1:
         score -= 3
     if not role_overlap and not specific_overlap and not market_overlap:
         score = min(score, 1)
+    if archetype_relation == "incompatible" and not role_overlap and not specific_overlap:
+        score = min(score, 0)
+    if _is_generic_factor_theme(theme_entry) and strong_role_evidence and (role_overlap or archetype_overlap or specific_overlap):
+        score = min(score, 6)
+    if (
+        strong_role_evidence
+        and dominant_economic_role in {"component_supplier", "materials_supplier", "defense_systems_manufacturer"}
+        and "end_platform_operator" in theme_economic_roles
+        and not economic_role_overlap
+    ):
+        score -= 10
+    if (
+        strong_role_evidence
+        and dominant_economic_role in {"financial_platform", "identity_verification_platform"}
+        and {"component_supplier", "materials_supplier"} & theme_economic_roles
+        and not economic_role_overlap
+    ):
+        score -= 10
 
     if score <= 0:
         why = ""
     elif role_overlap:
         why = "Direct business-role fit on " + _format_signal_names(set(role_overlap), ROLE_DISPLAY_NAMES)
+    elif economic_role_overlap:
+        why = "Compatible economic-role fit on " + _format_signal_names(set(economic_role_overlap), ECONOMIC_ROLE_DISPLAY_NAMES)
+    elif archetype_overlap:
+        why = "Compatible business archetype fit on " + _format_signal_names(set(archetype_overlap), ARCHETYPE_DISPLAY_NAMES)
     elif specific_overlap:
         why = "Conceptual fit on " + ", ".join(specific_overlap[:2])
     elif market_overlap:
@@ -559,6 +1122,16 @@ def _theme_fit_details(theme_entry: dict[str, object], profile: dict[str, object
         "generic_overlap": generic_overlap,
         "direct_role_fit": direct_role_fit,
         "indirect_only_fit": indirect_only_fit,
+        "archetype_overlap": archetype_overlap,
+        "archetype_relation": archetype_relation,
+        "candidate_archetypes": sorted(candidate_archetypes),
+        "theme_archetypes": sorted(theme_archetypes),
+        "economic_role_overlap": economic_role_overlap,
+        "candidate_economic_roles": sorted(candidate_economic_roles),
+        "theme_economic_roles": sorted(theme_economic_roles),
+        "dominant_economic_role": dominant_economic_role,
+        "generic_factor_theme": _is_generic_factor_theme(theme_entry),
+        "strong_role_evidence": strong_role_evidence,
     }
 
 
@@ -705,6 +1278,8 @@ def _theme_fit_score(theme_entry: dict[str, object], profile: dict[str, object],
 def _candidate_new_theme_label(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> str | None:
     roles = _candidate_roles(profile, candidate, *extra_parts)
     markets = _candidate_end_markets(profile, candidate, *extra_parts)
+    archetypes = _candidate_archetypes(profile, candidate, *extra_parts)
+    economic_role = _dominant_economic_role(profile, candidate, *extra_parts)
     description = " ".join(
         [
             _normalize_text(profile.get("company_name")).lower(),
@@ -714,6 +1289,26 @@ def _candidate_new_theme_label(profile: dict[str, object], candidate: dict[str, 
             *[_normalize_text(part).lower() for part in extra_parts],
         ]
     )
+    if economic_role == "financial_platform" and "fintech_payments_lending" in archetypes:
+        return "Digital Payments"
+    if economic_role == "identity_verification_platform" and "digital_identity_security" in archetypes:
+        return "Identity Verification"
+    if "fintech_payments_lending" in archetypes:
+        return "Digital Payments"
+    if "digital_identity_security" in archetypes:
+        return "Identity Verification"
+    if "semiconductor_materials_electronics_materials" in archetypes:
+        if "compound semiconductor" in description or "gallium arsenide" in description or "indium phosphide" in description:
+            return "Compound Semiconductor Materials"
+        if "substrate" in description or "substrates" in description:
+            return "Semiconductor Substrates"
+        if "electronics materials" in description or "packaging materials" in description:
+            return "Electronics Materials"
+        if "specialty" in description:
+            return "Specialty Semiconductor Materials"
+        return "Semiconductor Materials"
+    if "aerospace_defense_space_systems" in archetypes and economic_role == "defense_systems_manufacturer":
+        return "Defense Systems"
     if "optical_networking" in roles:
         if "ai" in markets and "fiber" in description:
             return "AI Fiber Optics"
@@ -722,6 +1317,18 @@ def _candidate_new_theme_label(profile: dict[str, object], candidate: dict[str, 
         if "interconnect" in description:
             return "Optical Interconnects"
         return "Optical Networking"
+    if "networking_interconnect" in archetypes:
+        if economic_role == "materials_supplier":
+            return None
+        if "ai" in markets and "fiber" in description:
+            return "AI Fiber Optics"
+        if "data_center" in markets:
+            return "Data Center Optics"
+        if "interconnect" in description:
+            return "Optical Interconnects"
+        return "Optical Networking"
+    if "ai_infrastructure_data_centers" in archetypes:
+        return "AI Data Centers"
     if "semiconductor_materials" in roles:
         if "compound semiconductor" in description or "gallium arsenide" in description or "indium phosphide" in description:
             return "Compound Semiconductor Materials"
@@ -742,6 +1349,15 @@ def _candidate_new_theme_label(profile: dict[str, object], candidate: dict[str, 
 
 
 def _supports_distinct_new_theme_label(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> bool:
+    archetypes = _candidate_archetypes(profile, candidate, *extra_parts)
+    if archetypes & {
+        "fintech_payments_lending",
+        "digital_identity_security",
+        "semiconductor_materials_electronics_materials",
+        "ai_infrastructure_data_centers",
+        "networking_interconnect",
+    }:
+        return True
     role = _dominant_role(profile, candidate, *extra_parts)
     if role in {"", "software_tooling", "power_generation"}:
         return False
@@ -766,11 +1382,15 @@ def _should_prioritize_new_theme(
 def _value_chain_summary(profile: dict[str, object], candidate: dict[str, object]) -> str:
     roles = _candidate_roles(profile, candidate)
     markets = _candidate_end_markets(profile, candidate)
+    economic_role = _dominant_economic_role(profile, candidate)
     if roles:
         if "server_systems" in roles and ({"ai", "data_center"} & markets):
             return "appears to serve AI compute infrastructure and data-center end markets through server systems"
         role_text = _format_signal_names(roles, ROLE_DISPLAY_NAMES)
+        economic_role_text = ECONOMIC_ROLE_DISPLAY_NAMES.get(economic_role, "")
         market_text = _format_signal_names(markets, END_MARKET_DISPLAY_NAMES) if markets else ""
+        if market_text and economic_role_text:
+            return f"appears to serve {market_text} end markets as a {economic_role_text} focused on {role_text}"
         if market_text:
             return f"appears to serve {market_text} end markets through {role_text}"
         return f"appears to operate primarily in {role_text}"
@@ -861,6 +1481,7 @@ def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[s
     candidate_concepts = _candidate_concepts(profile, candidate)
     candidate_roles = _candidate_roles(profile, candidate)
     candidate_markets = _candidate_end_markets(profile, candidate)
+    strong_role_evidence = _has_strong_role_evidence(profile, candidate)
     for entry in catalog:
         theme_concepts = _theme_concepts(entry)
         theme_roles = _theme_roles(entry)
@@ -872,7 +1493,7 @@ def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[s
             and str(entry.get("theme_name") or "") not in broad_alternatives
         ):
             broad_alternatives.append(str(entry.get("theme_name") or ""))
-        elif _looks_generic_theme(entry) and str(entry.get("theme_name") or "") not in broad_alternatives:
+        elif (_looks_generic_theme(entry) or _is_generic_factor_theme(entry)) and str(entry.get("theme_name") or "") not in broad_alternatives:
             broad_alternatives.append(str(entry.get("theme_name") or ""))
         fit_details = _theme_fit_details(entry, profile, candidate)
         score = int(fit_details["score"])
@@ -913,6 +1534,12 @@ def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[s
     strongest_score = scored[0][0] if scored else 0
     score_floor = max(8, strongest_score - 2) if strongest_score else 999
     suggested_existing = [item[1] for item in scored if item[0] >= score_floor][:3]
+    if strong_role_evidence:
+        suggested_existing = [item for item in suggested_existing if item.get("fit_label") != "broad_fit" or not _is_generic_factor_theme({
+            "theme_name": item.get("theme_name"),
+            "category": item.get("category"),
+            "theme_description": item.get("why_it_might_fit"),
+        })][:3]
     strongest_details = scored[0][2] if scored else {}
     strongest_direct_role_fit = bool(strongest_details.get("direct_role_fit"))
     strongest_indirect_only_fit = bool(strongest_details.get("indirect_only_fit"))
@@ -956,6 +1583,19 @@ def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[s
     elif suggested_existing and strongest_score >= 10:
         confidence = "high" if strongest_score >= 12 and strongest_direct_role_fit else "medium"
         recommended_action = "add_to_existing_theme_review"
+        if strong_role_evidence and new_theme_label and suggested_existing:
+            top_existing_name = str(suggested_existing[0].get("theme_name") or "")
+            if _is_generic_factor_theme(
+                {
+                    "theme_name": top_existing_name,
+                    "category": suggested_existing[0].get("category"),
+                    "theme_description": suggested_existing[0].get("why_it_might_fit"),
+                }
+            ):
+                possible_new_theme = new_theme_label
+                recommended_action = "consider_new_theme"
+                confidence = "medium"
+                caveats.append("Generic factor/style themes are less useful than the company's operating-role framing for thematic review.")
     elif new_theme_label:
         confidence = "low"
         possible_new_theme = new_theme_label
@@ -1009,7 +1649,10 @@ def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[s
         "company_name": _normalize_text(profile.get("company_name")) or candidate["ticker"],
         "short_company_description": _normalize_text(profile.get("description")) or _normalize_text(profile.get("sic_description")) or "No verified company description available.",
         "possible_similar_tickers": possible_similar,
-        "suggested_existing_themes": _truncate_existing_theme_suggestions(suggested_existing),
+        "suggested_existing_themes": _prioritize_operating_role_suggestions(
+            _truncate_existing_theme_suggestions(suggested_existing),
+            strong_role_evidence=strong_role_evidence,
+        ),
         "possible_new_theme": possible_new_theme,
         "confidence": confidence,
         "rationale": " ".join(rationale_parts),
@@ -1099,6 +1742,30 @@ def _annotate_existing_theme_suggestions(
         fit_details = _theme_fit_details(entry, profile, candidate)
         annotated.append(_annotate_suggestion_fit(suggestion, fit_details))
     return _truncate_existing_theme_suggestions(annotated)
+
+
+def _prioritize_operating_role_suggestions(
+    suggestions: list[dict[str, object]],
+    *,
+    strong_role_evidence: bool,
+) -> list[dict[str, object]]:
+    if not strong_role_evidence:
+        return _truncate_existing_theme_suggestions(suggestions)
+    ranked = sorted(
+        list(suggestions or []),
+        key=lambda item: (
+            _is_generic_factor_theme(
+                {
+                    "theme_name": item.get("theme_name"),
+                    "category": item.get("category"),
+                    "theme_description": item.get("why_it_might_fit"),
+                }
+            ),
+            item.get("fit_label") == "broad_fit",
+            str(item.get("theme_name") or ""),
+        ),
+    )
+    return _truncate_existing_theme_suggestions(ranked)
 
 
 def _precision_override_reason(
@@ -1201,6 +1868,7 @@ def _merge_ai_with_heuristic_draft(
         _normalize_action(heuristic_draft.get("recommended_action")) == "consider_new_theme"
         and _normalize_text(heuristic_draft.get("possible_new_theme"))
     )
+    strong_role_evidence = _has_strong_role_evidence(profile, candidate, *ai_role_context)
     candidate_new_theme = _candidate_new_theme_label(profile, candidate, *ai_role_context)
     supports_distinct_new_theme = _supports_distinct_new_theme_label(profile, candidate, *ai_role_context)
     ai_rationale_signals_gap = _rationale_signals_precision_gap(ai_rationale)
@@ -1234,6 +1902,23 @@ def _merge_ai_with_heuristic_draft(
             or adjacency_only_existing_fit
         )
     )
+    top_existing_is_generic_factor = False
+    existing_suggestions = list(merged.get("suggested_existing_themes") or [])
+    if existing_suggestions:
+        top_existing = existing_suggestions[0]
+        top_existing_is_generic_factor = _is_generic_factor_theme(
+            {
+                "theme_name": top_existing.get("theme_name"),
+                "category": top_existing.get("category"),
+                "theme_description": top_existing.get("why_it_might_fit"),
+            }
+        )
+    if (
+        bool(candidate_new_theme)
+        and strong_role_evidence
+        and top_existing_is_generic_factor
+    ):
+        should_promote_new_theme = True
     merged["research_decision_trace"] = {
         "candidate_new_theme": candidate_new_theme,
         "candidate_roles_detected": sorted(inferred_candidate_roles),
@@ -1245,13 +1930,15 @@ def _merge_ai_with_heuristic_draft(
         "best_existing_fit_indirect_only": bool(best_ai_existing_fit.get("indirect_only_fit")),
         "adjacency_only_existing_fit": adjacency_only_existing_fit,
         "heuristic_prefers_new_theme": heuristic_prefers_new_theme,
+        "strong_role_evidence": strong_role_evidence,
+        "top_existing_is_generic_factor": top_existing_is_generic_factor,
         "should_promote_new_theme": should_promote_new_theme,
     }
     if should_promote_new_theme:
         merged["possible_new_theme"] = (
             _normalize_optional_theme_label(ai_draft.get("possible_new_theme"))
-            or _normalize_optional_theme_label(heuristic_draft.get("possible_new_theme"))
             or candidate_new_theme
+            or _normalize_optional_theme_label(heuristic_draft.get("possible_new_theme"))
         )
         merged["recommended_action"] = "consider_new_theme"
         if _normalize_text(merged.get("confidence")) in {"high", ""}:
@@ -1278,6 +1965,10 @@ def _merge_ai_with_heuristic_draft(
         catalog,
         profile,
         candidate,
+    )
+    merged["suggested_existing_themes"] = _prioritize_operating_role_suggestions(
+        list(merged.get("suggested_existing_themes") or []),
+        strong_role_evidence=strong_role_evidence,
     )
 
     return merged
