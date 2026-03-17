@@ -46,7 +46,17 @@ from src.symbol_hygiene import (
     symbol_hygiene_queue,
 )
 from src.suggestions_service import list_suggestions, review_suggestion
-from src.suggestions_page_state import resolve_active_suggestions_tab, resolve_scanner_audit_ticker
+from src.suggestions_page_state import (
+    add_theme_to_selected_existing,
+    finalize_possible_new_theme_state,
+    merge_suggested_and_custom_theme_ids,
+    normalize_theme_id_list,
+    prepare_possible_new_theme_prefill,
+    resolve_active_suggestions_tab,
+    resolve_scanner_audit_ticker,
+    split_selected_existing_theme_ids,
+    sync_suggested_theme_checkbox_state,
+)
 from src.theme_service import refresh_active_ticker_universe, replace_ticker_in_theme, seed_if_needed
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
@@ -105,6 +115,61 @@ class TestSuggestionsPageState(unittest.TestCase):
             resolve_scanner_audit_ticker("MISSING", ["AAPL", "NVDA", "PLTR"]),
             "AAPL",
         )
+
+    def test_clicking_suggested_theme_adds_it_to_selected_existing_state(self):
+        selected = add_theme_to_selected_existing([], 7, {1, 7, 9})
+        self.assertEqual(selected, [7])
+
+    def test_duplicate_clicks_do_not_create_duplicate_selected_existing_themes(self):
+        selected = add_theme_to_selected_existing([7], 7, {1, 7, 9})
+        self.assertEqual(selected, [7])
+
+    def test_selected_existing_theme_state_persists_cleanly_across_rerun_normalization(self):
+        normalized = normalize_theme_id_list([7, "9", 7, "bad"], {7, 9, 10})
+        self.assertEqual(normalized, [7, 9])
+
+    def test_manual_selection_and_click_to_add_work_together(self):
+        selected = add_theme_to_selected_existing([3], 7, {3, 7, 9})
+        suggested_ids, custom_ids = split_selected_existing_theme_ids(selected, [7, 9])
+        self.assertEqual(suggested_ids, [7])
+        self.assertEqual(custom_ids, [3])
+
+    def test_unchecking_suggested_theme_removes_it_from_selected_existing_state(self):
+        merged = merge_suggested_and_custom_theme_ids([], [3, 7], [7, 9], {3, 7, 9})
+        self.assertEqual(merged, [3])
+
+    def test_suggestion_checkboxes_sync_from_multiselect_selection(self):
+        synced = sync_suggested_theme_checkbox_state([3, 7], [7, 9])
+        self.assertEqual(synced, {7: True, 9: False})
+
+    def test_possible_new_theme_prefills_input_when_present(self):
+        value, state = prepare_possible_new_theme_prefill(None, "Optical Interconnects", None)
+        self.assertEqual(value, "Optical Interconnects")
+        self.assertEqual(state["auto_value"], "Optical Interconnects")
+        self.assertFalse(bool(state["user_edited"]))
+
+    def test_no_possible_new_theme_leaves_input_blank(self):
+        value, state = prepare_possible_new_theme_prefill(None, None, None)
+        self.assertEqual(value, "")
+        self.assertEqual(state["auto_value"], "")
+        self.assertFalse(bool(state["user_edited"]))
+
+    def test_manual_possible_new_theme_edit_persists_across_reruns(self):
+        value, state = prepare_possible_new_theme_prefill(None, "Optical Interconnects", None)
+        self.assertEqual(value, "Optical Interconnects")
+        state = finalize_possible_new_theme_state("Custom Theme", state)
+        rerun_value, rerun_state = prepare_possible_new_theme_prefill("Custom Theme", "Data Center Optics", state)
+        self.assertEqual(rerun_value, "Custom Theme")
+        self.assertTrue(bool(rerun_state["user_edited"]))
+
+    def test_regenerate_updates_possible_new_theme_if_field_is_still_untouched(self):
+        value, state = prepare_possible_new_theme_prefill(None, "Optical Interconnects", None)
+        self.assertEqual(value, "Optical Interconnects")
+        state = finalize_possible_new_theme_state("Optical Interconnects", state)
+        rerun_value, rerun_state = prepare_possible_new_theme_prefill("Optical Interconnects", "Data Center Optics", state)
+        self.assertEqual(rerun_value, "Data Center Optics")
+        self.assertEqual(rerun_state["auto_value"], "Data Center Optics")
+        self.assertFalse(bool(rerun_state["user_edited"]))
 
     def test_window_leaderboard_explains_true_boundary_requirement(self):
         history = pd.DataFrame(

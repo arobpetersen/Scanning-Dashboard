@@ -23,8 +23,13 @@ from src.scanner_audit import (
 from src.scanner_research import get_or_create_scanner_research_draft
 from src.suggestions_page_state import (
     build_scanner_research_debug_entry,
+    finalize_possible_new_theme_state,
+    normalize_theme_id_list,
+    prepare_possible_new_theme_prefill,
     resolve_active_suggestions_tab,
     resolve_scanner_audit_ticker,
+    split_selected_existing_theme_ids,
+    sync_suggested_theme_checkbox_state,
 )
 from src.streamlit_utils import (
     clear_scanner_candidate_summary_cache,
@@ -123,6 +128,22 @@ def _render_structured_review_context(row) -> None:
             )
         if research_summary:
             st.caption(f"Research summary: {research_summary}")
+
+
+def _sync_selected_existing_from_suggested_checkbox(
+    selected_existing_key: str,
+    checkbox_key: str,
+    theme_id: int,
+    valid_ids: set[int],
+) -> None:
+    selected_existing = normalize_theme_id_list(st.session_state.get(selected_existing_key, []), valid_ids)
+    checked = bool(st.session_state.get(checkbox_key))
+    if checked:
+        if theme_id not in selected_existing:
+            selected_existing.append(theme_id)
+    else:
+        selected_existing = [value for value in selected_existing if value != theme_id]
+    st.session_state[selected_existing_key] = normalize_theme_id_list(selected_existing, valid_ids)
 
 try:
     init_db()
@@ -610,6 +631,16 @@ if active_suggestions_tab == "Scanner Audit":
 
             draft_store = st.session_state.setdefault("scanner_research_drafts", {})
             debug_store = st.session_state.setdefault("scanner_research_debug", {})
+            strategy_options = {
+                "Legacy direct match": "legacy_direct_match",
+                "Description-first generation": "description_theme_generation",
+            }
+            selected_strategy_label = st.selectbox(
+                "Research strategy",
+                options=list(strategy_options.keys()),
+                key=f"scanner_research_strategy_{selected_audit_ticker}",
+            )
+            selected_strategy = strategy_options[selected_strategy_label]
             existing_draft = draft_store.get(selected_audit_ticker)
             if existing_draft:
                 debug_store[selected_audit_ticker] = build_scanner_research_debug_entry(
@@ -632,6 +663,7 @@ if active_suggestions_tab == "Scanner Audit":
                             selected_audit_ticker,
                             existing_draft=existing_draft,
                             force_refresh=regenerate_clicked,
+                            strategy=selected_strategy,
                         )
                     draft_source = "reused_session_draft" if reused else ("forced_regeneration" if regenerate_clicked else "fresh_generation")
                     draft["draft_source"] = draft_source
@@ -668,6 +700,7 @@ if active_suggestions_tab == "Scanner Audit":
                 mode_label = "OpenAI" if research_mode == "openai" else "Heuristic fallback"
                 meta_caption = (
                     f"Generated at `{existing_draft.get('generated_at') or 'n/a'}` | "
+                    f"strategy=`{existing_draft.get('theme_generation_strategy') or selected_strategy}` | "
                     f"Research Mode: `{mode_label}` | "
                     f"recommended_action=`{existing_draft.get('recommended_action') or 'watch_only'}` | "
                     f"confidence=`{existing_draft.get('confidence') or 'low'}`"
@@ -680,8 +713,42 @@ if active_suggestions_tab == "Scanner Audit":
                         f"ticker=`{debug_entry.get('ticker') or selected_audit_ticker}` | "
                         f"generated_at=`{debug_entry.get('generated_at') or existing_draft.get('generated_at') or 'n/a'}` | "
                         f"mode=`{debug_entry.get('research_mode') or research_mode}` | "
-                        f"draft_source=`{debug_entry.get('draft_source') or existing_draft.get('draft_source') or 'reused_session_draft'}`"
+                        f"draft_source=`{debug_entry.get('draft_source') or existing_draft.get('draft_source') or 'reused_session_draft'}` | "
+                        f"strategy=`{debug_entry.get('theme_generation_strategy') or existing_draft.get('theme_generation_strategy') or selected_strategy}` | "
+                        f"domain=`{debug_entry.get('domain_anchor') or existing_draft.get('domain_anchor') or 'unclear'}` | "
+                        f"dominant_role=`{debug_entry.get('dominant_business_role') or existing_draft.get('dominant_business_role') or 'unclear'}`"
                     )
+                if existing_draft.get("candidate_theme_ideas"):
+                    st.caption("Theme ideas: " + ", ".join(existing_draft.get("candidate_theme_ideas") or []))
+                if existing_draft.get("matched_theme_candidates"):
+                    st.caption(
+                        "Matched candidates: "
+                        + "; ".join(
+                            f"{item.get('idea')} -> {item.get('theme_name')} [{item.get('fit_label')}]"
+                            for item in (existing_draft.get("matched_theme_candidates") or [])[:3]
+                        )
+                    )
+                timing_summary = existing_draft.get("research_timing_summary") or {}
+                if timing_summary:
+                    timing_parts = []
+                    for key in [
+                        "candidate_context_ms",
+                        "catalog_query_ms",
+                        "catalog_preprocess_ms",
+                        "profile_lookup_ms",
+                        "domain_anchor_ms",
+                        "dominant_business_role_ms",
+                        "candidate_theme_ideas_ms",
+                        "governed_theme_matching_ms",
+                        "catalog_prefilter_ms",
+                        "ai_request_ms",
+                        "merge_ms",
+                        "total_ms",
+                    ]:
+                        if key in timing_summary:
+                            timing_parts.append(f"{key}=`{timing_summary.get(key)}`")
+                    if timing_parts:
+                        st.caption("Timing: " + " | ".join(timing_parts))
                 decision_trace = existing_draft.get("research_decision_trace") or {}
                 if decision_trace:
                     st.caption(
@@ -726,50 +793,83 @@ if active_suggestions_tab == "Scanner Audit":
                         "**Similar tickers:** "
                         + (", ".join(existing_draft.get("possible_similar_tickers") or []) or "None suggested")
                     )
-                    st.write(f"**Possible new theme:** {existing_draft.get('possible_new_theme') or 'None suggested'}")
                 with rd2:
                     st.write(f"**Rationale:** {existing_draft.get('rationale') or 'No rationale provided.'}")
                     caveats = existing_draft.get("caveats") or []
                     st.write("**Caveats:** " + (" | ".join(caveats) if caveats else "None"))
 
                 suggested_themes = existing_draft.get("suggested_existing_themes") or []
+                all_theme_ids = {int(option["id"]) for option in theme_options}
+                selected_existing_key = f"scanner_selected_existing_theme_ids_{selected_audit_ticker}"
+                st.session_state[selected_existing_key] = normalize_theme_id_list(
+                    st.session_state.get(selected_existing_key, []),
+                    all_theme_ids,
+                )
+                suggested_theme_ids = [int(item.get("theme_id")) for item in suggested_themes if item.get("theme_id") not in (None, "")]
+                checkbox_state = sync_suggested_theme_checkbox_state(
+                    st.session_state[selected_existing_key],
+                    suggested_theme_ids,
+                )
+                for theme_id, is_checked in checkbox_state.items():
+                    checkbox_key = f"scanner_suggested_theme_{selected_audit_ticker}_{theme_id}"
+                    st.session_state[checkbox_key] = bool(is_checked)
                 if suggested_themes:
                     st.markdown("**Suggested Existing Themes**")
-                    selected_suggested_theme_ids: list[int] = []
                     for item in suggested_themes:
                         theme_id = int(item.get("theme_id"))
                         fit_label = str(item.get("fit_label") or "adjacent_fit")
-                        label = f"{item.get('theme_name')} ({item.get('category')}) [{fit_label}]"
-                        checked = st.checkbox(
-                            label,
-                            value=False,
-                            key=f"scanner_suggested_theme_{selected_audit_ticker}_{theme_id}",
-                        )
-                        st.caption(
-                            (str(item.get("why_it_might_fit") or "Possible governed-theme fit.") + " | ")
-                            + ("representative tickers: " + ", ".join(item.get("representative_tickers") or []) if item.get("representative_tickers") else "no representative tickers shown")
-                        )
-                        if checked:
-                            selected_suggested_theme_ids.append(theme_id)
+                        checkbox_key = f"scanner_suggested_theme_{selected_audit_ticker}_{theme_id}"
+                        cbox_col, text_col = st.columns([0.12, 0.88])
+                        with cbox_col:
+                            st.checkbox(
+                                "Select suggested theme",
+                                key=checkbox_key,
+                                label_visibility="collapsed",
+                                on_change=_sync_selected_existing_from_suggested_checkbox,
+                                args=(selected_existing_key, checkbox_key, theme_id, all_theme_ids),
+                            )
+                        with text_col:
+                            st.markdown(f"**{item.get('theme_name')}** `{fit_label}`")
+                            supporting_parts = []
+                            if item.get("why_it_might_fit"):
+                                supporting_parts.append(str(item.get("why_it_might_fit")))
+                            if item.get("representative_tickers"):
+                                supporting_parts.append("representative tickers: " + ", ".join(item.get("representative_tickers") or []))
+                            if supporting_parts:
+                                st.caption(" | ".join(supporting_parts))
                 else:
-                    selected_suggested_theme_ids = []
                     st.info("No strong existing governed-theme match was suggested from the available context.")
 
-                available_custom_existing = [
-                    option for option in theme_options if int(option["id"]) not in {int(item.get("theme_id")) for item in suggested_themes}
-                ]
-                custom_existing_selection = st.multiselect(
-                    "Add custom existing themes",
-                    options=available_custom_existing,
-                    format_func=lambda option: f"{option['name']} [{option['id']}]",
-                    key=f"scanner_custom_existing_{selected_audit_ticker}",
+                selected_existing_theme_ids = st.multiselect(
+                    "Selected existing themes",
+                    options=sorted(all_theme_ids),
+                    format_func=lambda theme_id: (
+                        f"{theme_option_by_id[int(theme_id)]['name']} [{int(theme_id)}]"
+                        + (" (suggested)" if int(theme_id) in set(suggested_theme_ids) else "")
+                    ),
+                    key=selected_existing_key,
                 )
-                custom_existing_theme_ids = [int(item["id"]) for item in custom_existing_selection]
+                selected_suggested_theme_ids, custom_existing_theme_ids = split_selected_existing_theme_ids(
+                    selected_existing_theme_ids,
+                    suggested_theme_ids,
+                )
+                custom_new_key = f"scanner_custom_new_{selected_audit_ticker}"
+                custom_new_state_key = f"scanner_custom_new_state_{selected_audit_ticker}"
+                prepared_new_theme_value, prepared_new_theme_state = prepare_possible_new_theme_prefill(
+                    st.session_state.get(custom_new_key),
+                    existing_draft.get("possible_new_theme"),
+                    st.session_state.get(custom_new_state_key),
+                )
+                st.session_state[custom_new_key] = prepared_new_theme_value
+                st.session_state[custom_new_state_key] = prepared_new_theme_state
                 custom_new_theme_raw = st.text_input(
-                    "Add custom proposed new themes",
-                    value="",
+                    "Proposed new theme ideas",
                     placeholder="Comma-separated new theme ideas",
-                    key=f"scanner_custom_new_{selected_audit_ticker}",
+                    key=custom_new_key,
+                )
+                st.session_state[custom_new_state_key] = finalize_possible_new_theme_state(
+                    custom_new_theme_raw,
+                    st.session_state.get(custom_new_state_key),
                 )
                 custom_new_themes = sorted(
                     {
@@ -788,8 +888,10 @@ if active_suggestions_tab == "Scanner Audit":
                         )
                     )
                 else:
-                    st.caption("No theme ideas selected yet. You can choose suggested themes, add custom existing themes, or enter custom new-theme labels.")
+                    st.caption("No theme ideas selected yet. You can check suggested themes, search/select existing themes manually, or enter proposed new-theme labels.")
             else:
+                selected_existing_key = f"scanner_selected_existing_theme_ids_{selected_audit_ticker}"
+                st.session_state[selected_existing_key] = normalize_theme_id_list(st.session_state.get(selected_existing_key, []))
                 selected_suggested_theme_ids = []
                 custom_existing_theme_ids = []
                 custom_new_themes = []

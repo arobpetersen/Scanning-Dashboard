@@ -11,7 +11,14 @@ import requests
 
 from src.config import AI_MODEL
 from src.database import SCHEMA_SQL
-from src.scanner_research import _PROFILE_CACHE, generate_scanner_research_draft, get_or_create_scanner_research_draft, theme_catalog_context
+from src.scanner_research import (
+    _DESCRIPTION_ANALYSIS_CACHE,
+    _PROFILE_CACHE,
+    _THEME_PREPROCESS_CACHE,
+    generate_scanner_research_draft,
+    get_or_create_scanner_research_draft,
+    theme_catalog_context,
+)
 from src.scanner_audit import (
     apply_scanner_candidate_selected_themes,
     import_tc2000_exports,
@@ -55,9 +62,13 @@ class TestScannerAudit(unittest.TestCase):
 
     def setUp(self):
         _PROFILE_CACHE.clear()
+        _DESCRIPTION_ANALYSIS_CACHE.clear()
+        _THEME_PREPROCESS_CACHE.clear()
 
     def tearDown(self):
         _PROFILE_CACHE.clear()
+        _DESCRIPTION_ANALYSIS_CACHE.clear()
+        _THEME_PREPROCESS_CACHE.clear()
 
     def test_parse_tc2000_export_file_handles_basic_csv(self):
         tmp = self._tmpdir()
@@ -1098,7 +1109,7 @@ class TestScannerAudit(unittest.TestCase):
 
         captured: dict[str, object] = {}
 
-        def _fake_call(_api_key, context):
+        def _fake_call(_api_key, context, **_kwargs):
             captured["context"] = context
             return {
                 "company_name": "CrowdStrike Holdings",
@@ -2891,6 +2902,483 @@ class TestScannerAudit(unittest.TestCase):
         self.assertTrue(draft["suggested_existing_themes"])
         self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Semiconductor Materials")
         self.assertNotEqual(draft["suggested_existing_themes"][0]["theme_name"], "AI Server Systems")
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "SNDKX",
+            "company_name": "Sandisk Example",
+            "description": "Designs and supplies NAND flash, storage controllers, and semiconductor memory products for data storage devices and enterprise systems.",
+            "sic_description": "Semiconductor Memory",
+        },
+    )
+    def test_description_first_strategy_generates_sane_candidate_theme_ideas_for_memory_case(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'SNDKX', 'SNDKX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'sndkx-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "SNDKX", strategy="description_theme_generation")
+
+        self.assertEqual(draft["theme_generation_strategy"], "description_theme_generation")
+        self.assertIn("candidate_theme_ideas", draft)
+        self.assertIn("Semiconductor Memory", draft["candidate_theme_ideas"])
+        self.assertIn(draft["domain_anchor"], {"semiconductor/electronics", "industrials/materials"})
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "SNDKX",
+            "company_name": "Sandisk Example",
+            "description": "Designs and supplies NAND flash, storage controllers, and semiconductor memory products for data storage devices and enterprise systems.",
+            "sic_description": "Semiconductor Memory",
+        },
+    )
+    def test_description_first_strategy_suppresses_healthcare_themes_for_storage_description(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Semiconductor Memory", "Semiconductors", "MU"),
+            (2, "Dental", "Healthcare", "XRAY"),
+            (3, "Animal Health", "Healthcare", "ZTS"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'SNDKX', 'SNDKX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'sndkx-2')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "SNDKX", strategy="description_theme_generation")
+        suggested_names = [item["theme_name"] for item in draft["suggested_existing_themes"]]
+
+        self.assertIn("Semiconductor Memory", suggested_names)
+        self.assertNotIn("Dental", suggested_names)
+        self.assertNotIn("Animal Health", suggested_names)
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "YOUY",
+            "company_name": "Identity Example",
+            "description": "Provides biometric identity verification and secure authentication services for airports, venues, and enterprise access control.",
+            "sic_description": "Identity Verification Services",
+        },
+    )
+    def test_description_first_strategy_suppresses_optical_misclassification_for_identity_case(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Identity Security", "Software", "OKTA"),
+            (2, "Optical Networking", "Communications", "LITE"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'YOUY', 'YOUY', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'youy-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "YOUY", strategy="description_theme_generation")
+
+        self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Identity Security")
+        self.assertNotIn("Optical Networking", [item["theme_name"] for item in draft["suggested_existing_themes"][:1]])
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "SEZLY",
+            "company_name": "Payments Example",
+            "description": "Provides installment payments, merchant checkout, and consumer lending services for digital commerce platforms.",
+            "sic_description": "Financial Services",
+        },
+    )
+    def test_description_first_strategy_prefers_payments_lending_over_cloud_devops(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Fintech - Payments", "Fintech", "AFRM"),
+            (2, "Fintech - Lending", "Fintech", "SOFI"),
+            (3, "Cloud DevOps", "Software", "DDOG"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'SEZLY', 'SEZLY', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'sezly-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "SEZLY", strategy="description_theme_generation")
+
+        self.assertIn(draft["candidate_theme_ideas"][0], {"Fintech Payments", "Digital Payments"})
+        self.assertIn(draft["suggested_existing_themes"][0]["theme_name"], {"Fintech - Payments", "Fintech - Lending"})
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AAOIC",
+            "company_name": "Optics Example",
+            "description": "Builds optical interconnect modules and custom photonic engines for AI systems and hyperscale data-center links.",
+            "sic_description": "Photonic Components",
+        },
+    )
+    def test_description_first_strategy_can_surface_unmatched_possible_new_theme(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI - Infrastructure', 'AI', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'VRT')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOIC', 'AAOIC', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoic-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "AAOIC", strategy="description_theme_generation")
+
+        self.assertEqual(draft["theme_generation_strategy"], "description_theme_generation")
+        self.assertIsNotNone(draft["possible_new_theme"])
+        self.assertIn(draft["possible_new_theme"], {"Optical Interconnects", "Data Center Optics", "Optical Networking", "AI Fiber Optics"})
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "SUBSX",
+            "company_name": "Substrate Example",
+            "description": "Develops compound semiconductor substrates, indium phosphide wafers, and electronics materials used in advanced chip packaging.",
+            "sic_description": "Electronic Materials",
+        },
+    )
+    def test_description_first_strategy_suppresses_uranium_nuclear_drift_for_semiconductor_materials(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Semiconductor Materials", "Semiconductors", "WOLF"),
+            (2, "Uranium & Nuclear", "Energy", "CCJ"),
+            (3, "Coatings & Paints", "Materials", "SHW"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'SUBSX', 'SUBSX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'subsx-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "SUBSX", strategy="description_theme_generation")
+        suggested_names = [item["theme_name"] for item in draft["suggested_existing_themes"]]
+
+        self.assertIn("Semiconductor Materials", suggested_names)
+        self.assertNotIn("Uranium & Nuclear", suggested_names)
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "OPTIX",
+            "company_name": "Optics Example",
+            "description": "Builds optical interconnect modules and custom photonic engines for hyperscale AI and data-center links.",
+            "sic_description": "Photonic Components",
+        },
+    )
+    def test_description_first_strategy_does_not_map_optics_to_cybersecurity_network_from_lexical_overlap(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Optical Networking", "Communications", "LITE"),
+            (2, "Cybersecurity Network", "Software", "PANW"),
+            (3, "AI - Infrastructure", "AI", "VRT"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'OPTIX', 'OPTIX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'optix-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "OPTIX", strategy="description_theme_generation")
+        suggested_names = [item["theme_name"] for item in draft["suggested_existing_themes"]]
+
+        self.assertIn("Optical Networking", suggested_names)
+        self.assertNotIn("Cybersecurity Network", suggested_names)
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "OPTIY",
+            "company_name": "Optics Example",
+            "description": "Builds optical interconnect modules and custom photonic engines for hyperscale AI and data-center links.",
+            "sic_description": "Photonic Components",
+        },
+    )
+    def test_description_first_strategy_returns_fewer_better_governed_matches_and_honest_fit_labels(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "AI - Infrastructure", "AI", "VRT"),
+            (2, "AI - Edge Computing", "AI", "AVGO"),
+            (3, "Growth - High", "Style", "NVDA"),
+            (4, "Cybersecurity Network", "Software", "PANW"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'OPTIY', 'OPTIY', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'optiy-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "OPTIY", strategy="description_theme_generation")
+
+        self.assertLessEqual(len(draft["suggested_existing_themes"]), 2)
+        self.assertTrue(draft["suggested_existing_themes"])
+        self.assertTrue(all(item["fit_label"] in {"adjacent_fit", "broad_fit"} for item in draft["suggested_existing_themes"]))
+        self.assertNotIn("Growth - High", [item["theme_name"] for item in draft["suggested_existing_themes"]])
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "MATLX",
+            "company_name": "Materials Example",
+            "description": "Supplies compound semiconductor substrates and specialty electronics materials used in advanced chip packaging and wafer-level manufacturing.",
+            "sic_description": "Electronic Materials",
+        },
+    )
+    def test_description_first_strategy_preserves_possible_new_theme_when_governed_matches_are_only_broad_or_adjacent(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Chemicals - Diversified", "Materials", "DD"),
+            (2, "Coatings & Paints", "Materials", "SHW"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'MATLX', 'MATLX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'matlx-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "MATLX", strategy="description_theme_generation")
+
+        self.assertIsNotNone(draft["possible_new_theme"])
+        self.assertIn(draft["possible_new_theme"], {"Semiconductor Materials", "Semiconductor Substrates", "Electronics Materials", "Compound Semiconductor Materials"})
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertTrue(all(item["fit_label"] in {"adjacent_fit", "broad_fit"} for item in draft["suggested_existing_themes"]))
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "VAGEX",
+            "company_name": "Vague Example",
+            "description": "A diversified company providing products and solutions across multiple markets.",
+            "sic_description": "Business Services",
+        },
+    )
+    def test_description_first_strategy_filters_weak_vague_generated_ideas(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'VAGEX', 'VAGEX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'vagex-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "VAGEX", strategy="description_theme_generation")
+
+        self.assertLessEqual(len(draft["candidate_theme_ideas"]), 1)
+        self.assertIn(draft["recommended_action"], {"watch_only", "reject_for_now"})
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AAOIQ",
+            "company_name": "Applied Optoelectronics",
+            "description": "Designs optical transceivers and fiber interconnect products for data-center and telecom networks.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    def test_legacy_classifier_path_remains_available_for_comparison(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'Optical Networking', 'Communications', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'LITE')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOIQ', 'AAOIQ', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoiq-1')
+            """
+        )
+
+        legacy = generate_scanner_research_draft(conn, "AAOIQ", strategy="legacy_direct_match")
+        description_first = generate_scanner_research_draft(conn, "AAOIQ", strategy="description_theme_generation")
+
+        self.assertEqual(legacy["theme_generation_strategy"], "legacy_direct_match")
+        self.assertEqual(description_first["theme_generation_strategy"], "description_theme_generation")
+        self.assertIn("suggested_existing_themes", legacy)
+        self.assertIn("suggested_existing_themes", description_first)
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "CACHEX",
+            "company_name": "Cache Example",
+            "description": "Provides optical interconnect modules for AI data-center links.",
+            "sic_description": "Photonic Components",
+        },
+    )
+    def test_description_analysis_cache_reuses_stable_intermediate_artifacts(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'Optical Networking', 'Communications', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'LITE')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'CACHEX', 'CACHEX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'cachex-1')
+            """
+        )
+
+        from src import scanner_research as sr
+
+        original = sr._build_candidate_analysis
+        calls = {"count": 0}
+
+        def wrapped(*args, **kwargs):
+            calls["count"] += 1
+            return original(*args, **kwargs)
+
+        _DESCRIPTION_ANALYSIS_CACHE.clear()
+        with patch("src.scanner_research._build_candidate_analysis", side_effect=wrapped):
+            generate_scanner_research_draft(conn, "CACHEX", strategy="description_theme_generation")
+            generate_scanner_research_draft(conn, "CACHEX", strategy="description_theme_generation")
+
+        self.assertEqual(calls["count"], 1)
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "CACHEY",
+            "company_name": "Cache Theme Example",
+            "description": "Provides installment payments and merchant checkout services.",
+            "sic_description": "Financial Services",
+        },
+    )
+    def test_preprocessed_governed_theme_metadata_is_reused(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Fintech - Payments", "Fintech", "AFRM"),
+            (2, "Fintech - Lending", "Fintech", "SOFI"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'CACHEY', 'CACHEY', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'cachey-1')
+            """
+        )
+
+        from src import scanner_research as sr
+
+        original = sr._build_preprocessed_theme_entry
+        calls = {"count": 0}
+
+        def wrapped(*args, **kwargs):
+            calls["count"] += 1
+            return original(*args, **kwargs)
+
+        with patch("src.scanner_research._build_preprocessed_theme_entry", side_effect=wrapped):
+            generate_scanner_research_draft(conn, "CACHEY", strategy="description_theme_generation")
+            generate_scanner_research_draft(conn, "CACHEY", strategy="description_theme_generation")
+
+        self.assertEqual(calls["count"], 2)
+        conn.close()
+
+    @patch("src.scanner_research.generate_scanner_research_draft")
+    def test_get_or_create_scanner_research_draft_force_refresh_still_forces_fresh_generation_for_strategy(self, mock_generate):
+        mock_generate.return_value = {"ticker": "AAOI", "theme_generation_strategy": "description_theme_generation"}
+        conn = self._conn()
+
+        draft, reused = get_or_create_scanner_research_draft(
+            conn,
+            "AAOI",
+            existing_draft={"ticker": "AAOI", "theme_generation_strategy": "description_theme_generation"},
+            force_refresh=True,
+            strategy="description_theme_generation",
+        )
+
+        self.assertFalse(reused)
+        mock_generate.assert_called_once()
+        self.assertEqual(draft["theme_generation_strategy"], "description_theme_generation")
         conn.close()
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import UTC, datetime
 
 import requests
@@ -488,6 +489,8 @@ ARCHETYPE_ALIGNMENT = {
 }
 
 _PROFILE_CACHE: dict[str, dict[str, object]] = {}
+_DESCRIPTION_ANALYSIS_CACHE: dict[tuple[object, ...], dict[str, object]] = {}
+_THEME_PREPROCESS_CACHE: dict[tuple[object, ...], dict[str, object]] = {}
 VAGUE_NEW_THEME_LABEL_TOKENS = {
     "advanced",
     "business services",
@@ -517,9 +520,36 @@ GENERIC_FACTOR_THEME_TOKENS = {
     "leaders",
 }
 
+RESEARCH_STRATEGIES = {"legacy_direct_match", "description_theme_generation"}
+
+DOMAIN_ANCHOR_LABELS = {
+    "fintech_payments_lending": "fintech",
+    "digital_identity_security": "digital identity/security",
+    "semiconductor_materials_electronics_materials": "semiconductor/electronics",
+    "ai_infrastructure_data_centers": "AI infrastructure/data centers",
+    "aerospace_defense_space_systems": "aerospace/defense/space",
+    "networking_interconnect": "networking/communications",
+    "software_devops_cloud": "software/cloud",
+    "healthcare_devices_services": "healthcare",
+    "industrial_materials_chemicals": "industrials/materials",
+}
+
 
 def _normalize_text(value: object) -> str:
     return str(value or "").strip()
+
+
+def _now_perf() -> float:
+    return time.perf_counter()
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 1)
+
+
+def _normalize_research_strategy(value: object, fallback: str = "legacy_direct_match") -> str:
+    normalized = _normalize_text(value) or fallback
+    return normalized if normalized in RESEARCH_STRATEGIES else fallback
 
 
 def _compact_error_reason(exc: Exception) -> str:
@@ -563,13 +593,26 @@ def _normalize_optional_theme_label(value: object) -> str | None:
 
 
 def _fit_label_from_details(fit_details: dict[str, object]) -> str:
-    if bool(fit_details.get("direct_role_fit")):
+    score = int(fit_details.get("score") or 0)
+    direct_role_fit = bool(fit_details.get("direct_role_fit"))
+    indirect_only_fit = bool(fit_details.get("indirect_only_fit"))
+    economic_role_overlap = bool(fit_details.get("economic_role_overlap"))
+    archetype_relation = str(fit_details.get("archetype_relation") or "")
+    specific_overlap = bool(fit_details.get("specific_overlap"))
+    market_overlap = bool(fit_details.get("market_overlap"))
+    generic_overlap = bool(fit_details.get("generic_overlap"))
+    if direct_role_fit and (specific_overlap or economic_role_overlap or archetype_relation == "direct" or score >= 18):
+        return "direct_fit"
+    if economic_role_overlap and archetype_relation == "direct" and not indirect_only_fit and (specific_overlap or score >= 18):
         return "direct_fit"
     if (
         bool(fit_details.get("indirect_only_fit"))
-        or bool(fit_details.get("market_overlap"))
-        or str(fit_details.get("archetype_relation") or "") == "direct"
-        or str(fit_details.get("archetype_relation") or "") == "adjacent"
+        or market_overlap
+        or specific_overlap
+        or economic_role_overlap
+        or archetype_relation == "direct"
+        or archetype_relation == "adjacent"
+        or generic_overlap
     ):
         return "adjacent_fit"
     return "broad_fit"
@@ -686,7 +729,7 @@ def _representative_ticker_role_hints(tickers: list[object]) -> set[str]:
     joined = " ".join(str(value or "").strip().upper() for value in tickers if str(value or "").strip())
     if any(symbol in joined for symbol in ["AAOI", "CIEN", "LITE", "FN", "INFN"]):
         hints.add("optical_networking")
-    if any(symbol in joined for symbol in ["AXT", "CCJ", "WOLF", "COHR", "ONTO"]):
+    if any(symbol in joined for symbol in ["AXT", "WOLF", "COHR", "ONTO"]):
         hints.add("semiconductor_materials")
     if any(symbol in joined for symbol in ["ASML", "AMAT", "LRCX", "KLAC", "ONTO"]):
         hints.add("semiconductor_equipment")
@@ -771,12 +814,32 @@ def _candidate_end_markets(profile: dict[str, object], candidate: dict[str, obje
 
 
 def _theme_roles(theme_entry: dict[str, object]) -> set[str]:
-    return _infer_signals(
-        ROLE_KEYWORDS,
+    parts = (
         theme_entry.get("theme_name"),
         theme_entry.get("category"),
         theme_entry.get("theme_description"),
+    )
+    roles = _infer_signals(
+        ROLE_KEYWORDS,
+        *parts,
     ) | _representative_ticker_role_hints(list(theme_entry.get("representative_tickers") or []))
+    role_counts = _count_signal_hits(ROLE_KEYWORDS, *parts)
+    combined_text = " ".join(_normalize_text(part).lower() for part in parts if _normalize_text(part))
+    strong_optical_terms = {"optical", "optics", "fiber", "transceiver", "transceivers", "photonic", "photonics", "coherent"}
+    if "optical_networking" in roles:
+        optical_hits = int(role_counts.get("optical_networking") or 0)
+        has_strong_optical_term = any(_contains_phrase(combined_text, term) for term in strong_optical_terms)
+        representative_roles = _representative_ticker_role_hints(list(theme_entry.get("representative_tickers") or []))
+        if optical_hits < 2 and not has_strong_optical_term and "optical_networking" not in representative_roles:
+            roles.discard("optical_networking")
+    strong_device_terms = {"endpoint", "endpoints", "consumer electronics", "handset"}
+    if "devices_endpoints" in roles:
+        device_hits = int(role_counts.get("devices_endpoints") or 0)
+        has_strong_device_term = any(_contains_phrase(combined_text, term) for term in strong_device_terms)
+        representative_roles = _representative_ticker_role_hints(list(theme_entry.get("representative_tickers") or []))
+        if device_hits < 2 and not has_strong_device_term and "devices_endpoints" not in representative_roles:
+            roles.discard("devices_endpoints")
+    return roles
 
 
 def _theme_end_markets(theme_entry: dict[str, object]) -> set[str]:
@@ -824,8 +887,10 @@ def _infer_archetype_scores(
         for token in {"identity", "verification", "biometric", "authentication"}
     ):
         scores["digital_identity_security"] = scores.get("digital_identity_security", 0) + 4
-    if "data_center" in markets or "ai_compute" in concepts:
+    if "ai_compute" in concepts:
         scores["ai_infrastructure_data_centers"] = scores.get("ai_infrastructure_data_centers", 0) + 3
+    elif "data_center" in markets and roles & {"optical_networking", "server_systems", "power_equipment"}:
+        scores["ai_infrastructure_data_centers"] = scores.get("ai_infrastructure_data_centers", 0) + 2
     if "defense" in concepts or "space" in concepts or "defense_market" in markets:
         scores["aerospace_defense_space_systems"] = scores.get("aerospace_defense_space_systems", 0) + 4
     if "healthcare" in markets or "biotech" in concepts:
@@ -948,6 +1013,207 @@ def _dominant_economic_role(profile: dict[str, object], candidate: dict[str, obj
     return roles[0] if roles else ""
 
 
+def _domain_anchor(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> str:
+    archetypes = sorted(_candidate_archetypes(profile, candidate, *extra_parts))
+    if archetypes:
+        return DOMAIN_ANCHOR_LABELS.get(archetypes[0], archetypes[0].replace("_", "/"))
+    concepts = _candidate_concepts(profile, candidate)
+    if "defense" in concepts or "space" in concepts:
+        return "aerospace/defense/space"
+    if "payments" in concepts:
+        return "fintech"
+    if "semiconductor" in concepts:
+        return "semiconductor/electronics"
+    return "unclear"
+
+
+def _candidate_theme_ideas_from_description(profile: dict[str, object], candidate: dict[str, object]) -> list[str]:
+    description = " ".join(
+        [
+            _normalize_text(profile.get("company_name")),
+            _normalize_text(profile.get("description")),
+            _normalize_text(profile.get("sic_description")),
+            _normalize_text(candidate.get("recommendation_reason")),
+        ]
+    ).lower()
+    archetypes = _candidate_archetypes(profile, candidate)
+    dominant_role = _dominant_economic_role(profile, candidate)
+    ideas: list[str] = []
+    memory_storage_signals = any(token in description for token in ["memory", "nand", "flash", "storage controller", "storage controllers"])
+
+    def add(label: str | None) -> None:
+        normalized = _normalize_optional_theme_label(label)
+        if normalized and normalized not in ideas:
+            ideas.append(normalized)
+
+    if memory_storage_signals:
+        add("Semiconductor Memory")
+        add("Data Storage")
+    if "semiconductor_materials_electronics_materials" in archetypes:
+        add("Semiconductor Materials")
+        if "substrate" in description or "substrates" in description:
+            add("Semiconductor Substrates")
+        if "electronics materials" in description or "packaging materials" in description:
+            add("Electronics Materials")
+    if "digital_identity_security" in archetypes:
+        add("Digital Identity")
+        add("Identity Verification")
+    if "fintech_payments_lending" in archetypes:
+        add("Fintech Payments")
+        add("Digital Payments")
+        if "lending" in description or "loan" in description or "installment" in description:
+            add("Consumer Lending")
+    if "ai_infrastructure_data_centers" in archetypes:
+        add("AI Data Centers")
+        add("AI Infrastructure")
+        if dominant_role in {"infrastructure_operator", "end_platform_operator"}:
+            add("Data Center Infrastructure")
+    if "aerospace_defense_space_systems" in archetypes:
+        if "missile" in description:
+            add("Missile Defense Systems")
+        if "propulsion" in description or "engine" in description:
+            add("Aerospace Propulsion")
+        add("Defense Systems")
+        add("Space Systems")
+    if "networking_interconnect" in archetypes:
+        if dominant_role != "materials_supplier":
+            add("Optical Interconnects")
+            if "data center" in description or "hyperscale" in description:
+                add("Data Center Optics")
+            add("Optical Networking")
+    if "software_devops_cloud" in archetypes and dominant_role == "software_service_provider":
+        add("Cloud Software")
+    if not ideas:
+        fallback = _candidate_new_theme_label(profile, candidate)
+        add(fallback)
+    return ideas[:5]
+
+
+def _generated_idea_analysis(idea: str) -> dict[str, object]:
+    normalized = _normalize_text(idea)
+    concepts = _infer_concepts(normalized)
+    roles = _infer_signals(ROLE_KEYWORDS, normalized)
+    markets = _infer_signals(END_MARKET_KEYWORDS, normalized)
+    archetypes = _ranked_archetypes(
+        _infer_archetype_scores(normalized, roles=roles, concepts=concepts, markets=markets),
+        threshold=1,
+    )
+    economic_roles = _ranked_archetypes(
+        _infer_economic_role_scores(normalized, roles=roles, archetypes=archetypes),
+        threshold=1,
+    )
+    return {
+        "idea_tokens": _tokenize(normalized),
+        "idea_concepts": concepts,
+        "idea_roles": roles,
+        "idea_markets": markets,
+        "idea_archetypes": archetypes,
+        "idea_economic_roles": economic_roles,
+    }
+
+
+def _theme_match_from_generated_idea(
+    idea: str,
+    theme_entry: dict[str, object],
+    profile: dict[str, object],
+    candidate: dict[str, object],
+    *,
+    domain_anchor: str,
+    dominant_business_role: str,
+) -> dict[str, object]:
+    prepared_theme = theme_entry if "_theme_tokens" in theme_entry else _preprocessed_theme_entry(theme_entry)
+    candidate_analysis = _candidate_analysis(profile, candidate)
+    idea_analysis = _generated_idea_analysis(idea)
+    idea_tokens = set(idea_analysis.get("idea_tokens") or set())
+    idea_concepts = set(idea_analysis.get("idea_concepts") or set())
+    idea_roles = set(idea_analysis.get("idea_roles") or set())
+    idea_markets = set(idea_analysis.get("idea_markets") or set())
+    idea_archetypes = set(idea_analysis.get("idea_archetypes") or set())
+    idea_economic_roles = set(idea_analysis.get("idea_economic_roles") or set())
+    theme_tokens = set(prepared_theme.get("_theme_tokens") or set())
+    theme_concepts = set(prepared_theme.get("_theme_concepts") or set())
+    theme_roles = set(prepared_theme.get("_theme_roles") or set())
+    theme_markets = set(prepared_theme.get("_theme_markets") or set())
+    theme_archetypes = set(prepared_theme.get("_theme_archetypes") or set())
+    theme_economic_roles = set(prepared_theme.get("_theme_economic_roles") or set())
+    token_overlap = sorted(idea_tokens & theme_tokens)
+    specific_overlap = sorted((idea_concepts & theme_concepts) - GENERIC_CONCEPTS)
+    generic_overlap = sorted((idea_concepts & theme_concepts) & GENERIC_CONCEPTS)
+    role_overlap = sorted(idea_roles & theme_roles)
+    market_overlap = sorted(idea_markets & theme_markets)
+    archetype_overlap = sorted(idea_archetypes & theme_archetypes)
+    economic_role_overlap = sorted(idea_economic_roles & theme_economic_roles)
+    archetype_relation = _archetype_relation(idea_archetypes, theme_archetypes)
+    fit_details = _theme_fit_details(prepared_theme, profile, candidate, candidate_analysis=candidate_analysis)
+    score = (
+        len(role_overlap) * 18
+        + len(economic_role_overlap) * 14
+        + len(archetype_overlap) * 12
+        + len(specific_overlap) * 9
+        + len(market_overlap) * 4
+        + len(generic_overlap) * 2
+        + min(2, len(token_overlap)) * 2
+        + min(10, max(0, int(fit_details.get("score") or 0)) // 2)
+    )
+    if archetype_relation == "direct":
+        score += 6
+    elif archetype_relation == "adjacent":
+        score += 2
+    elif archetype_relation == "incompatible":
+        score -= 18
+    if idea_roles and theme_roles and not role_overlap:
+        idea_families = {ROLE_FAMILY.get(role) for role in idea_roles if ROLE_FAMILY.get(role)}
+        theme_families = {ROLE_FAMILY.get(role) for role in theme_roles if ROLE_FAMILY.get(role)}
+        if idea_families and theme_families:
+            score -= 12 if idea_families.isdisjoint(theme_families) else 4
+    if idea_economic_roles and theme_economic_roles and not economic_role_overlap:
+        score -= 12
+    if idea_archetypes and theme_archetypes and archetype_relation == "incompatible":
+        score -= 8
+    if len(token_overlap) <= 1 and not role_overlap and not specific_overlap and not economic_role_overlap and not archetype_overlap:
+        score -= 10
+    if token_overlap and len(token_overlap) == 1 and token_overlap[0] in {"network", "networks", "materials", "systems", "devices", "device"}:
+        score -= 6
+    if _is_generic_factor_theme(prepared_theme) and bool(candidate_analysis.get("strong_role_evidence")):
+        score -= 12
+    if domain_anchor != "unclear":
+        theme_anchor = _domain_anchor(
+            {"company_name": "", "description": _normalize_text(theme_entry.get("theme_description")), "sic_description": _normalize_text(theme_entry.get("category"))},
+            {"recommendation_reason": _normalize_text(theme_entry.get("theme_name"))},
+        )
+        if theme_anchor == domain_anchor:
+            score += 4
+        elif theme_anchor != "unclear":
+            score -= 8
+    if dominant_business_role and dominant_business_role not in list(fit_details.get("theme_economic_roles") or []):
+        if list(fit_details.get("theme_economic_roles") or []):
+            score -= 6
+    if archetype_relation == "incompatible" and not role_overlap and not specific_overlap and not economic_role_overlap:
+        score = min(score, 2)
+    if not role_overlap and not specific_overlap and not archetype_overlap and not economic_role_overlap and len(token_overlap) <= 1:
+        score = min(score, 4)
+    if role_overlap:
+        fit_label = "direct_fit"
+    elif economic_role_overlap or archetype_relation in {"direct", "adjacent"} or specific_overlap or market_overlap:
+        fit_label = "adjacent_fit"
+    else:
+        fit_label = "broad_fit"
+    return {
+        "score": score,
+        "fit_details": fit_details,
+        "token_overlap": token_overlap,
+        "specific_overlap": specific_overlap,
+        "role_overlap": role_overlap,
+        "market_overlap": market_overlap,
+        "archetype_overlap": archetype_overlap,
+        "economic_role_overlap": economic_role_overlap,
+        "archetype_relation": archetype_relation,
+        "fit_label": fit_label,
+        "theme_entry": prepared_theme,
+        "idea": idea,
+    }
+
+
 def _looks_generic_theme(theme_entry: dict[str, object]) -> bool:
     theme_text = " ".join(
         [
@@ -1002,25 +1268,28 @@ def _dominant_role(profile: dict[str, object], candidate: dict[str, object], *ex
     return ""
 
 
-def _theme_fit_details(theme_entry: dict[str, object], profile: dict[str, object], candidate: dict[str, object]) -> dict[str, object]:
-    theme_tokens = _tokenize(theme_entry.get("theme_name"), theme_entry.get("category"), theme_entry.get("theme_description"))
-    profile_tokens = _tokenize(
-        profile.get("company_name"),
-        profile.get("description"),
-        profile.get("sic_description"),
-        candidate.get("recommendation_reason"),
-    )
-    candidate_concepts = _candidate_concepts(profile, candidate)
-    theme_concepts = _theme_concepts(theme_entry)
-    candidate_roles = _candidate_roles(profile, candidate)
-    candidate_markets = _candidate_end_markets(profile, candidate)
-    candidate_archetypes = _candidate_archetypes(profile, candidate)
-    candidate_economic_roles = _candidate_economic_roles(profile, candidate)
-    strong_role_evidence = _has_strong_role_evidence(profile, candidate)
-    theme_roles = _theme_roles(theme_entry)
-    theme_markets = _theme_end_markets(theme_entry)
-    theme_archetypes = _theme_archetypes(theme_entry)
-    theme_economic_roles = _theme_economic_roles(theme_entry)
+def _theme_fit_details(
+    theme_entry: dict[str, object],
+    profile: dict[str, object],
+    candidate: dict[str, object],
+    *,
+    candidate_analysis: dict[str, object] | None = None,
+) -> dict[str, object]:
+    prepared_theme = theme_entry if "_theme_tokens" in theme_entry else _preprocessed_theme_entry(theme_entry)
+    analysis = candidate_analysis or _candidate_analysis(profile, candidate)
+    theme_tokens = set(prepared_theme.get("_theme_tokens") or set())
+    profile_tokens = set(analysis.get("profile_tokens") or set())
+    candidate_concepts = set(analysis.get("candidate_concepts") or set())
+    theme_concepts = set(prepared_theme.get("_theme_concepts") or set())
+    candidate_roles = set(analysis.get("candidate_roles") or set())
+    candidate_markets = set(analysis.get("candidate_markets") or set())
+    candidate_archetypes = set(analysis.get("candidate_archetypes") or set())
+    candidate_economic_roles = set(analysis.get("candidate_economic_roles") or set())
+    strong_role_evidence = bool(analysis.get("strong_role_evidence"))
+    theme_roles = set(prepared_theme.get("_theme_roles") or set())
+    theme_markets = set(prepared_theme.get("_theme_markets") or set())
+    theme_archetypes = set(prepared_theme.get("_theme_archetypes") or set())
+    theme_economic_roles = set(prepared_theme.get("_theme_economic_roles") or set())
     specific_overlap = sorted((candidate_concepts & theme_concepts) - GENERIC_CONCEPTS)
     generic_overlap = sorted((candidate_concepts & theme_concepts) & GENERIC_CONCEPTS)
     role_overlap = sorted(candidate_roles & theme_roles)
@@ -1029,7 +1298,7 @@ def _theme_fit_details(theme_entry: dict[str, object], profile: dict[str, object
     archetype_overlap = sorted(candidate_archetypes & theme_archetypes)
     economic_role_overlap = sorted(candidate_economic_roles & theme_economic_roles)
     archetype_relation = _archetype_relation(candidate_archetypes, theme_archetypes)
-    dominant_economic_role = _dominant_economic_role(profile, candidate)
+    dominant_economic_role = str(analysis.get("dominant_economic_role") or "")
 
     score = (
         len(role_overlap) * 14
@@ -1059,9 +1328,9 @@ def _theme_fit_details(theme_entry: dict[str, object], profile: dict[str, object
         score -= 10 if dominant_economic_role else 6
     if not role_overlap and market_overlap:
         score -= 4
-    if _looks_generic_theme(theme_entry) and not role_overlap:
+    if bool(prepared_theme.get("_looks_generic_theme")) and not role_overlap:
         score -= 4
-    if _is_generic_factor_theme(theme_entry):
+    if bool(prepared_theme.get("_is_generic_factor_theme")):
         if strong_role_evidence:
             score -= 16
         elif not role_overlap and not archetype_overlap:
@@ -1079,7 +1348,7 @@ def _theme_fit_details(theme_entry: dict[str, object], profile: dict[str, object
         score = min(score, 1)
     if archetype_relation == "incompatible" and not role_overlap and not specific_overlap:
         score = min(score, 0)
-    if _is_generic_factor_theme(theme_entry) and strong_role_evidence and (role_overlap or archetype_overlap or specific_overlap):
+    if bool(prepared_theme.get("_is_generic_factor_theme")) and strong_role_evidence and (role_overlap or archetype_overlap or specific_overlap):
         score = min(score, 6)
     if (
         strong_role_evidence
@@ -1130,7 +1399,7 @@ def _theme_fit_details(theme_entry: dict[str, object], profile: dict[str, object
         "candidate_economic_roles": sorted(candidate_economic_roles),
         "theme_economic_roles": sorted(theme_economic_roles),
         "dominant_economic_role": dominant_economic_role,
-        "generic_factor_theme": _is_generic_factor_theme(theme_entry),
+        "generic_factor_theme": bool(prepared_theme.get("_is_generic_factor_theme")),
         "strong_role_evidence": strong_role_evidence,
     }
 
@@ -1176,6 +1445,43 @@ def theme_catalog_context(conn, representative_limit: int = 5) -> list[dict[str,
             }
         )
     return catalog
+
+
+def _theme_preprocess_cache_key(theme_entry: dict[str, object]) -> tuple[object, ...]:
+    return (
+        int(theme_entry["theme_id"]),
+        _normalize_text(theme_entry.get("theme_name")),
+        _normalize_text(theme_entry.get("category")),
+        _normalize_text(theme_entry.get("theme_description")),
+        tuple(str(value or "").strip().upper() for value in list(theme_entry.get("representative_tickers") or [])),
+    )
+
+
+def _build_preprocessed_theme_entry(theme_entry: dict[str, object]) -> dict[str, object]:
+    prepared = dict(theme_entry)
+    prepared["_theme_tokens"] = _tokenize(theme_entry.get("theme_name"), theme_entry.get("category"), theme_entry.get("theme_description"))
+    prepared["_theme_concepts"] = _theme_concepts(theme_entry)
+    prepared["_theme_roles"] = _theme_roles(theme_entry)
+    prepared["_theme_markets"] = _theme_end_markets(theme_entry)
+    prepared["_theme_archetypes"] = _theme_archetypes(theme_entry)
+    prepared["_theme_economic_roles"] = _theme_economic_roles(theme_entry)
+    prepared["_looks_generic_theme"] = _looks_generic_theme(theme_entry)
+    prepared["_is_generic_factor_theme"] = _is_generic_factor_theme(theme_entry)
+    return prepared
+
+
+def _preprocessed_theme_entry(theme_entry: dict[str, object]) -> dict[str, object]:
+    key = _theme_preprocess_cache_key(theme_entry)
+    cached = _THEME_PREPROCESS_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+    prepared = _build_preprocessed_theme_entry(theme_entry)
+    _THEME_PREPROCESS_CACHE[key] = prepared
+    return dict(prepared)
+
+
+def _preprocessed_catalog(catalog: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [_preprocessed_theme_entry(entry) for entry in list(catalog or [])]
 
 
 def _concise_theme_context(theme_entry: dict[str, object], representative_limit: int = 3) -> dict[str, object]:
@@ -1268,6 +1574,56 @@ def _candidate_context(conn, ticker: str) -> dict[str, object]:
         "metadata_basis": str(row["metadata_basis"]),
         "governed_status": str(row["governed_status"]),
     }
+
+
+def _description_analysis_cache_key(profile: dict[str, object], candidate: dict[str, object], extra_parts: tuple[object, ...]) -> tuple[object, ...]:
+    return (
+        _normalize_text(candidate.get("ticker")).upper(),
+        _normalize_text(profile.get("company_name")),
+        _normalize_text(profile.get("description")),
+        _normalize_text(profile.get("sic_description")),
+        _normalize_text(candidate.get("recommendation_reason")),
+        tuple(_normalize_text(part) for part in extra_parts),
+    )
+
+
+def _build_candidate_analysis(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> dict[str, object]:
+    profile_tokens = _tokenize(
+        profile.get("company_name"),
+        profile.get("description"),
+        profile.get("sic_description"),
+        candidate.get("recommendation_reason"),
+        *extra_parts,
+    )
+    concepts = _candidate_concepts(profile, candidate)
+    roles = _candidate_roles(profile, candidate, *extra_parts)
+    markets = _candidate_end_markets(profile, candidate, *extra_parts)
+    archetypes = _candidate_archetypes(profile, candidate, *extra_parts)
+    economic_roles = _candidate_economic_roles(profile, candidate, *extra_parts)
+    dominant_economic_role = _dominant_economic_role(profile, candidate, *extra_parts)
+    return {
+        "profile_tokens": profile_tokens,
+        "candidate_concepts": concepts,
+        "candidate_roles": roles,
+        "candidate_markets": markets,
+        "candidate_archetypes": archetypes,
+        "candidate_economic_roles": economic_roles,
+        "dominant_economic_role": dominant_economic_role,
+        "strong_role_evidence": bool(
+            (len(roles) >= 1 or len(economic_roles) >= 1)
+            and (len(archetypes) >= 1 or len(concepts - GENERIC_CONCEPTS) >= 1 or len(economic_roles) >= 1)
+        ),
+    }
+
+
+def _candidate_analysis(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> dict[str, object]:
+    key = _description_analysis_cache_key(profile, candidate, tuple(extra_parts))
+    cached = _DESCRIPTION_ANALYSIS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    analysis = _build_candidate_analysis(profile, candidate, *extra_parts)
+    _DESCRIPTION_ANALYSIS_CACHE[key] = analysis
+    return analysis
 
 
 def _theme_fit_score(theme_entry: dict[str, object], profile: dict[str, object], candidate: dict[str, object]) -> tuple[int, str]:
@@ -1426,10 +1782,11 @@ def _prefilter_ai_theme_catalog(
     *,
     max_themes: int = 12,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
+    candidate_analysis = _candidate_analysis(profile, candidate)
     ranked: list[tuple[int, int, dict[str, object]]] = []
     adjacent: list[tuple[int, int, dict[str, object]]] = []
-    for entry in catalog:
-        fit_details = _theme_fit_details(entry, profile, candidate)
+    for entry in _preprocessed_catalog(catalog):
+        fit_details = _theme_fit_details(entry, profile, candidate, candidate_analysis=candidate_analysis)
         score = int(fit_details["score"])
         direct_bonus = 1 if fit_details.get("direct_role_fit") else 0
         ranked.append((score, direct_bonus, entry))
@@ -1478,14 +1835,15 @@ def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[s
     scored: list[tuple[int, dict[str, object], dict[str, object]]] = []
     adjacent_scored: list[tuple[int, dict[str, object], dict[str, object]]] = []
     broad_alternatives: list[str] = []
-    candidate_concepts = _candidate_concepts(profile, candidate)
-    candidate_roles = _candidate_roles(profile, candidate)
-    candidate_markets = _candidate_end_markets(profile, candidate)
-    strong_role_evidence = _has_strong_role_evidence(profile, candidate)
-    for entry in catalog:
-        theme_concepts = _theme_concepts(entry)
-        theme_roles = _theme_roles(entry)
-        theme_markets = _theme_end_markets(entry)
+    candidate_analysis = _candidate_analysis(profile, candidate)
+    candidate_concepts = set(candidate_analysis.get("candidate_concepts") or set())
+    candidate_roles = set(candidate_analysis.get("candidate_roles") or set())
+    candidate_markets = set(candidate_analysis.get("candidate_markets") or set())
+    strong_role_evidence = bool(candidate_analysis.get("strong_role_evidence"))
+    for entry in _preprocessed_catalog(catalog):
+        theme_concepts = set(entry.get("_theme_concepts") or set())
+        theme_roles = set(entry.get("_theme_roles") or set())
+        theme_markets = set(entry.get("_theme_markets") or set())
         if (
             not (candidate_roles & theme_roles)
             and not ((candidate_concepts & theme_concepts) - GENERIC_CONCEPTS)
@@ -1495,7 +1853,7 @@ def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[s
             broad_alternatives.append(str(entry.get("theme_name") or ""))
         elif (_looks_generic_theme(entry) or _is_generic_factor_theme(entry)) and str(entry.get("theme_name") or "") not in broad_alternatives:
             broad_alternatives.append(str(entry.get("theme_name") or ""))
-        fit_details = _theme_fit_details(entry, profile, candidate)
+        fit_details = _theme_fit_details(entry, profile, candidate, candidate_analysis=candidate_analysis)
         score = int(fit_details["score"])
         why = str(fit_details["why"])
         if not why and not fit_details.get("direct_role_fit"):
@@ -1661,10 +2019,154 @@ def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[s
     }
 
 
-def _call_openai_research(api_key: str, context: dict[str, object]) -> dict[str, object]:
+def _description_theme_generation_draft(candidate: dict[str, object], catalog: list[dict[str, object]], profile: dict[str, object]) -> dict[str, object]:
+    draft_start = _now_perf()
+    description = _normalize_text(profile.get("description")) or _normalize_text(profile.get("sic_description"))
+    domain_start = _now_perf()
+    domain_anchor = _domain_anchor(profile, candidate)
+    domain_ms = _elapsed_ms(domain_start)
+    role_start = _now_perf()
+    dominant_business_role = _dominant_economic_role(profile, candidate)
+    role_ms = _elapsed_ms(role_start)
+    idea_start = _now_perf()
+    candidate_theme_ideas = _candidate_theme_ideas_from_description(profile, candidate)
+    idea_ms = _elapsed_ms(idea_start)
+    matched_theme_candidates: list[dict[str, object]] = []
+    best_by_theme_id: dict[int, dict[str, object]] = {}
+    match_start = _now_perf()
+    for idea in candidate_theme_ideas:
+        for entry in _preprocessed_catalog(catalog):
+            match = _theme_match_from_generated_idea(
+                idea,
+                entry,
+                profile,
+                candidate,
+                domain_anchor=domain_anchor,
+                dominant_business_role=dominant_business_role,
+            )
+            theme_id = int(entry["theme_id"])
+            if theme_id not in best_by_theme_id or int(match["score"]) > int(best_by_theme_id[theme_id]["score"]):
+                best_by_theme_id[theme_id] = match
+    match_ms = _elapsed_ms(match_start)
+    finalize_start = _now_perf()
+    ranked_matches = sorted(
+        best_by_theme_id.values(),
+        key=lambda item: (-int(item["score"]), str(item["theme_entry"].get("theme_name") or "")),
+    )
+    strong_role_evidence = _has_strong_role_evidence(profile, candidate)
+    suggested_existing: list[dict[str, object]] = []
+    for match in ranked_matches:
+        entry = match["theme_entry"]
+        if strong_role_evidence and _is_generic_factor_theme(entry):
+            continue
+        fit_details = dict(match["fit_details"])
+        fit_label = _fit_label_from_details(fit_details)
+        fit_label = str(match.get("fit_label") or fit_label or "broad_fit")
+        minimum_score = {"direct_fit": 15, "adjacent_fit": 12, "broad_fit": 14}.get(fit_label, 14)
+        if int(match["score"]) < minimum_score:
+            continue
+        why = (
+            f"Matches generated idea '{match['idea']}'"
+            + (f" via {', '.join(match['token_overlap'][:3])}" if match["token_overlap"] else "")
+        )
+        suggestion = _annotate_suggestion_fit(
+            {
+                "theme_id": int(entry["theme_id"]),
+                "theme_name": str(entry["theme_name"]),
+                "category": str(entry["category"]),
+                "why_it_might_fit": why,
+                "representative_tickers": list(entry.get("representative_tickers") or []),
+            },
+            fit_details,
+        )
+        suggestion["fit_label"] = fit_label
+        suggestion["_match_score"] = int(match["score"])
+        suggested_existing.append(suggestion)
+        matched_theme_candidates.append(
+            {
+                "idea": match["idea"],
+                "theme_name": suggestion["theme_name"],
+                "score": int(match["score"]),
+                "fit_label": suggestion["fit_label"],
+            }
+        )
+        if len(suggested_existing) >= 3:
+            break
+    suggested_existing = _prioritize_operating_role_suggestions(
+        suggested_existing,
+        strong_role_evidence=strong_role_evidence,
+    )
+    strongest_unmatched_idea = None
+    matched_ideas = {
+        item["idea"]
+        for item in matched_theme_candidates
+        if int(item["score"]) >= 15 and str(item.get("fit_label") or "") == "direct_fit"
+    }
+    for idea in candidate_theme_ideas:
+        if idea not in matched_ideas:
+            strongest_unmatched_idea = idea
+            break
+    possible_new_theme = None
+    recommended_action = "watch_only"
+    confidence = "low"
+    if strongest_unmatched_idea and len(candidate_theme_ideas) >= 1 and strong_role_evidence:
+        possible_new_theme = strongest_unmatched_idea
+        recommended_action = "consider_new_theme"
+        confidence = "medium"
+    elif suggested_existing:
+        recommended_action = "add_to_existing_theme_review" if suggested_existing[0].get("fit_label") == "direct_fit" else "watch_only"
+        confidence = "medium" if suggested_existing[0].get("fit_label") in {"direct_fit", "adjacent_fit"} else "low"
+    caveats: list[str] = []
+    if not description:
+        caveats.append("Company description is unavailable or unverified in the current environment.")
+    if not suggested_existing and not possible_new_theme:
+        caveats.append("Description-first generation did not find a strong operating-role theme cluster.")
+    rationale_parts = [
+        f"The company { _value_chain_summary(profile, candidate) }.",
+        f"Description-first generation anchored on domain `{domain_anchor}` and dominant role `{dominant_business_role or 'unclear'}`.",
+    ]
+    if suggested_existing:
+        rationale_parts.append(
+            "Best governed-theme matches: "
+            + "; ".join(f"{item['theme_name']} [{item['fit_label']}]" for item in suggested_existing)
+        )
+    if possible_new_theme:
+        rationale_parts.append(f"The strongest unmatched role idea is {possible_new_theme}, which is being preserved as a tentative new-theme suggestion.")
+    elif not suggested_existing:
+        rationale_parts.append("No strong governed-theme or reusable new-theme idea was identified from the description.")
+    draft = {
+        "ticker": candidate["ticker"],
+        "company_name": _normalize_text(profile.get("company_name")) or candidate["ticker"],
+        "short_company_description": description or "No verified company description available.",
+        "possible_similar_tickers": [],
+        "suggested_existing_themes": suggested_existing[:3],
+        "possible_new_theme": possible_new_theme,
+        "confidence": confidence,
+        "rationale": " ".join(rationale_parts),
+        "caveats": caveats,
+        "recommended_action": recommended_action,
+        "theme_generation_strategy": "description_theme_generation",
+        "domain_anchor": domain_anchor,
+        "dominant_business_role": dominant_business_role or "unclear",
+        "candidate_theme_ideas": candidate_theme_ideas,
+        "matched_theme_candidates": matched_theme_candidates[:5],
+    }
+    draft["research_timing_summary"] = {
+        "strategy": "description_theme_generation",
+        "domain_anchor_ms": domain_ms,
+        "dominant_business_role_ms": role_ms,
+        "candidate_theme_ideas_ms": idea_ms,
+        "governed_theme_matching_ms": match_ms,
+        "finalize_ms": _elapsed_ms(finalize_start),
+        "strategy_total_ms": _elapsed_ms(draft_start),
+    }
+    return draft
+
+
+def _call_openai_research(api_key: str, context: dict[str, object], *, max_output_tokens: int = 550) -> dict[str, object]:
     payload = {
         "model": AI_MODEL,
-        "max_output_tokens": 550,
+        "max_output_tokens": max_output_tokens,
         "input": [
             {"role": "system", "content": RESEARCH_DRAFT_SYSTEM_PROMPT},
             {
@@ -1707,7 +2209,8 @@ def _best_suggested_theme_fit_details(
     profile: dict[str, object],
     candidate: dict[str, object],
 ) -> dict[str, object]:
-    by_id = {int(item["theme_id"]): item for item in catalog}
+    candidate_analysis = _candidate_analysis(profile, candidate)
+    by_id = {int(item["theme_id"]): item for item in _preprocessed_catalog(catalog)}
     best: dict[str, object] = {"score": 0, "direct_role_fit": False, "indirect_only_fit": False}
     for suggestion in suggested_existing:
         try:
@@ -1717,7 +2220,7 @@ def _best_suggested_theme_fit_details(
         entry = by_id.get(theme_id)
         if entry is None:
             continue
-        fit_details = _theme_fit_details(entry, profile, candidate)
+        fit_details = _theme_fit_details(entry, profile, candidate, candidate_analysis=candidate_analysis)
         if int(fit_details.get("score") or 0) > int(best.get("score") or 0):
             best = fit_details
     return best
@@ -1729,7 +2232,8 @@ def _annotate_existing_theme_suggestions(
     profile: dict[str, object],
     candidate: dict[str, object],
 ) -> list[dict[str, object]]:
-    by_id = {int(item["theme_id"]): item for item in catalog}
+    candidate_analysis = _candidate_analysis(profile, candidate)
+    by_id = {int(item["theme_id"]): item for item in _preprocessed_catalog(catalog)}
     annotated: list[dict[str, object]] = []
     for suggestion in list(suggestions or []):
         try:
@@ -1739,7 +2243,7 @@ def _annotate_existing_theme_suggestions(
         entry = by_id.get(theme_id)
         if entry is None:
             continue
-        fit_details = _theme_fit_details(entry, profile, candidate)
+        fit_details = _theme_fit_details(entry, profile, candidate, candidate_analysis=candidate_analysis)
         annotated.append(_annotate_suggestion_fit(suggestion, fit_details))
     return _truncate_existing_theme_suggestions(annotated)
 
@@ -1762,6 +2266,7 @@ def _prioritize_operating_role_suggestions(
                 }
             ),
             item.get("fit_label") == "broad_fit",
+            -int(item.get("_match_score") or 0),
             str(item.get("theme_name") or ""),
         ),
     )
@@ -2009,11 +2514,59 @@ def _normalize_ai_theme_suggestions(raw_items: object, catalog: list[dict[str, o
 
 
 def _ai_research_draft(candidate: dict[str, object], catalog: list[dict[str, object]], profile: dict[str, object]) -> dict[str, object]:
+    return _ai_research_draft_for_strategy(candidate, catalog, profile, strategy="legacy_direct_match")
+
+
+def _baseline_research_draft_for_strategy(
+    candidate: dict[str, object],
+    catalog: list[dict[str, object]],
+    profile: dict[str, object],
+    *,
+    strategy: str,
+) -> dict[str, object]:
+    normalized_strategy = _normalize_research_strategy(strategy)
+    baseline_start = _now_perf()
+    if normalized_strategy == "description_theme_generation":
+        draft = _description_theme_generation_draft(candidate, catalog, profile)
+        timing = dict(draft.get("research_timing_summary") or {})
+        timing["baseline_total_ms"] = _elapsed_ms(baseline_start)
+        draft["research_timing_summary"] = timing
+        return draft
+    draft = _heuristic_research_draft(candidate, catalog, profile)
+    draft["theme_generation_strategy"] = "legacy_direct_match"
+    draft["domain_anchor"] = _domain_anchor(profile, candidate)
+    draft["dominant_business_role"] = _dominant_economic_role(profile, candidate) or "unclear"
+    draft["candidate_theme_ideas"] = []
+    draft["matched_theme_candidates"] = []
+    draft["research_timing_summary"] = {
+        "strategy": "legacy_direct_match",
+        "baseline_total_ms": _elapsed_ms(baseline_start),
+    }
+    return draft
+
+
+def _ai_research_draft_for_strategy(
+    candidate: dict[str, object],
+    catalog: list[dict[str, object]],
+    profile: dict[str, object],
+    *,
+    strategy: str,
+) -> dict[str, object]:
+    ai_total_start = _now_perf()
     api_key = openai_api_key()
     if not api_key:
         raise ValueError(f"{OPENAI_API_KEY_ENV} is not set.")
-    heuristic_baseline = _heuristic_research_draft(candidate, catalog, profile)
-    filtered_catalog, context_meta = _prefilter_ai_theme_catalog(candidate, catalog, profile)
+    baseline_start = _now_perf()
+    heuristic_baseline = _baseline_research_draft_for_strategy(candidate, catalog, profile, strategy=strategy)
+    baseline_ms = _elapsed_ms(baseline_start)
+    prefilter_start = _now_perf()
+    filtered_catalog, context_meta = _prefilter_ai_theme_catalog(
+        candidate,
+        catalog,
+        profile,
+        max_themes=8 if _normalize_research_strategy(strategy) == "description_theme_generation" else 12,
+    )
+    prefilter_ms = _elapsed_ms(prefilter_start)
     context = {
         "candidate": candidate,
         "company_profile": profile,
@@ -2023,11 +2576,23 @@ def _ai_research_draft(candidate: dict[str, object], catalog: list[dict[str, obj
             "possible_new_theme": heuristic_baseline.get("possible_new_theme"),
             "recommended_action": heuristic_baseline.get("recommended_action"),
             "rationale_summary": heuristic_baseline.get("rationale"),
+            "domain_anchor": heuristic_baseline.get("domain_anchor"),
+            "dominant_business_role": heuristic_baseline.get("dominant_business_role"),
+            "candidate_theme_ideas": list(heuristic_baseline.get("candidate_theme_ideas") or [])[:5],
+            "matched_theme_candidates": list(heuristic_baseline.get("matched_theme_candidates") or [])[:5],
         },
     }
     context_meta["estimated_context_chars"] = _estimate_context_size_chars(context)
-    raw = _call_openai_research(api_key, context)
+    request_start = _now_perf()
+    raw = _call_openai_research(
+        api_key,
+        context,
+        max_output_tokens=400 if _normalize_research_strategy(strategy) == "description_theme_generation" else 550,
+    )
+    ai_request_ms = _elapsed_ms(request_start)
+    normalize_start = _now_perf()
     suggested_existing = _normalize_ai_theme_suggestions(raw.get("suggested_existing_themes"), catalog)
+    ai_normalize_ms = _elapsed_ms(normalize_start)
     ai_draft = {
         "ticker": candidate["ticker"],
         "company_name": _normalize_text(raw.get("company_name")) or _normalize_text(profile.get("company_name")) or candidate["ticker"],
@@ -2041,28 +2606,59 @@ def _ai_research_draft(candidate: dict[str, object], catalog: list[dict[str, obj
         "recommended_action": _normalize_action(raw.get("recommended_action"), "watch_only"),
         "research_context_meta": context_meta,
     }
+    merge_start = _now_perf()
     draft = _merge_ai_with_heuristic_draft(ai_draft, heuristic_baseline, catalog, profile, candidate)
+    merge_ms = _elapsed_ms(merge_start)
     draft["research_context_meta"] = context_meta
+    draft["theme_generation_strategy"] = _normalize_research_strategy(strategy)
+    draft["domain_anchor"] = heuristic_baseline.get("domain_anchor") or _domain_anchor(profile, candidate)
+    draft["dominant_business_role"] = heuristic_baseline.get("dominant_business_role") or (_dominant_economic_role(profile, candidate) or "unclear")
+    draft["candidate_theme_ideas"] = list(heuristic_baseline.get("candidate_theme_ideas") or [])
+    draft["matched_theme_candidates"] = list(heuristic_baseline.get("matched_theme_candidates") or [])
+    timing = dict(heuristic_baseline.get("research_timing_summary") or {})
+    timing.update(
+        {
+            "baseline_total_ms": baseline_ms,
+            "catalog_prefilter_ms": prefilter_ms,
+            "ai_request_ms": ai_request_ms,
+            "ai_normalize_ms": ai_normalize_ms,
+            "merge_ms": merge_ms,
+            "model_attempts": 1,
+            "strategy_total_ms": _elapsed_ms(ai_total_start),
+        }
+    )
+    draft["research_timing_summary"] = timing
     if not draft["suggested_existing_themes"] and not draft["possible_new_theme"]:
         draft["caveats"] = list(draft.get("caveats") or [])
         draft["caveats"].append("AI did not find a strong grounded theme fit in the current governed catalog.")
     return draft
 
 
-def generate_scanner_research_draft(conn, ticker: str) -> dict[str, object]:
+def generate_scanner_research_draft(conn, ticker: str, *, strategy: str = "legacy_direct_match") -> dict[str, object]:
+    total_start = _now_perf()
+    candidate_start = _now_perf()
     candidate = _candidate_context(conn, ticker)
+    candidate_ms = _elapsed_ms(candidate_start)
+    catalog_start = _now_perf()
     catalog = theme_catalog_context(conn)
+    catalog_ms = _elapsed_ms(catalog_start)
+    preprocess_start = _now_perf()
+    preprocessed_catalog = _preprocessed_catalog(catalog)
+    catalog_preprocess_ms = _elapsed_ms(preprocess_start)
+    profile_start = _now_perf()
     profile = _load_company_profile_with_cache(candidate["ticker"])
+    profile_ms = _elapsed_ms(profile_start)
     generated_at = datetime.now(UTC).replace(tzinfo=None).isoformat(sep=" ")
+    normalized_strategy = _normalize_research_strategy(strategy)
 
     research_mode = "heuristic_fallback"
     fallback_reason = None
     research_error = None
     try:
-        draft = _ai_research_draft(candidate, catalog, profile)
+        draft = _ai_research_draft_for_strategy(candidate, preprocessed_catalog, profile, strategy=normalized_strategy)
         research_mode = "openai"
     except Exception as exc:
-        draft = _heuristic_research_draft(candidate, catalog, profile)
+        draft = _baseline_research_draft_for_strategy(candidate, preprocessed_catalog, profile, strategy=normalized_strategy)
         research_error = _extract_openai_error_details(exc)
         fallback_reason = _format_openai_error_summary(research_error)
 
@@ -2070,6 +2666,18 @@ def generate_scanner_research_draft(conn, ticker: str) -> dict[str, object]:
     draft["generated_at"] = generated_at
     draft["source"] = "scanner_audit"
     draft["research_mode"] = research_mode
+    draft["theme_generation_strategy"] = normalized_strategy
+    timing = dict(draft.get("research_timing_summary") or {})
+    timing.update(
+        {
+            "candidate_context_ms": candidate_ms,
+            "catalog_query_ms": catalog_ms,
+            "catalog_preprocess_ms": catalog_preprocess_ms,
+            "profile_lookup_ms": profile_ms,
+            "total_ms": _elapsed_ms(total_start),
+        }
+    )
+    draft["research_timing_summary"] = timing
     if fallback_reason:
         draft["fallback_reason"] = fallback_reason
     if research_error:
@@ -2083,12 +2691,15 @@ def get_or_create_scanner_research_draft(
     existing_draft: dict[str, object] | None = None,
     *,
     force_refresh: bool = False,
+    strategy: str = "legacy_direct_match",
 ) -> tuple[dict[str, object], bool]:
     normalized_ticker = str(ticker or "").strip().upper()
+    normalized_strategy = _normalize_research_strategy(strategy)
     if (
         not force_refresh
         and isinstance(existing_draft, dict)
         and str(existing_draft.get("ticker") or "").strip().upper() == normalized_ticker
+        and _normalize_research_strategy(existing_draft.get("theme_generation_strategy")) == normalized_strategy
     ):
         return existing_draft, True
-    return generate_scanner_research_draft(conn, normalized_ticker), False
+    return generate_scanner_research_draft(conn, normalized_ticker, strategy=normalized_strategy), False
