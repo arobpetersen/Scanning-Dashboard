@@ -2395,6 +2395,40 @@ class TestDescriptionFirstResearchRefinements(unittest.TestCase):
         self.assertFalse(draft["suggested_existing_themes"])
         self.assertIn("Digital Asset Market Infrastructure", draft["validation_debug"]["business_descriptors"])
 
+    def test_description_first_plain_language_business_descriptors_stay_intuitive_across_business_types(self):
+        cases = [
+            (
+                {
+                    "company_name": "Photon Link",
+                    "description": "Designs optical modules and fiber-optic networking products for high-speed data links.",
+                    "sic_description": "Networking components",
+                },
+                "Optical Interconnects",
+            ),
+            (
+                {
+                    "company_name": "Atlas Exchange Infra",
+                    "description": "Provides digital asset exchange infrastructure, institutional crypto custody, and market infrastructure software for trading venues.",
+                    "sic_description": "Financial software",
+                },
+                "Digital Asset Market Infrastructure",
+            ),
+            (
+                {
+                    "company_name": "Frontier Basin Energy",
+                    "description": "Acquires, explores, develops, and produces oil and natural gas assets with operated interests, reserves, wells, and acreage in onshore basins.",
+                    "sic_description": "Oil and gas exploration and production",
+                },
+                "Oil & Gas Exploration & Production",
+            ),
+        ]
+
+        for profile, expected_descriptor in cases:
+            draft = _description_theme_generation_draft(self._candidate(), [], profile)
+            descriptors = list(draft["validation_debug"]["business_descriptors"])
+            self.assertLessEqual(len(descriptors), 3)
+            self.assertIn(expected_descriptor, descriptors)
+
     def test_description_first_stablecoin_infrastructure_beats_generic_payments_as_primary_descriptor(self):
         profile = {
             "company_name": "Ledger Dollar Network",
@@ -2469,6 +2503,91 @@ class TestDescriptionFirstResearchRefinements(unittest.TestCase):
             {"Stablecoins / Digital Assets Infrastructure", "Blockchain Payments", "Crypto Payments Infrastructure"}
             & set(draft["validation_debug"]["business_descriptors"])
         )
+
+    def test_description_first_connected_operations_platform_synthesizes_from_asset_and_fleet_software_language(self):
+        profile = {
+            "company_name": "FleetMesh",
+            "description": "Provides a software platform for connected assets, fleet vehicles, equipment monitoring, operations workflow data, and telematics integrations with third-party systems.",
+            "sic_description": "Industrial software platform",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["possible_new_theme"], "IoT / Connected Operations Platform")
+        self.assertIn("IoT / Connected Operations Platform", draft["validation_debug"]["business_descriptors"])
+
+    def test_description_first_connected_operations_platform_outranks_cloud_and_device_fragments(self):
+        profile = {
+            "company_name": "OpsGrid",
+            "description": "Builds a software platform for connected assets, vehicles, fleet operations, telematics, equipment monitoring, and workflow data across physical operations.",
+            "sic_description": "Connected operations software",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["candidate_theme_ideas"][0], "IoT / Connected Operations Platform")
+        self.assertNotIn("Enterprise Software Tooling", draft["candidate_theme_ideas"][:2])
+        self.assertNotIn("Connected Devices", draft["candidate_theme_ideas"][:2])
+
+    def test_description_first_connected_operations_platform_beats_cloud_software_as_primary_fit(self):
+        profile = {
+            "company_name": "OpsGrid",
+            "description": "Builds a software platform for connected assets, fleets, vehicle telematics, equipment monitoring, and workflow data across field operations.",
+            "sic_description": "Industrial IoT software",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Cloud Software",
+                "Software",
+                "Cloud software platforms, workflow tooling, and enterprise observability applications.",
+                ["DDOG"],
+            ),
+            self._theme(
+                2,
+                "Industrial IoT Platforms",
+                "Industrial Software",
+                "Industrial IoT software platforms for connected assets, telematics, fleet operations, and equipment monitoring.",
+                ["SAMS"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        if draft["suggested_existing_themes"]:
+            self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Industrial IoT Platforms")
+        else:
+            self.assertEqual(draft["possible_new_theme"], "IoT / Connected Operations Platform")
+        self.assertFalse(any(item["theme_name"] == "Cloud Software" and item["fit_label"] == "direct_fit" for item in draft["suggested_existing_themes"]))
+
+    def test_description_first_connected_operations_platform_suppresses_unrelated_geography_and_apparel_noise(self):
+        profile = {
+            "company_name": "OpsGrid",
+            "description": "Builds a software platform for connected assets, fleets, vehicle telematics, equipment monitoring, and workflow data across field operations.",
+            "sic_description": "Industrial IoT software",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "European Apparel",
+                "Consumer",
+                "European apparel brands, premium fashion labels, and luxury retail.",
+                ["N/A"],
+            ),
+            self._theme(
+                2,
+                "Asia Luxury",
+                "Consumer",
+                "Asian luxury demand, premium retail, apparel, and fashion houses.",
+                ["N/A"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertFalse(draft["suggested_existing_themes"])
+        self.assertEqual(draft["possible_new_theme"], "IoT / Connected Operations Platform")
+        self.assertTrue(all(not item["actionable"] for item in draft["validation_debug"]["evaluated_matches"]))
 
     def test_description_first_upstream_ep_beats_lng_and_energy_transition_drift(self):
         profile = {
@@ -2592,6 +2711,10 @@ class TestDescriptionFirstResearchRefinements(unittest.TestCase):
         self.assertEqual(draft["recommended_action"], "consider_new_theme")
         self.assertFalse(draft["suggested_existing_themes"])
         self.assertTrue({"Software-Defined Radio", "Autonomous Systems", "Wireless Communications Infrastructure"} & set(draft["candidate_theme_ideas"]))
+        self.assertGreaterEqual(
+            len({"Software-Defined Radio", "Autonomous Systems", "Wireless Communications Infrastructure"} & set(draft["validation_debug"]["business_descriptors"])),
+            2,
+        )
 
     def test_description_first_generic_manufacturing_language_alone_does_not_unlock_materials(self):
         profile = {
@@ -3931,6 +4054,78 @@ class TestThemeSeedBackfill(unittest.TestCase):
         members_again = conn.execute("select t.name, m.ticker from theme_membership m join themes t on t.id=m.theme_id order by t.name, m.ticker").fetchall()
         self.assertEqual(members_again, members)
         conn.close()
+
+    @patch("src.theme_service.load_seed_file")
+    def test_seed_if_needed_recovers_with_bootstrap_connection_when_shared_connection_has_bad_result_state(self, mock_load_seed):
+        mock_load_seed.return_value = [
+            {"name": "AI", "category": "Tech", "tickers": ["NVDA"]},
+        ]
+
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create sequence if not exists themes_id_seq")
+        bootstrap_conn.execute("create table themes(id bigint primary key default nextval('themes_id_seq'), name varchar unique, category varchar, is_active boolean default true, created_at timestamp default current_timestamp, updated_at timestamp default current_timestamp)")
+        bootstrap_conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+
+        class BadResultConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InvalidInputException("Invalid Input Error: No open result set")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            changed = seed_if_needed(BadResultConn())
+
+        seeded = bootstrap_conn.execute("select name, category from themes").fetchall()
+        members = bootstrap_conn.execute("select ticker from theme_membership").fetchall()
+
+        self.assertTrue(changed)
+        self.assertEqual(seeded, [("AI", "Tech")])
+        self.assertEqual(members, [("NVDA",)])
+        bootstrap_conn.close()
+
+    @patch("src.theme_service.load_seed_file")
+    def test_seed_if_needed_uses_isolated_recovery_path_without_regressing_seed_semantics(self, mock_load_seed):
+        mock_load_seed.return_value = [
+            {"name": "Energy", "category": "Macro", "tickers": ["XOM"]},
+        ]
+
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create sequence if not exists themes_id_seq")
+        bootstrap_conn.execute("create table themes(id bigint primary key default nextval('themes_id_seq'), name varchar unique, category varchar, is_active boolean default true, created_at timestamp default current_timestamp, updated_at timestamp default current_timestamp)")
+        bootstrap_conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+
+        class FlakyResultConn:
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, sql, params=None):
+                self.calls += 1
+                raise duckdb.InvalidInputException("Invalid Input Error: No open result set")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        flaky = FlakyResultConn()
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            first = seed_if_needed(flaky)
+            second = seed_if_needed(flaky)
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(
+            bootstrap_conn.execute("select name, ticker from themes t join theme_membership m on t.id = m.theme_id").fetchall(),
+            [("Energy", "XOM")],
+        )
+        bootstrap_conn.close()
 
 
 if __name__ == "__main__":

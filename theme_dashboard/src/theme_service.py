@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import duckdb
 import pandas as pd
 
 from .config import SEED_PATH
@@ -26,7 +27,19 @@ def _normalize_ticker(ticker: str) -> str:
     return value
 
 
-def seed_if_needed(conn) -> bool:
+def _is_duckdb_result_state_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return any(
+        token in message
+        for token in {
+            "no open result set",
+            "closed pending query result",
+            "unsuccessful or closed pending query result",
+        }
+    )
+
+
+def _seed_if_needed_core(conn) -> bool:
     """Idempotent seed/backfill.
 
     Seeds themes and membership when DB is empty, and also backfills membership if themes
@@ -112,6 +125,18 @@ def seed_if_needed(conn) -> bool:
         raise
 
     return changed
+
+
+def seed_if_needed(conn) -> bool:
+    try:
+        return _seed_if_needed_core(conn)
+    except duckdb.InvalidInputException as exc:
+        if not _is_duckdb_result_state_error(exc):
+            raise
+        from .database import get_bootstrap_conn
+
+        with get_bootstrap_conn() as bootstrap_conn:
+            return _seed_if_needed_core(bootstrap_conn)
 
 
 def list_themes(conn, active_only: bool = False) -> pd.DataFrame:
