@@ -5,7 +5,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from .database import DB_PATH, DatabaseLockedError, database_path_str, get_conn
+from .database import DB_PATH, DatabaseLockedError, database_path_str, get_conn, get_fresh_read_conn
 from .inflection_engine import compute_theme_inflections
 from .momentum_engine import compute_theme_momentum
 from .queries import theme_health_overview
@@ -163,7 +163,7 @@ def load_theme_rankings_cached(db_token: tuple[str, int]):
 
 @st.cache_data(show_spinner=False)
 def _load_theme_momentum_cached(_db_token: tuple[str, int], lookback_days: int, top_n: int):
-    with get_conn() as conn:
+    with get_fresh_read_conn() as conn:
         return compute_theme_momentum(conn, int(lookback_days), top_n=int(top_n))
 
 
@@ -173,7 +173,7 @@ def load_theme_momentum_cached(db_token: tuple[str, int], lookback_days: int, to
 
 @st.cache_data(show_spinner=False)
 def _load_theme_inflections_cached(_db_token: tuple[str, int], lookback_days: int, top_n: int):
-    with get_conn() as conn:
+    with get_fresh_read_conn() as conn:
         return compute_theme_inflections(conn, int(lookback_days), top_n=int(top_n))
 
 

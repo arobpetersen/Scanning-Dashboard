@@ -5,6 +5,13 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
+import streamlit as st
+
+try:
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+except Exception:
+    def get_script_run_ctx():
+        return None
 
 from .config import DB_PATH
 
@@ -57,6 +64,52 @@ def _best_effort_init_update(conn, sql: str, params: list[object] | None = None)
             return False
         raise
 
+
+def _connect_with_retry(db_path: str):
+    conn = None
+    last_exc: Exception | None = None
+    for attempt in range(DB_CONNECT_RETRY_ATTEMPTS):
+        try:
+            conn = duckdb.connect(db_path)
+            break
+        except duckdb.IOException as exc:
+            if not _is_lock_error(exc):
+                raise
+            last_exc = exc
+            if attempt + 1 < DB_CONNECT_RETRY_ATTEMPTS:
+                time.sleep(DB_CONNECT_RETRY_SLEEP_SECONDS)
+                continue
+            raise DatabaseLockedError(_database_locked_message(db_path)) from exc
+    if conn is None:
+        raise DatabaseLockedError(_database_locked_message(db_path)) from last_exc
+    return conn
+
+
+def _connection_is_usable(conn) -> bool:
+    try:
+        conn.execute("SELECT 1")
+        return True
+    except duckdb.ConnectionException:
+        return False
+
+
+def _has_streamlit_script_run_context() -> bool:
+    return get_script_run_ctx() is not None
+
+
+@st.cache_resource(show_spinner=False)
+def get_db_connection(db_path: str):
+    return _connect_with_retry(db_path)
+
+
+@contextmanager
+def get_fresh_read_conn():
+    conn = _connect_with_retry(database_path_str())
+    try:
+        yield conn
+    finally:
+        conn.close()
+
 SCHEMA_SQL = """
 CREATE SEQUENCE IF NOT EXISTS themes_id_seq;
 CREATE SEQUENCE IF NOT EXISTS snapshots_id_seq;
@@ -65,6 +118,7 @@ CREATE SEQUENCE IF NOT EXISTS suggestion_id_seq;
 CREATE SEQUENCE IF NOT EXISTS historical_reconstruction_run_id_seq;
 CREATE SEQUENCE IF NOT EXISTS scanner_import_run_id_seq;
 CREATE SEQUENCE IF NOT EXISTS scanner_hit_id_seq;
+CREATE SEQUENCE IF NOT EXISTS scanner_research_review_id_seq;
 
 CREATE TABLE IF NOT EXISTS themes (
     id BIGINT PRIMARY KEY DEFAULT nextval('themes_id_seq'),
@@ -233,6 +287,7 @@ CREATE TABLE IF NOT EXISTS theme_suggestions (
     source VARCHAR NOT NULL,
     rationale VARCHAR,
     proposed_theme_name VARCHAR,
+    proposed_theme_category VARCHAR,
     proposed_ticker VARCHAR,
     existing_theme_id BIGINT,
     proposed_target_theme_id BIGINT,
@@ -324,6 +379,31 @@ CREATE TABLE IF NOT EXISTS scanner_candidate_review_state (
     CHECK (review_state IN ('active','ignored','reviewed'))
 );
 
+CREATE TABLE IF NOT EXISTS scanner_research_reviews (
+    review_id BIGINT PRIMARY KEY DEFAULT nextval('scanner_research_review_id_seq'),
+    ticker VARCHAR NOT NULL,
+    generated_at TIMESTAMP NOT NULL,
+    theme_generation_strategy VARCHAR NOT NULL,
+    research_mode VARCHAR,
+    outcome_class VARCHAR NOT NULL,
+    reviewer_notes VARCHAR,
+    recommended_action VARCHAR,
+    confidence VARCHAR,
+    possible_new_theme VARCHAR,
+    draft_context_json VARCHAR,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (ticker, generated_at, theme_generation_strategy),
+    CHECK (length(trim(ticker)) > 0),
+    CHECK (outcome_class IN (
+        'direct_fit_correct',
+        'adjacent_fit_acceptable',
+        'should_have_been_tentative',
+        'false_positive',
+        'missed_obvious_theme'
+    ))
+);
+
 CREATE TABLE IF NOT EXISTS symbol_refresh_status (
     ticker VARCHAR PRIMARY KEY,
     status VARCHAR NOT NULL DEFAULT 'active',
@@ -372,28 +452,22 @@ CREATE INDEX IF NOT EXISTS idx_scanner_hit_history_ticker ON scanner_hit_history
 CREATE INDEX IF NOT EXISTS idx_scanner_hit_history_observed_date ON scanner_hit_history(observed_date);
 CREATE INDEX IF NOT EXISTS idx_scanner_hit_history_scanner_name ON scanner_hit_history(scanner_name);
 CREATE INDEX IF NOT EXISTS idx_scanner_candidate_review_state_state ON scanner_candidate_review_state(review_state);
+CREATE INDEX IF NOT EXISTS idx_scanner_research_reviews_outcome ON scanner_research_reviews(outcome_class);
+CREATE INDEX IF NOT EXISTS idx_scanner_research_reviews_generated_at ON scanner_research_reviews(generated_at);
 """
 
 
 @contextmanager
 def get_conn():
     db_path = database_path_str()
-    conn = None
-    last_exc: Exception | None = None
-    for attempt in range(DB_CONNECT_RETRY_ATTEMPTS):
-        try:
-            conn = duckdb.connect(db_path)
-            break
-        except duckdb.IOException as exc:
-            if not _is_lock_error(exc):
-                raise
-            last_exc = exc
-            if attempt + 1 < DB_CONNECT_RETRY_ATTEMPTS:
-                time.sleep(DB_CONNECT_RETRY_SLEEP_SECONDS)
-                continue
-            raise DatabaseLockedError(_database_locked_message(db_path)) from exc
-    if conn is None:
-        raise DatabaseLockedError(_database_locked_message(db_path)) from last_exc
+    if _has_streamlit_script_run_context():
+        conn = get_db_connection(db_path)
+        if not _connection_is_usable(conn):
+            get_db_connection.clear()
+            conn = get_db_connection(db_path)
+        yield conn
+        return
+    conn = _connect_with_retry(db_path)
     try:
         yield conn
     finally:
@@ -412,6 +486,7 @@ def _rebuild_theme_suggestions(conn) -> None:
             source VARCHAR NOT NULL,
             rationale VARCHAR,
             proposed_theme_name VARCHAR,
+            proposed_theme_category VARCHAR,
             proposed_ticker VARCHAR,
             existing_theme_id BIGINT,
             proposed_target_theme_id BIGINT,
@@ -436,11 +511,11 @@ def _rebuild_theme_suggestions(conn) -> None:
         """
         INSERT INTO theme_suggestions_migrated(
             suggestion_id, suggestion_type, status, created_at, reviewed_at, source,
-            rationale, proposed_theme_name, proposed_ticker, existing_theme_id,
+            rationale, proposed_theme_name, proposed_theme_category, proposed_ticker, existing_theme_id,
             proposed_target_theme_id, reviewer_notes, priority, source_context_json, source_updated_at
         )
         SELECT suggestion_id, suggestion_type, status, created_at, reviewed_at, source,
-               rationale, proposed_theme_name, proposed_ticker, existing_theme_id,
+               rationale, proposed_theme_name, NULL, proposed_ticker, existing_theme_id,
                proposed_target_theme_id, reviewer_notes, COALESCE(priority, 'medium'),
                NULL, NULL
         FROM theme_suggestions
@@ -481,6 +556,7 @@ def init_db() -> None:
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS source_context_json VARCHAR")
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS source_updated_at TIMESTAMP")
+        conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS proposed_theme_category VARCHAR")
         conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
         conn.execute("ALTER TABLE theme_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
         conn.execute("ALTER TABLE historical_reconstruction_runs ADD COLUMN IF NOT EXISTS ticker_history_rows_written BIGINT DEFAULT 0")
@@ -490,6 +566,36 @@ def init_db() -> None:
         conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS scanner_name_basis VARCHAR DEFAULT 'file_column'")
         conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS observed_date_inferred BOOLEAN DEFAULT FALSE")
         conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS observed_date_basis VARCHAR DEFAULT 'file_column'")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scanner_research_reviews (
+                review_id BIGINT PRIMARY KEY DEFAULT nextval('scanner_research_review_id_seq'),
+                ticker VARCHAR NOT NULL,
+                generated_at TIMESTAMP NOT NULL,
+                theme_generation_strategy VARCHAR NOT NULL,
+                research_mode VARCHAR,
+                outcome_class VARCHAR NOT NULL,
+                reviewer_notes VARCHAR,
+                recommended_action VARCHAR,
+                confidence VARCHAR,
+                possible_new_theme VARCHAR,
+                draft_context_json VARCHAR,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (ticker, generated_at, theme_generation_strategy),
+                CHECK (length(trim(ticker)) > 0),
+                CHECK (outcome_class IN (
+                    'direct_fit_correct',
+                    'adjacent_fit_acceptable',
+                    'should_have_been_tentative',
+                    'false_positive',
+                    'missed_obvious_theme'
+                ))
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_scanner_research_reviews_outcome ON scanner_research_reviews(outcome_class)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_scanner_research_reviews_generated_at ON scanner_research_reviews(generated_at)")
         conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS history_row_count BIGINT DEFAULT 0")
         conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS history_target_days BIGINT DEFAULT 30")
         conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS history_market_data_source VARCHAR")

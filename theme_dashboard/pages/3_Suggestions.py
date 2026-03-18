@@ -1,5 +1,7 @@
 import streamlit as st
 
+import html
+
 from src.ai_proposals import generate_ai_suggestions, sanitize_context
 from src.config import (
     AI_MAX_PROPOSALS,
@@ -20,14 +22,25 @@ from src.scanner_audit import (
     scanner_import_overview,
     set_scanner_candidate_review_state,
 )
-from src.scanner_research import get_or_create_scanner_research_draft
+from src.scanner_research import (
+    get_or_create_scanner_research_draft,
+    get_scanner_research_review,
+    save_scanner_research_review,
+    scanner_research_review_summary,
+)
 from src.suggestions_page_state import (
+    apply_generated_theme_idea_checkbox_selection,
     build_scanner_research_debug_entry,
+    finalize_possible_new_theme_category_state,
     finalize_possible_new_theme_state,
+    join_possible_new_theme_ideas,
     normalize_theme_id_list,
+    prepare_possible_new_theme_category_prefill,
     prepare_possible_new_theme_prefill,
     resolve_active_suggestions_tab,
     resolve_scanner_audit_ticker,
+    split_possible_new_theme_ideas,
+    sync_generated_theme_idea_checkbox_state,
     split_selected_existing_theme_ids,
     sync_suggested_theme_checkbox_state,
 )
@@ -106,11 +119,12 @@ def _render_ticker_membership_context(row) -> None:
 def _render_structured_review_context(row) -> None:
     selected_existing = str(row.get("selected_existing_theme_names") or "").strip()
     custom_new = str(row.get("custom_new_theme_names") or "").strip()
+    proposed_category = str(row.get("proposed_new_theme_category") or row.get("proposed_theme_category") or "").strip()
     promotion_note = str(row.get("promotion_note") or "").strip()
     scanner_recommendation = str(row.get("scanner_audit_recommendation") or "").strip()
     scanner_reason = str(row.get("scanner_audit_reason") or "").strip()
     research_summary = str(row.get("research_summary") or "").strip()
-    if not any([selected_existing, custom_new, promotion_note, scanner_recommendation, research_summary]):
+    if not any([selected_existing, custom_new, proposed_category, promotion_note, scanner_recommendation, research_summary]):
         return
 
     with st.container(border=True):
@@ -119,6 +133,8 @@ def _render_structured_review_context(row) -> None:
             st.write(f"Selected existing themes: `{selected_existing}`")
         if custom_new:
             st.write(f"Custom new themes: `{custom_new}`")
+        if proposed_category:
+            st.write(f"Proposed category: `{proposed_category}`")
         if promotion_note:
             st.write(f"Promotion note: {promotion_note}")
         if scanner_recommendation or scanner_reason:
@@ -144,6 +160,58 @@ def _sync_selected_existing_from_suggested_checkbox(
     else:
         selected_existing = [value for value in selected_existing if value != theme_id]
     st.session_state[selected_existing_key] = normalize_theme_id_list(selected_existing, valid_ids)
+
+
+def _sync_possible_new_theme_from_generated_checkboxes(
+    custom_new_key: str,
+    custom_new_state_key: str,
+    generated_ideas: list[str],
+    checkbox_keys: dict[str, str],
+) -> None:
+    checked_generated = [
+        idea
+        for idea in generated_ideas
+        if bool(st.session_state.get(checkbox_keys.get(idea, ""), False))
+    ]
+    updated_value, updated_state = apply_generated_theme_idea_checkbox_selection(
+        st.session_state.get(custom_new_key),
+        checked_generated,
+        generated_ideas,
+        st.session_state.get(custom_new_state_key),
+    )
+    st.session_state[custom_new_key] = updated_value
+    st.session_state[custom_new_state_key] = updated_state
+
+
+def _render_compact_checkbox_content_row(
+    checkbox_key: str,
+    *,
+    checkbox_label: str,
+    title: str,
+    detail: str = "",
+    on_change=None,
+    args: tuple = (),
+) -> None:
+    checkbox_col, content_col, spacer_col = st.columns([0.03, 0.32, 0.65], gap="small", vertical_alignment="top")
+    with checkbox_col:
+        st.checkbox(
+            checkbox_label,
+            key=checkbox_key,
+            label_visibility="collapsed",
+            on_change=on_change,
+            args=args,
+        )
+    with content_col:
+        title_html = f"<div class='scanner-checkbox-row-title'>{html.escape(str(title or ''))}</div>"
+        detail_html = ""
+        if detail:
+            detail_html = f"<div class='scanner-checkbox-row-detail'>{html.escape(str(detail))}</div>"
+        st.markdown(
+            f"<div class='scanner-checkbox-row'><div class='scanner-checkbox-row-content scanner-checkbox-text'>{title_html}{detail_html}</div></div>",
+            unsafe_allow_html=True,
+        )
+    with spacer_col:
+        st.empty()
 
 try:
     init_db()
@@ -705,156 +773,57 @@ if active_suggestions_tab == "Scanner Audit":
                     f"recommended_action=`{existing_draft.get('recommended_action') or 'watch_only'}` | "
                     f"confidence=`{existing_draft.get('confidence') or 'low'}`"
                 )
-                st.caption(meta_caption)
+                review_gutter_col, review_shell_col, review_tail_col = st.columns([0.015, 0.935, 0.05], gap="small")
+                with review_shell_col:
+                    st.caption(meta_caption)
+                    main_review_col, side_review_col = st.columns([0.76, 0.24], gap="large")
                 debug_entry = debug_store.get(selected_audit_ticker) or {}
-                if debug_entry:
-                    st.caption(
-                        "Debug: "
-                        f"ticker=`{debug_entry.get('ticker') or selected_audit_ticker}` | "
-                        f"generated_at=`{debug_entry.get('generated_at') or existing_draft.get('generated_at') or 'n/a'}` | "
-                        f"mode=`{debug_entry.get('research_mode') or research_mode}` | "
-                        f"draft_source=`{debug_entry.get('draft_source') or existing_draft.get('draft_source') or 'reused_session_draft'}` | "
-                        f"strategy=`{debug_entry.get('theme_generation_strategy') or existing_draft.get('theme_generation_strategy') or selected_strategy}` | "
-                        f"domain=`{debug_entry.get('domain_anchor') or existing_draft.get('domain_anchor') or 'unclear'}` | "
-                        f"dominant_role=`{debug_entry.get('dominant_business_role') or existing_draft.get('dominant_business_role') or 'unclear'}`"
-                    )
-                if existing_draft.get("candidate_theme_ideas"):
-                    st.caption("Theme ideas: " + ", ".join(existing_draft.get("candidate_theme_ideas") or []))
-                if existing_draft.get("matched_theme_candidates"):
-                    st.caption(
-                        "Matched candidates: "
-                        + "; ".join(
-                            f"{item.get('idea')} -> {item.get('theme_name')} [{item.get('fit_label')}]"
-                            for item in (existing_draft.get("matched_theme_candidates") or [])[:3]
-                        )
-                    )
                 timing_summary = existing_draft.get("research_timing_summary") or {}
-                if timing_summary:
-                    timing_parts = []
-                    for key in [
-                        "candidate_context_ms",
-                        "catalog_query_ms",
-                        "catalog_preprocess_ms",
-                        "profile_lookup_ms",
-                        "domain_anchor_ms",
-                        "dominant_business_role_ms",
-                        "candidate_theme_ideas_ms",
-                        "governed_theme_matching_ms",
-                        "catalog_prefilter_ms",
-                        "ai_request_ms",
-                        "merge_ms",
-                        "total_ms",
-                    ]:
-                        if key in timing_summary:
-                            timing_parts.append(f"{key}=`{timing_summary.get(key)}`")
-                    if timing_parts:
-                        st.caption("Timing: " + " | ".join(timing_parts))
                 decision_trace = existing_draft.get("research_decision_trace") or {}
-                if decision_trace:
-                    st.caption(
-                        "Decision: "
-                        f"candidate_new_theme=`{decision_trace.get('candidate_new_theme') or 'None'}` | "
-                        f"roles=`{', '.join(decision_trace.get('candidate_roles_detected') or []) or 'none'}` | "
-                        f"adjacent_only_existing=`{decision_trace.get('adjacency_only_existing_fit')}` | "
-                        f"heuristic_prefers_new=`{decision_trace.get('heuristic_prefers_new_theme')}` | "
-                        f"should_promote_new=`{decision_trace.get('should_promote_new_theme')}`"
-                    )
+                validation_debug = existing_draft.get("validation_debug") or {}
                 context_meta = existing_draft.get("research_context_meta") or {}
-                if context_meta:
-                    st.caption(
-                        "Context: "
-                        f"themes_sent=`{context_meta.get('filtered_theme_count')}` / "
-                        f"catalog_total=`{context_meta.get('full_catalog_theme_count')}` | "
-                        f"prefiltered=`{context_meta.get('catalog_was_prefiltered')}` | "
-                        f"estimated_chars=`{context_meta.get('estimated_context_chars', 'n/a')}`"
-                    )
-                if research_mode != "openai" and existing_draft.get("fallback_reason"):
-                    st.info(f"Used heuristic fallback: {existing_draft.get('fallback_reason')}")
                 research_error = existing_draft.get("research_error") or {}
-                if research_error:
-                    debug_parts = []
-                    if research_error.get("status_code") is not None:
-                        debug_parts.append(f"status=`{research_error.get('status_code')}`")
-                    if research_error.get("error_type"):
-                        debug_parts.append(f"type=`{research_error.get('error_type')}`")
-                    if research_error.get("error_class"):
-                        debug_parts.append(f"class=`{research_error.get('error_class')}`")
-                    if research_error.get("model"):
-                        debug_parts.append(f"model=`{research_error.get('model')}`")
-                    if research_error.get("error_message"):
-                        debug_parts.append(f"message=`{research_error.get('error_message')}`")
-                    if debug_parts:
-                        st.caption("OpenAI error: " + " | ".join(debug_parts))
-                rd1, rd2 = st.columns(2)
-                with rd1:
+                with side_review_col:
+                    st.markdown("<div class='scanner-audit-side-block'>", unsafe_allow_html=True)
+                    st.write(f"**Rationale:** {existing_draft.get('rationale') or 'No rationale provided.'}")
+                    caveats = existing_draft.get("caveats") or []
+                    st.write("**Caveats:** " + (" | ".join(caveats) if caveats else "None"))
+                    if context_meta:
+                        st.caption(
+                            "Context: "
+                            f"themes_sent=`{context_meta.get('filtered_theme_count')}` / "
+                            f"catalog_total=`{context_meta.get('full_catalog_theme_count')}` | "
+                            f"prefiltered=`{context_meta.get('catalog_was_prefiltered')}` | "
+                            f"estimated_chars=`{context_meta.get('estimated_context_chars', 'n/a')}`"
+                        )
+                    if research_mode != "openai" and existing_draft.get("fallback_reason"):
+                        st.caption(f"Heuristic fallback: {existing_draft.get('fallback_reason')}")
+                    if research_error:
+                        debug_parts = []
+                        if research_error.get("status_code") is not None:
+                            debug_parts.append(f"status=`{research_error.get('status_code')}`")
+                        if research_error.get("error_type"):
+                            debug_parts.append(f"type=`{research_error.get('error_type')}`")
+                        if research_error.get("error_class"):
+                            debug_parts.append(f"class=`{research_error.get('error_class')}`")
+                        if research_error.get("model"):
+                            debug_parts.append(f"model=`{research_error.get('model')}`")
+                        if research_error.get("error_message"):
+                            debug_parts.append(f"message=`{research_error.get('error_message')}`")
+                        if debug_parts:
+                            st.caption("OpenAI error: " + " | ".join(debug_parts))
+                    st.markdown("</div>", unsafe_allow_html=True)
+                with main_review_col:
                     st.write(f"**Company:** {existing_draft.get('company_name') or selected_audit_ticker}")
                     st.write(f"**Description:** {existing_draft.get('short_company_description') or 'No description available.'}")
                     st.write(
                         "**Similar tickers:** "
                         + (", ".join(existing_draft.get("possible_similar_tickers") or []) or "None suggested")
                     )
-                with rd2:
-                    st.write(f"**Rationale:** {existing_draft.get('rationale') or 'No rationale provided.'}")
-                    caveats = existing_draft.get("caveats") or []
-                    st.write("**Caveats:** " + (" | ".join(caveats) if caveats else "None"))
-
-                suggested_themes = existing_draft.get("suggested_existing_themes") or []
-                all_theme_ids = {int(option["id"]) for option in theme_options}
-                selected_existing_key = f"scanner_selected_existing_theme_ids_{selected_audit_ticker}"
-                st.session_state[selected_existing_key] = normalize_theme_id_list(
-                    st.session_state.get(selected_existing_key, []),
-                    all_theme_ids,
-                )
-                suggested_theme_ids = [int(item.get("theme_id")) for item in suggested_themes if item.get("theme_id") not in (None, "")]
-                checkbox_state = sync_suggested_theme_checkbox_state(
-                    st.session_state[selected_existing_key],
-                    suggested_theme_ids,
-                )
-                for theme_id, is_checked in checkbox_state.items():
-                    checkbox_key = f"scanner_suggested_theme_{selected_audit_ticker}_{theme_id}"
-                    st.session_state[checkbox_key] = bool(is_checked)
-                if suggested_themes:
-                    st.markdown("**Suggested Existing Themes**")
-                    for item in suggested_themes:
-                        theme_id = int(item.get("theme_id"))
-                        fit_label = str(item.get("fit_label") or "adjacent_fit")
-                        checkbox_key = f"scanner_suggested_theme_{selected_audit_ticker}_{theme_id}"
-                        cbox_col, text_col = st.columns([0.12, 0.88])
-                        with cbox_col:
-                            st.checkbox(
-                                "Select suggested theme",
-                                key=checkbox_key,
-                                label_visibility="collapsed",
-                                on_change=_sync_selected_existing_from_suggested_checkbox,
-                                args=(selected_existing_key, checkbox_key, theme_id, all_theme_ids),
-                            )
-                        with text_col:
-                            st.markdown(f"**{item.get('theme_name')}** `{fit_label}`")
-                            supporting_parts = []
-                            if item.get("why_it_might_fit"):
-                                supporting_parts.append(str(item.get("why_it_might_fit")))
-                            if item.get("representative_tickers"):
-                                supporting_parts.append("representative tickers: " + ", ".join(item.get("representative_tickers") or []))
-                            if supporting_parts:
-                                st.caption(" | ".join(supporting_parts))
-                else:
-                    st.info("No strong existing governed-theme match was suggested from the available context.")
-
-                selected_existing_theme_ids = st.multiselect(
-                    "Selected existing themes",
-                    options=sorted(all_theme_ids),
-                    format_func=lambda theme_id: (
-                        f"{theme_option_by_id[int(theme_id)]['name']} [{int(theme_id)}]"
-                        + (" (suggested)" if int(theme_id) in set(suggested_theme_ids) else "")
-                    ),
-                    key=selected_existing_key,
-                )
-                selected_suggested_theme_ids, custom_existing_theme_ids = split_selected_existing_theme_ids(
-                    selected_existing_theme_ids,
-                    suggested_theme_ids,
-                )
                 custom_new_key = f"scanner_custom_new_{selected_audit_ticker}"
                 custom_new_state_key = f"scanner_custom_new_state_{selected_audit_ticker}"
+                custom_new_category_key = f"scanner_custom_new_category_{selected_audit_ticker}"
+                custom_new_category_state_key = f"scanner_custom_new_category_state_{selected_audit_ticker}"
                 prepared_new_theme_value, prepared_new_theme_state = prepare_possible_new_theme_prefill(
                     st.session_state.get(custom_new_key),
                     existing_draft.get("possible_new_theme"),
@@ -862,107 +831,452 @@ if active_suggestions_tab == "Scanner Audit":
                 )
                 st.session_state[custom_new_key] = prepared_new_theme_value
                 st.session_state[custom_new_state_key] = prepared_new_theme_state
-                custom_new_theme_raw = st.text_input(
-                    "Proposed new theme ideas",
-                    placeholder="Comma-separated new theme ideas",
-                    key=custom_new_key,
+                prepared_new_category_value, prepared_new_category_state = prepare_possible_new_theme_category_prefill(
+                    st.session_state.get(custom_new_category_key),
+                    existing_draft.get("possible_new_theme_category"),
+                    st.session_state.get(custom_new_category_state_key),
                 )
-                st.session_state[custom_new_state_key] = finalize_possible_new_theme_state(
-                    custom_new_theme_raw,
-                    st.session_state.get(custom_new_state_key),
-                )
-                custom_new_themes = sorted(
-                    {
-                        item.strip()
-                        for item in custom_new_theme_raw.replace(";", ",").split(",")
-                        if item.strip()
+                st.session_state[custom_new_category_key] = prepared_new_category_value
+                st.session_state[custom_new_category_state_key] = prepared_new_category_state
+                st.markdown(
+                    """
+                    <style>
+                    .scanner-audit-side-block {
+                        border-left: 1px solid rgba(49, 51, 63, 0.08);
+                        padding-left: 0.9rem;
                     }
+                    .scanner-audit-main-divider {
+                        margin-top: 0.52rem;
+                        padding-top: 0.42rem;
+                        border-top: 1px solid rgba(49, 51, 63, 0.08);
+                    }
+                    .scanner-audit-helper {
+                        color: rgba(49, 51, 63, 0.8);
+                        font-size: 0.84rem;
+                        line-height: 1.28;
+                        margin: 0.08rem 0 0.22rem 0;
+                    }
+                    .scanner-checkbox-block {
+                        margin-top: 0.12rem;
+                    }
+                    .scanner-checkbox-block .scanner-checkbox-row {
+                        margin: 0.03rem 0 0.38rem 0;
+                    }
+                    .scanner-checkbox-block .scanner-checkbox-row-title {
+                        line-height: 1.1;
+                        margin: 0;
+                    }
+                    .scanner-checkbox-block .scanner-checkbox-text {
+                        padding-left: 0.18rem;
+                    }
+                    .scanner-checkbox-block .scanner-checkbox-row-detail {
+                        color: rgba(49, 51, 63, 0.78);
+                        font-size: 0.82rem;
+                        line-height: 1.24;
+                        margin-top: 0.08rem;
+                    }
+                    .scanner-suggested-theme-block {
+                        margin-top: 0.24rem;
+                        padding-top: 0.18rem;
+                        border-top: 1px solid rgba(49, 51, 63, 0.08);
+                    }
+                    </style>
+                    """,
+                    unsafe_allow_html=True,
                 )
-                if selected_suggested_theme_ids or custom_existing_theme_ids or custom_new_themes:
-                    st.caption(
-                        "Selected for staged review: "
-                        + ", ".join(
-                            [theme_option_by_id[theme_id]["name"] for theme_id in custom_existing_theme_ids if theme_id in theme_option_by_id]
-                            + [item.get("theme_name") for item in suggested_themes if int(item.get("theme_id")) in selected_suggested_theme_ids]
-                            + custom_new_themes
+                with main_review_col:
+                    generated_theme_ideas = existing_draft.get("candidate_theme_ideas") or []
+                    if generated_theme_ideas:
+                        generated_checkbox_state = sync_generated_theme_idea_checkbox_state(
+                            st.session_state.get(custom_new_key),
+                            generated_theme_ideas,
                         )
+                        generated_checkbox_keys = {
+                            idea: f"scanner_generated_theme_checkbox_{selected_audit_ticker}_{idx}"
+                            for idx, idea in enumerate(generated_checkbox_state.keys())
+                        }
+                        for idea, is_checked in generated_checkbox_state.items():
+                            st.session_state[generated_checkbox_keys[idea]] = bool(is_checked)
+                        st.markdown("**Generated Theme Ideas**")
+                        st.markdown(
+                            "<div class='scanner-audit-helper'>Use these as fast candidate labels for the proposed new-theme field.</div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown("<div class='scanner-checkbox-block'>", unsafe_allow_html=True)
+                        for idea in generated_checkbox_state.keys():
+                            checkbox_key = generated_checkbox_keys[idea]
+                            _render_compact_checkbox_content_row(
+                                checkbox_key,
+                                checkbox_label="Select generated theme idea",
+                                title=str(idea),
+                                on_change=_sync_possible_new_theme_from_generated_checkboxes,
+                                args=(
+                                    custom_new_key,
+                                    custom_new_state_key,
+                                    list(generated_checkbox_state.keys()),
+                                    generated_checkbox_keys,
+                                ),
+                            )
+                        st.markdown("</div>", unsafe_allow_html=True)
+                        selected_idea_text = join_possible_new_theme_ideas(
+                            [
+                                idea
+                                for idea in split_possible_new_theme_ideas(st.session_state.get(custom_new_key))
+                                if idea.casefold() in {generated.casefold() for generated in generated_checkbox_state.keys()}
+                            ]
+                        )
+                        if selected_idea_text:
+                            st.caption("Selected generated ideas: " + selected_idea_text)
+                review_key = f"scanner_research_review_outcome_{selected_audit_ticker}"
+                review_notes_key = f"scanner_research_review_notes_{selected_audit_ticker}"
+                review_stamp_key = f"scanner_research_review_stamp_{selected_audit_ticker}"
+                draft_review_stamp = "|".join(
+                    [
+                        str(existing_draft.get("ticker") or selected_audit_ticker),
+                        str(existing_draft.get("generated_at") or ""),
+                        str(existing_draft.get("theme_generation_strategy") or selected_strategy),
+                    ]
+                )
+                saved_review = get_scanner_research_review(conn, selected_audit_ticker, existing_draft)
+                if st.session_state.get(review_stamp_key) != draft_review_stamp:
+                    st.session_state[review_key] = str((saved_review or {}).get("outcome_class") or "")
+                    st.session_state[review_notes_key] = str((saved_review or {}).get("reviewer_notes") or "")
+                    st.session_state[review_stamp_key] = draft_review_stamp
+                with side_review_col:
+                    st.caption("Supporting Context")
+                    review_summary = scanner_research_review_summary(conn, limit=6)
+                    counts_by_outcome = review_summary.get("counts_by_outcome") or {}
+                    if counts_by_outcome:
+                        st.caption(
+                            "Review counts: "
+                            + " | ".join(f"{outcome}=`{count}`" for outcome, count in counts_by_outcome.items())
+                        )
+                    recent_reviews = review_summary.get("recent_reviews") or []
+                    if recent_reviews:
+                        st.caption("Recent reviews:")
+                        for item in recent_reviews[:4]:
+                            recent_text = f"{item.get('ticker')} -> {item.get('outcome_class')}"
+                            if item.get("reviewer_notes"):
+                                recent_text += f" | {item.get('reviewer_notes')}"
+                            st.caption(recent_text)
+
+                with main_review_col:
+                    suggested_themes = existing_draft.get("suggested_existing_themes") or []
+                    all_theme_ids = {int(option["id"]) for option in theme_options}
+                    selected_existing_key = f"scanner_selected_existing_theme_ids_{selected_audit_ticker}"
+                    st.session_state[selected_existing_key] = normalize_theme_id_list(
+                        st.session_state.get(selected_existing_key, []),
+                        all_theme_ids,
                     )
-                else:
-                    st.caption("No theme ideas selected yet. You can check suggested themes, search/select existing themes manually, or enter proposed new-theme labels.")
+                    suggested_theme_ids = [int(item.get("theme_id")) for item in suggested_themes if item.get("theme_id") not in (None, "")]
+                    checkbox_state = sync_suggested_theme_checkbox_state(
+                        st.session_state[selected_existing_key],
+                        suggested_theme_ids,
+                    )
+                    for theme_id, is_checked in checkbox_state.items():
+                        checkbox_key = f"scanner_suggested_theme_{selected_audit_ticker}_{theme_id}"
+                        st.session_state[checkbox_key] = bool(is_checked)
+                    if suggested_themes:
+                        st.markdown("**Suggested Existing Themes**")
+                        st.markdown(
+                            "<div class='scanner-audit-helper'>Check the strongest governed-theme fits first, then fine-tune below.</div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown("<div class='scanner-checkbox-block scanner-suggested-theme-block'>", unsafe_allow_html=True)
+                        for item in suggested_themes:
+                            theme_id = int(item.get("theme_id"))
+                            fit_label = str(item.get("fit_label") or "adjacent_fit")
+                            checkbox_key = f"scanner_suggested_theme_{selected_audit_ticker}_{theme_id}"
+                            supporting_parts = []
+                            if item.get("why_it_might_fit"):
+                                supporting_parts.append(str(item.get("why_it_might_fit")))
+                            if item.get("representative_tickers"):
+                                supporting_parts.append("representative tickers: " + ", ".join(item.get("representative_tickers") or []))
+                            _render_compact_checkbox_content_row(
+                                checkbox_key,
+                                checkbox_label="Select suggested theme",
+                                title=f"{item.get('theme_name')} [{fit_label}]",
+                                detail=" | ".join(supporting_parts),
+                                on_change=_sync_selected_existing_from_suggested_checkbox,
+                                args=(selected_existing_key, checkbox_key, theme_id, all_theme_ids),
+                            )
+                        st.markdown("</div>", unsafe_allow_html=True)
+                    else:
+                        st.info("No strong existing governed-theme match was suggested from the available context.")
+
+                    selected_existing_theme_ids = st.multiselect(
+                        "Selected existing themes",
+                        options=sorted(all_theme_ids),
+                        format_func=lambda theme_id: (
+                            f"{theme_option_by_id[int(theme_id)]['name']} [{int(theme_id)}]"
+                            + (" (suggested)" if int(theme_id) in set(suggested_theme_ids) else "")
+                        ),
+                        key=selected_existing_key,
+                    )
+                    selected_suggested_theme_ids, custom_existing_theme_ids = split_selected_existing_theme_ids(
+                        selected_existing_theme_ids,
+                        suggested_theme_ids,
+                    )
+                    custom_new_theme_raw = st.text_input(
+                        "Proposed new theme ideas",
+                        placeholder="Comma-separated new theme ideas",
+                        key=custom_new_key,
+                    )
+                    st.session_state[custom_new_state_key] = finalize_possible_new_theme_state(
+                        custom_new_theme_raw,
+                        st.session_state.get(custom_new_state_key),
+                    )
+                    custom_new_themes = split_possible_new_theme_ideas(st.session_state.get(custom_new_key))
+                    proposed_new_theme_category = st.text_input(
+                        "Proposed category",
+                        placeholder="Advisory category for the proposed new theme",
+                        key=custom_new_category_key,
+                    )
+                    st.session_state[custom_new_category_state_key] = finalize_possible_new_theme_category_state(
+                        proposed_new_theme_category,
+                        st.session_state.get(custom_new_category_state_key),
+                    )
+                    if selected_suggested_theme_ids or custom_existing_theme_ids or custom_new_themes:
+                        st.caption(
+                            "Selected for staged review: "
+                            + ", ".join(
+                                [theme_option_by_id[theme_id]["name"] for theme_id in custom_existing_theme_ids if theme_id in theme_option_by_id]
+                                + [item.get("theme_name") for item in suggested_themes if int(item.get("theme_id")) in selected_suggested_theme_ids]
+                                + custom_new_themes
+                            )
+                        )
+                        if proposed_new_theme_category:
+                            st.caption(f"Proposed category: `{proposed_new_theme_category}`")
+                    else:
+                        st.caption("No theme ideas selected yet. You can check suggested themes, search/select existing themes manually, or enter proposed new-theme labels.")
+                    st.markdown("<div class='scanner-audit-main-divider'>", unsafe_allow_html=True)
+                    promotion_note = st.text_area(
+                        "Promotion note (optional)",
+                        value="",
+                        placeholder="Why it looks interesting, suspected theme/category, or any caution/uncertainty.",
+                        key=f"scanner_audit_promotion_note_{selected_audit_ticker}",
+                    )
+                    st.markdown("**Reviewer Outcome**")
+                    st.markdown(
+                        "<div class='scanner-audit-helper'>Record whether the overall draft looked right after reviewing the selections above.</div>",
+                        unsafe_allow_html=True,
+                    )
+                    selected_outcome = st.selectbox(
+                        "Reviewer outcome",
+                        options=[
+                            "",
+                            "direct_fit_correct",
+                            "adjacent_fit_acceptable",
+                            "should_have_been_tentative",
+                            "false_positive",
+                            "missed_obvious_theme",
+                        ],
+                        format_func=lambda value: value or "Select outcome",
+                        key=review_key,
+                    )
+                    reviewer_notes = st.text_input(
+                        "Reviewer notes (optional)",
+                        placeholder="What was wrong, or what should have happened instead?",
+                        key=review_notes_key,
+                    )
+                    save_review_clicked = st.button(
+                        "Save review outcome",
+                        key=f"save_scanner_research_review_{selected_audit_ticker}",
+                    )
+                    if save_review_clicked:
+                        if not selected_outcome:
+                            st.warning("Select a reviewer outcome before saving.")
+                        else:
+                            try:
+                                saved_review = save_scanner_research_review(
+                                    conn,
+                                    selected_audit_ticker,
+                                    existing_draft,
+                                    outcome_class=selected_outcome,
+                                    reviewer_notes=reviewer_notes,
+                                )
+                                st.success(
+                                    "Saved review outcome: "
+                                    f"{saved_review.get('outcome_class') or selected_outcome}"
+                                )
+                            except Exception as exc:
+                                st.error(f"Could not save review outcome. {exc}")
+                    if saved_review:
+                        st.caption(
+                            "Saved review: "
+                            f"outcome=`{saved_review.get('outcome_class')}` | "
+                            f"updated_at=`{saved_review.get('updated_at') or 'n/a'}`"
+                        )
+                    st.markdown("<div class='scanner-audit-main-divider'>", unsafe_allow_html=True)
+                    st.markdown("**Promotion & Apply**")
+                    st.markdown(
+                        "<div class='scanner-audit-helper'>These actions use the current existing-theme selections and proposed new-theme notes above.</div>",
+                        unsafe_allow_html=True,
+                    )
+                    can_promote = not bool(selected_audit_row["is_governed"])
+                    st.caption(
+                        "Promotion creates or refreshes a staged review candidate only. "
+                        "It carries forward the advisory draft and Scanner Audit evidence, and it does not modify governed theme membership."
+                    )
+                    if not can_promote:
+                        st.info("This candidate is already governed. Promotion is reserved for uncovered candidates.")
+                    send_disabled = (not can_promote) or (existing_draft is None)
+                    apply_now_disabled = send_disabled or not bool(selected_suggested_theme_ids or custom_existing_theme_ids)
+                    if apply_now_disabled and existing_draft is not None:
+                        st.caption("Direct apply requires at least one selected existing theme. Custom new-theme ideas can still be staged for later review.")
+                    action_c1, action_c2 = st.columns(2)
+                    if action_c1.button("Send Selected Suggestions to Theme Review", disabled=send_disabled):
+                        try:
+                            with get_conn() as conn:
+                                result = promote_scanner_candidate_to_theme_review(
+                                    conn,
+                                    selected_audit_ticker,
+                                    promotion_note,
+                                    research_draft=existing_draft,
+                                    selected_suggested_theme_ids=selected_suggested_theme_ids,
+                                    custom_existing_theme_ids=custom_existing_theme_ids,
+                                    custom_new_themes=custom_new_themes,
+                                    proposed_new_theme_category=proposed_new_theme_category,
+                                )
+                            st.success(str(result["message"]))
+                            st.caption("Selected ideas were sent to staged Theme Review only. No governed membership was changed.")
+                        except Exception as exc:
+                            st.error(f"Could not send candidate to Theme Review. {exc}")
+                    if action_c2.button("Apply Selected Themes & Start Onboarding", disabled=apply_now_disabled, type="primary"):
+                        try:
+                            with get_conn() as conn:
+                                result = apply_scanner_candidate_selected_themes(
+                                    conn,
+                                    selected_audit_ticker,
+                                    promotion_note,
+                                    research_draft=existing_draft,
+                                    selected_suggested_theme_ids=selected_suggested_theme_ids,
+                                    custom_existing_theme_ids=custom_existing_theme_ids,
+                                    custom_new_themes=custom_new_themes,
+                                    proposed_new_theme_category=proposed_new_theme_category,
+                                )
+                            clear_scanner_candidate_summary_cache()
+                            clear_current_market_view_caches()
+                            onboarding_state = result.get("onboarding_state") or {}
+                            theme_summary = ", ".join(result.get("applied_theme_names") or [])
+                            st.success(str(result["message"]))
+                            if theme_summary:
+                                st.caption(f"Applied themes: `{theme_summary}`")
+                            proposed_new_theme_summary = ", ".join(result.get("proposed_new_theme_names") or [])
+                            if proposed_new_theme_summary:
+                                st.caption(f"Preserved proposed new themes: `{proposed_new_theme_summary}`")
+                            if result.get("proposed_new_theme_category"):
+                                st.caption(f"Preserved proposed category: `{result.get('proposed_new_theme_category')}`")
+                            if onboarding_state:
+                                st.caption(
+                                    "Onboarding: "
+                                    f"history=`{onboarding_state.get('history_readiness_status') or 'unknown'}` | "
+                                    f"backfill=`{onboarding_state.get('backfill_status') or 'unknown'}` | "
+                                    f"downstream_refresh_needed=`{bool(onboarding_state.get('downstream_refresh_needed'))}`"
+                                )
+                            st.caption(
+                                "An auditable Scanner Audit review record was preserved automatically. "
+                                "Use Theme Review only when you want to defer the final apply decision."
+                            )
+                        except Exception as exc:
+                            st.error(f"Could not apply selected themes from Scanner Audit. {exc}")
+                    st.markdown("<div class='scanner-audit-main-divider'>", unsafe_allow_html=True)
+                    with st.expander("Validation Signals", expanded=False):
+                        if debug_entry:
+                            st.caption(
+                                "Draft: "
+                                f"ticker=`{debug_entry.get('ticker') or selected_audit_ticker}` | "
+                                f"generated_at=`{debug_entry.get('generated_at') or existing_draft.get('generated_at') or 'n/a'}` | "
+                                f"mode=`{debug_entry.get('research_mode') or research_mode}` | "
+                                f"draft_source=`{debug_entry.get('draft_source') or existing_draft.get('draft_source') or 'reused_session_draft'}`"
+                            )
+                        st.caption(
+                            "Anchors: "
+                            f"strategy=`{validation_debug.get('strategy') or existing_draft.get('theme_generation_strategy') or selected_strategy}` | "
+                            f"domain=`{validation_debug.get('domain_anchor') or existing_draft.get('domain_anchor') or 'unclear'}` | "
+                            f"dominant_role=`{validation_debug.get('dominant_business_role') or existing_draft.get('dominant_business_role') or 'unclear'}` | "
+                            f"strong_role_evidence=`{validation_debug.get('strong_role_evidence', 'n/a')}`"
+                        )
+                        generated_ideas = validation_debug.get("generated_theme_ideas") or existing_draft.get("candidate_theme_ideas") or []
+                        st.caption("Generated ideas: " + (", ".join(generated_ideas) if generated_ideas else "None"))
+                        new_theme_decision = validation_debug.get("possible_new_theme_decision") or {}
+                        if new_theme_decision:
+                            st.caption(
+                                "New-theme decision: "
+                                f"candidate=`{new_theme_decision.get('candidate') or 'None'}` | "
+                                f"selected=`{new_theme_decision.get('selected') or 'None'}` | "
+                                f"category=`{new_theme_decision.get('selected_category') or existing_draft.get('possible_new_theme_category') or 'None'}` | "
+                                f"status=`{new_theme_decision.get('status') or 'n/a'}` | "
+                                f"reason=`{new_theme_decision.get('reason') or 'n/a'}`"
+                            )
+                        elif decision_trace:
+                            st.caption(
+                                "New-theme decision: "
+                                f"candidate=`{decision_trace.get('candidate_new_theme') or 'None'}` | "
+                                f"adjacent_only_existing=`{decision_trace.get('adjacency_only_existing_fit')}` | "
+                                f"heuristic_prefers_new=`{decision_trace.get('heuristic_prefers_new_theme')}` | "
+                                f"should_promote_new=`{decision_trace.get('should_promote_new_theme')}`"
+                            )
+                        evaluated_matches = validation_debug.get("evaluated_matches") or []
+                        if evaluated_matches:
+                            st.markdown("**Evaluated Governed Matches**")
+                            for item in evaluated_matches:
+                                overlap_parts = []
+                                if item.get("role_overlap"):
+                                    overlap_parts.append("roles=" + ", ".join(item.get("role_overlap") or []))
+                                if item.get("economic_role_overlap"):
+                                    overlap_parts.append("economic=" + ", ".join(item.get("economic_role_overlap") or []))
+                                if item.get("specific_overlap"):
+                                    overlap_parts.append("concepts=" + ", ".join(item.get("specific_overlap") or []))
+                                if item.get("market_overlap"):
+                                    overlap_parts.append("markets=" + ", ".join(item.get("market_overlap") or []))
+                                st.caption(
+                                    f"{'PASS' if item.get('actionable') else 'FAIL'} | "
+                                    f"score=`{item.get('score')}` | "
+                                    f"idea=`{item.get('idea')}` -> theme=`{item.get('theme_name')}` | "
+                                    f"fit=`{item.get('fit_label')}` | "
+                                    f"anchor=`{item.get('theme_anchor_alignment')}` | "
+                                    f"why=`{item.get('why')}`"
+                                )
+                                st.caption(
+                                    "Gate: "
+                                    f"{item.get('gate_reason') or 'n/a'}"
+                                    + (f" | overlaps=`{' ; '.join(overlap_parts)}`" if overlap_parts else "")
+                                )
+                        elif existing_draft.get("matched_theme_candidates"):
+                            st.caption(
+                                "Evaluated matches: "
+                                + "; ".join(
+                                    f"{item.get('idea')} -> {item.get('theme_name')} [{item.get('fit_label')}]"
+                                    for item in (existing_draft.get("matched_theme_candidates") or [])[:5]
+                                )
+                            )
+                        if timing_summary:
+                            timing_parts = []
+                            for key in [
+                                "candidate_context_ms",
+                                "catalog_query_ms",
+                                "catalog_preprocess_ms",
+                                "profile_lookup_ms",
+                                "domain_anchor_ms",
+                                "dominant_business_role_ms",
+                                "candidate_theme_ideas_ms",
+                                "governed_theme_matching_ms",
+                                "catalog_prefilter_ms",
+                                "ai_request_ms",
+                                "merge_ms",
+                                "total_ms",
+                            ]:
+                                if key in timing_summary:
+                                    timing_parts.append(f"{key}=`{timing_summary.get(key)}`")
+                            if timing_parts:
+                                st.caption("Timing: " + " | ".join(timing_parts))
             else:
                 selected_existing_key = f"scanner_selected_existing_theme_ids_{selected_audit_ticker}"
                 st.session_state[selected_existing_key] = normalize_theme_id_list(st.session_state.get(selected_existing_key, []))
                 selected_suggested_theme_ids = []
                 custom_existing_theme_ids = []
                 custom_new_themes = []
-
-            promotion_note = st.text_area(
-                "Promotion note (optional)",
-                value="",
-                placeholder="Why it looks interesting, suspected theme/category, or any caution/uncertainty.",
-                key=f"scanner_audit_promotion_note_{selected_audit_ticker}",
-            )
-            can_promote = not bool(selected_audit_row["is_governed"])
-            st.caption(
-                "Promotion creates or refreshes a staged review candidate only. "
-                "It carries forward the advisory draft and Scanner Audit evidence, and it does not modify governed theme membership."
-            )
-            if not can_promote:
-                st.info("This candidate is already governed. Promotion is reserved for uncovered candidates.")
-            send_disabled = (not can_promote) or (existing_draft is None)
-            apply_now_disabled = send_disabled or not bool(selected_suggested_theme_ids or custom_existing_theme_ids)
-            if existing_draft is None:
                 st.info("Generate a research draft first to promote an agent-assisted review candidate.")
-            if apply_now_disabled and existing_draft is not None:
-                st.caption("Direct apply requires at least one selected existing theme. Custom new-theme ideas can still be staged for later review.")
-            action_c1, action_c2 = st.columns(2)
-            if action_c1.button("Send Selected Suggestions to Theme Review", disabled=send_disabled):
-                try:
-                    with get_conn() as conn:
-                        result = promote_scanner_candidate_to_theme_review(
-                            conn,
-                            selected_audit_ticker,
-                            promotion_note,
-                            research_draft=existing_draft,
-                            selected_suggested_theme_ids=selected_suggested_theme_ids,
-                            custom_existing_theme_ids=custom_existing_theme_ids,
-                            custom_new_themes=custom_new_themes,
-                        )
-                    st.success(str(result["message"]))
-                    st.caption("Selected ideas were sent to staged Theme Review only. No governed membership was changed.")
-                except Exception as exc:
-                    st.error(f"Could not send candidate to Theme Review. {exc}")
-            if action_c2.button("Apply Selected Themes & Start Onboarding", disabled=apply_now_disabled, type="primary"):
-                try:
-                    with get_conn() as conn:
-                        result = apply_scanner_candidate_selected_themes(
-                            conn,
-                            selected_audit_ticker,
-                            promotion_note,
-                            research_draft=existing_draft,
-                            selected_suggested_theme_ids=selected_suggested_theme_ids,
-                            custom_existing_theme_ids=custom_existing_theme_ids,
-                            custom_new_themes=custom_new_themes,
-                        )
-                    clear_scanner_candidate_summary_cache()
-                    clear_current_market_view_caches()
-                    onboarding_state = result.get("onboarding_state") or {}
-                    theme_summary = ", ".join(result.get("applied_theme_names") or [])
-                    st.success(str(result["message"]))
-                    if theme_summary:
-                        st.caption(f"Applied themes: `{theme_summary}`")
-                    if onboarding_state:
-                        st.caption(
-                            "Onboarding: "
-                            f"history=`{onboarding_state.get('history_readiness_status') or 'unknown'}` | "
-                            f"backfill=`{onboarding_state.get('backfill_status') or 'unknown'}` | "
-                            f"downstream_refresh_needed=`{bool(onboarding_state.get('downstream_refresh_needed'))}`"
-                        )
-                    st.caption(
-                        "An auditable Scanner Audit review record was preserved automatically. "
-                        "Use Theme Review only when you want to defer the final apply decision."
-                    )
-                except Exception as exc:
-                    st.error(f"Could not apply selected themes from Scanner Audit. {exc}")
 
 show_perf_summary()

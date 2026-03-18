@@ -9,6 +9,7 @@ import duckdb
 import pandas as pd
 
 from src.fetch_data import run_refresh
+from src.database import get_conn, get_db_connection
 from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
 from src.leaderboard_utils import (
@@ -46,20 +47,36 @@ from src.symbol_hygiene import (
     symbol_hygiene_queue,
 )
 from src.suggestions_service import list_suggestions, review_suggestion
+from src.scanner_audit import apply_scanner_candidate_selected_themes, promote_scanner_candidate_to_theme_review
 from src.suggestions_page_state import (
+    apply_generated_theme_idea_checkbox_selection,
     add_theme_to_selected_existing,
+    finalize_possible_new_theme_category_state,
     finalize_possible_new_theme_state,
+    join_possible_new_theme_ideas,
+    merge_generated_theme_ideas_with_custom,
     merge_suggested_and_custom_theme_ids,
     normalize_theme_id_list,
+    prepare_possible_new_theme_category_prefill,
     prepare_possible_new_theme_prefill,
     resolve_active_suggestions_tab,
     resolve_scanner_audit_ticker,
+    split_possible_new_theme_ideas,
     split_selected_existing_theme_ids,
+    sync_generated_theme_idea_checkbox_state,
     sync_suggested_theme_checkbox_state,
 )
+from src.suggestions_service import recent_applied_suggestions
 from src.theme_service import refresh_active_ticker_universe, replace_ticker_in_theme, seed_if_needed
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
+from src.scanner_research import (
+    _description_theme_generation_draft,
+    get_scanner_research_review,
+    save_scanner_research_review,
+    scanner_research_review_summary,
+)
+from src.streamlit_utils import _load_theme_inflections_cached, _load_theme_momentum_cached
 from src.eod_refresh import has_eod_run_for_date, run_scheduled_eod_refresh
 from src.rankings import _build_current_ranking_metrics, _compute_theme_metrics, compute_theme_rankings, theme_confidence_factor
 
@@ -87,6 +104,60 @@ class TestLeaderboardUtils(unittest.TestCase):
 
         self.assertEqual(ranked_1w.iloc[0]["theme"], "B")
         self.assertEqual(ranked_1m.iloc[0]["theme"], "A")
+
+
+class TestHistoricalAnalyticsConnectionIsolation(unittest.TestCase):
+    def test_theme_momentum_cached_loader_uses_fresh_connections(self):
+        _load_theme_momentum_cached.clear()
+        seen_connections: list[object] = []
+
+        class _FreshConn:
+            pass
+
+        class _FreshConnContext:
+            def __init__(self):
+                self.conn = _FreshConn()
+
+            def __enter__(self):
+                return self.conn
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with patch("src.streamlit_utils.get_conn", side_effect=AssertionError("shared connection should not be used")):
+            with patch("src.streamlit_utils.get_fresh_read_conn", side_effect=lambda: _FreshConnContext()):
+                with patch("src.streamlit_utils.compute_theme_momentum", side_effect=lambda conn, lookback_days, top_n=20: seen_connections.append(conn) or {"history": pd.DataFrame(), "window_summary": pd.DataFrame()}):
+                    _load_theme_momentum_cached(("db", 1), 30, 20)
+                    _load_theme_momentum_cached(("db", 1), 31, 20)
+
+        self.assertEqual(len(seen_connections), 2)
+        self.assertIsNot(seen_connections[0], seen_connections[1])
+
+    def test_theme_inflections_cached_loader_uses_fresh_connections(self):
+        _load_theme_inflections_cached.clear()
+        seen_connections: list[object] = []
+
+        class _FreshConn:
+            pass
+
+        class _FreshConnContext:
+            def __init__(self):
+                self.conn = _FreshConn()
+
+            def __enter__(self):
+                return self.conn
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with patch("src.streamlit_utils.get_conn", side_effect=AssertionError("shared connection should not be used")):
+            with patch("src.streamlit_utils.get_fresh_read_conn", side_effect=lambda: _FreshConnContext()):
+                with patch("src.streamlit_utils.compute_theme_inflections", side_effect=lambda conn, lookback_days, top_n=20: {"leaders": pd.DataFrame(), "laggards": pd.DataFrame(), "turnarounds": pd.DataFrame(), "momentum": seen_connections.append(conn) or {"history": pd.DataFrame(), "window_summary": pd.DataFrame()}}):
+                    _load_theme_inflections_cached(("db", 1), 30, 20)
+                    _load_theme_inflections_cached(("db", 1), 31, 20)
+
+        self.assertEqual(len(seen_connections), 2)
+        self.assertIsNot(seen_connections[0], seen_connections[1])
 
 
 class TestSuggestionsPageState(unittest.TestCase):
@@ -170,6 +241,107 @@ class TestSuggestionsPageState(unittest.TestCase):
         self.assertEqual(rerun_value, "Data Center Optics")
         self.assertEqual(rerun_state["auto_value"], "Data Center Optics")
         self.assertFalse(bool(rerun_state["user_edited"]))
+
+    def test_checking_first_generated_theme_idea_adds_it(self):
+        value, state = prepare_possible_new_theme_prefill(None, "Optical Interconnects", None)
+        self.assertEqual(value, "Optical Interconnects")
+        selected_value, selected_state = apply_generated_theme_idea_checkbox_selection(
+            "",
+            ["Data Center Optics"],
+            ["Data Center Optics", "Optical Interconnects"],
+            state,
+        )
+        finalized_state = finalize_possible_new_theme_state(selected_value, selected_state)
+
+        self.assertEqual(selected_value, "Data Center Optics")
+        self.assertTrue(bool(finalized_state["user_edited"]))
+        self.assertTrue(bool(finalized_state["forced_user_edited"]))
+        self.assertEqual(split_possible_new_theme_ideas(selected_value), ["Data Center Optics"])
+
+    def test_checking_second_generated_theme_idea_adds_it(self):
+        selected_value, selected_state = apply_generated_theme_idea_checkbox_selection(
+            "Data Center Optics",
+            ["Data Center Optics", "Optical Interconnects"],
+            ["Data Center Optics", "Optical Interconnects"],
+            {"auto_value": "Optical Interconnects", "user_edited": True},
+        )
+
+        self.assertEqual(
+            split_possible_new_theme_ideas(selected_value),
+            ["Data Center Optics", "Optical Interconnects"],
+        )
+        self.assertEqual(
+            join_possible_new_theme_ideas(split_possible_new_theme_ideas(selected_value)),
+            "Data Center Optics, Optical Interconnects",
+        )
+        self.assertTrue(bool(selected_state["user_edited"]))
+
+    def test_unchecking_generated_theme_idea_removes_it(self):
+        selected_value, selected_state = apply_generated_theme_idea_checkbox_selection(
+            "Data Center Optics, Optical Interconnects",
+            ["Optical Interconnects"],
+            ["Data Center Optics", "Optical Interconnects"],
+            {"auto_value": "Optical Interconnects", "user_edited": True},
+        )
+
+        self.assertEqual(split_possible_new_theme_ideas(selected_value), ["Optical Interconnects"])
+        self.assertTrue(bool(selected_state["user_edited"]))
+
+    def test_generated_theme_idea_checkbox_state_syncs_from_existing_input_on_rerun(self):
+        synced = sync_generated_theme_idea_checkbox_state(
+            "Data Center Optics, Custom Theme",
+            ["Data Center Optics", "Optical Interconnects"],
+        )
+
+        self.assertEqual(
+            synced,
+            {
+                "Data Center Optics": True,
+                "Optical Interconnects": False,
+            },
+        )
+
+    def test_generated_theme_idea_checkbox_merge_preserves_custom_manual_items(self):
+        merged = merge_generated_theme_ideas_with_custom(
+            "Custom Theme, Data Center Optics",
+            ["Optical Interconnects"],
+            ["Data Center Optics", "Optical Interconnects"],
+        )
+
+        self.assertEqual(merged, "Optical Interconnects, Custom Theme")
+
+    def test_regenerate_still_respects_explicit_generated_theme_checkbox_selections(self):
+        value, state = prepare_possible_new_theme_prefill(None, "Optical Interconnects", None)
+        self.assertEqual(value, "Optical Interconnects")
+        selected_value, selected_state = apply_generated_theme_idea_checkbox_selection(
+            "Optical Interconnects",
+            ["Optical Interconnects", "Data Center Optics"],
+            ["Data Center Optics", "Optical Interconnects"],
+            state,
+        )
+        finalized_state = finalize_possible_new_theme_state(selected_value, selected_state)
+        rerun_value, rerun_state = prepare_possible_new_theme_prefill(selected_value, "Semiconductor Substrates", finalized_state)
+
+        self.assertEqual(rerun_value, "Data Center Optics, Optical Interconnects")
+        self.assertTrue(bool(rerun_state["user_edited"]))
+
+    def test_possible_new_theme_category_prefills_input_when_present(self):
+        value, state = prepare_possible_new_theme_category_prefill(None, "Optical Networking", None)
+        self.assertEqual(value, "Optical Networking")
+        self.assertEqual(state["auto_value"], "Optical Networking")
+        self.assertFalse(bool(state["user_edited"]))
+
+    def test_manual_possible_new_theme_category_edit_persists_across_reruns(self):
+        value, state = prepare_possible_new_theme_category_prefill(None, "Optical Networking", None)
+        self.assertEqual(value, "Optical Networking")
+        state = finalize_possible_new_theme_category_state("Communications Infrastructure", state)
+        rerun_value, rerun_state = prepare_possible_new_theme_category_prefill(
+            "Communications Infrastructure",
+            "Financial Technology",
+            state,
+        )
+        self.assertEqual(rerun_value, "Communications Infrastructure")
+        self.assertTrue(bool(rerun_state["user_edited"]))
 
     def test_window_leaderboard_explains_true_boundary_requirement(self):
         history = pd.DataFrame(
@@ -1542,6 +1714,641 @@ class TestRefreshUniverseSemantics(unittest.TestCase):
         conn.close()
 
 
+class TestDescriptionFirstResearchRefinements(unittest.TestCase):
+    @staticmethod
+    def _candidate(**overrides):
+        candidate = {
+            "ticker": "TEST",
+            "recommendation": "review for addition",
+            "recommendation_reason": "description-first audit",
+            "persistence_score": 3.2,
+            "observed_days": 7,
+            "observations_last_10d": 4,
+            "current_streak": 2,
+        }
+        candidate.update(overrides)
+        return candidate
+
+    @staticmethod
+    def _theme(theme_id: int, name: str, category: str, description: str, tickers: list[str] | None = None):
+        return {
+            "theme_id": theme_id,
+            "theme_name": name,
+            "category": category,
+            "theme_description": description,
+            "representative_tickers": tickers or [],
+        }
+
+    def test_description_first_prefers_direct_governed_theme_over_new_theme(self):
+        profile = {
+            "company_name": "Photon Fabric",
+            "description": "Designs optical interconnect systems and co-packaged optics for hyperscale data-center networking.",
+            "sic_description": "Networking equipment",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Optical Interconnects",
+                "Networking",
+                "Suppliers of optical interconnect components and systems used in data-center and AI networking.",
+                ["CIEN"],
+            ),
+            self._theme(
+                2,
+                "Digital Payments",
+                "Fintech",
+                "Platforms and networks that process digital payments and merchant transactions.",
+                ["SQ"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "add_to_existing_theme_review")
+        self.assertIsNone(draft["possible_new_theme"])
+        self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Optical Interconnects")
+        self.assertIn("Direct business-role fit", draft["suggested_existing_themes"][0]["why_it_might_fit"])
+        self.assertEqual(
+            draft["validation_debug"]["possible_new_theme_decision"]["status"],
+            "suppressed_by_direct_governed_match",
+        )
+        self.assertTrue(draft["validation_debug"]["evaluated_matches"][0]["actionable"])
+
+    def test_description_first_keeps_new_theme_tentative_when_existing_match_is_only_adjacent(self):
+        profile = {
+            "company_name": "Affirmed Credit",
+            "description": "Provides installment lending and buy-now-pay-later financing through a consumer finance platform.",
+            "sic_description": "Consumer lending",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Digital Payments",
+                "Fintech",
+                "Payment processing networks, merchant acceptance, and digital wallet infrastructure.",
+                ["PYPL"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Consumer Lending")
+        self.assertTrue(draft["suggested_existing_themes"])
+        self.assertEqual(draft["suggested_existing_themes"][0]["fit_label"], "adjacent_fit")
+        self.assertIn("adjacent rather than direct", " ".join(draft["caveats"]))
+        self.assertEqual(
+            draft["validation_debug"]["possible_new_theme_decision"]["status"],
+            "kept_tentative",
+        )
+
+    def test_description_first_filters_obviously_unrelated_governed_matches(self):
+        profile = {
+            "company_name": "Photon Fabric",
+            "description": "Designs optical interconnect systems and co-packaged optics for hyperscale data-center networking.",
+            "sic_description": "Networking equipment",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Digital Payments",
+                "Fintech",
+                "Payment processing networks, merchant acceptance, and digital wallet infrastructure.",
+                ["PYPL"],
+            ),
+            self._theme(
+                2,
+                "Consumer Lending",
+                "Fintech",
+                "Platforms focused on installment loans, personal lending, and credit underwriting.",
+                ["AFRM"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["suggested_existing_themes"], [])
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Optical Interconnects")
+        self.assertTrue(draft["validation_debug"]["evaluated_matches"])
+        self.assertFalse(any(item["actionable"] for item in draft["validation_debug"]["evaluated_matches"]))
+
+    def test_description_first_does_not_promote_generic_business_model_language_to_direct_fit(self):
+        profile = {
+            "company_name": "Workflow Grid",
+            "description": "Provides a mission-critical analytics platform and infrastructure software for enterprise workflow integration and observability.",
+            "sic_description": "Enterprise software",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Cloud Software",
+                "Software",
+                "Cloud software platforms, observability tooling, and enterprise workflow applications.",
+                ["DDOG"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertNotEqual(draft["recommended_action"], "add_to_existing_theme_review")
+        self.assertFalse(
+            any(item.get("fit_label") == "direct_fit" for item in draft.get("suggested_existing_themes") or [])
+        )
+        self.assertFalse(bool(draft["validation_debug"].get("strong_role_evidence")))
+
+    def test_description_first_generates_drone_phrase_ideas_even_when_anchors_are_weak(self):
+        profile = {
+            "company_name": "Aero Parts Co",
+            "description": "Engaged in serving the American drone industry by building and selling drone components.",
+            "sic_description": "Electronic components",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["domain_anchor"], "unclear")
+        self.assertEqual(draft["dominant_business_role"], "unclear")
+        self.assertIn("Drone Components", draft["candidate_theme_ideas"])
+        self.assertIn("Drones", draft["candidate_theme_ideas"])
+
+    def test_description_first_phrase_fallback_survives_weak_anchor_inference(self):
+        profile = {
+            "company_name": "UAS Fabrication",
+            "description": "Builds UAV components and unmanned systems equipment for domestic industrial customers.",
+            "sic_description": "Industrial components",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertTrue(draft["candidate_theme_ideas"])
+        self.assertTrue(
+            {"UAV Components", "Unmanned Systems", "Unmanned Systems Equipment"}
+            & set(draft["candidate_theme_ideas"])
+        )
+
+    def test_description_first_module_phrase_generates_component_style_idea(self):
+        profile = {
+            "company_name": "Airframe Modules",
+            "description": "Builds UAV modules for unmanned aircraft systems integrators.",
+            "sic_description": "Industrial modules",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertIn("UAV Components", draft["candidate_theme_ideas"])
+
+    def test_description_first_extracts_generic_product_phrases_when_anchors_are_weak(self):
+        profile = {
+            "company_name": "WaterWorks Fabrication",
+            "description": "Builds desalination modules and water treatment equipment for industrial plants.",
+            "sic_description": "Industrial equipment",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertTrue(
+            {"Desalination Components", "Water Treatment Equipment"}
+            & set(draft["candidate_theme_ideas"])
+        )
+
+    def test_description_first_ignores_generic_business_model_product_phrases(self):
+        profile = {
+            "company_name": "Workflow Core",
+            "description": "Provides mission critical systems and workflow platforms for enterprise operations.",
+            "sic_description": "Enterprise software",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertNotIn("Mission Critical Systems", draft["candidate_theme_ideas"])
+        self.assertNotIn("Workflow Systems", draft["candidate_theme_ideas"])
+
+    def test_description_first_does_not_treat_generic_fintech_platform_as_direct_fit(self):
+        profile = {
+            "company_name": "Broad Finance Platform",
+            "description": "Operates a fintech platform for consumers and merchants.",
+            "sic_description": "Financial technology platform",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Digital Payments",
+                "Fintech",
+                "Payment processing networks, merchant acceptance, and digital wallet infrastructure.",
+                ["PYPL"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertFalse(
+            any(item.get("fit_label") == "direct_fit" for item in draft.get("suggested_existing_themes") or [])
+        )
+        self.assertNotEqual(draft["recommended_action"], "add_to_existing_theme_review")
+
+    def test_description_first_optical_component_descriptors_beat_ai_and_5g_adjacency(self):
+        profile = {
+            "company_name": "Photon Link",
+            "description": "Designs optical modules, optical interconnect engines, and fiber-optic networking products for hyperscale networking.",
+            "sic_description": "Networking components",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "AI Infrastructure",
+                "Compute",
+                "Suppliers of AI data-center compute infrastructure, hyperscale servers, and GPU cluster systems.",
+                ["NVDA"],
+            ),
+            self._theme(
+                2,
+                "5G Infrastructure",
+                "Telecom",
+                "5G radios, carrier deployments, telecom infrastructure, and broadband networking rollouts.",
+                ["ERIC"],
+            ),
+            self._theme(
+                3,
+                "Optical Interconnects",
+                "Networking",
+                "Optical modules, interconnect engines, and fiber networking components for high-speed data links.",
+                ["CIEN"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Optical Interconnects")
+        self.assertEqual(draft["suggested_existing_themes"][0]["fit_label"], "direct_fit")
+        self.assertIn("Optical Interconnects", draft["validation_debug"]["business_descriptors"])
+
+    def test_description_first_optical_platform_with_process_language_does_not_imply_materials(self):
+        profile = {
+            "company_name": "Interposer Optics",
+            "description": "Develops optical interposers and photonics platforms using advanced semiconductor packaging and wafer-level manufacturing techniques.",
+            "sic_description": "Optical networking equipment",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Semiconductor Materials",
+                "Materials",
+                "Makers of semiconductor materials, wafers, substrates, compounds, coatings, and consumable inputs.",
+                ["ENTG"],
+            ),
+            self._theme(
+                2,
+                "Optical Interconnects",
+                "Networking",
+                "Optical interposers, photonic interconnect platforms, and fiber networking modules.",
+                ["COHR"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Optical Interconnects")
+        self.assertFalse(any(item["theme_name"] == "Semiconductor Materials" for item in draft["suggested_existing_themes"]))
+
+    def test_description_first_digital_asset_infrastructure_prefers_missing_category_over_cloud_or_cyber(self):
+        profile = {
+            "company_name": "Atlas Exchange Infra",
+            "description": "Provides digital asset exchange infrastructure, institutional crypto custody, and market infrastructure software for trading venues.",
+            "sic_description": "Financial software",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Cybersecurity",
+                "Software",
+                "Cybersecurity platforms, identity security, and enterprise threat management.",
+                ["PANW"],
+            ),
+            self._theme(
+                2,
+                "Cloud Software",
+                "Software",
+                "Cloud software platforms, workflow tooling, and enterprise observability applications.",
+                ["DDOG"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Digital Asset Market Infrastructure")
+        self.assertFalse(draft["suggested_existing_themes"])
+        self.assertIn("Digital Asset Market Infrastructure", draft["validation_debug"]["business_descriptors"])
+
+    def test_description_first_consumer_banking_app_surfaces_missing_fintech_category(self):
+        profile = {
+            "company_name": "PocketBank",
+            "description": "Offers a consumer banking app with overdraft protection, credit building, short-term liquidity, and financial management tools.",
+            "sic_description": "Consumer financial services",
+        }
+        catalog = []
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertIn(draft["possible_new_theme"], {"Consumer Fintech", "Digital Banking"})
+        self.assertTrue({"Consumer Fintech", "Digital Banking"} & set(draft["candidate_theme_ideas"]))
+
+    def test_description_first_memory_and_storage_suppresses_materials_and_robotics_adjacency(self):
+        profile = {
+            "company_name": "FlashCore",
+            "description": "Designs NAND flash memory semiconductors, storage controllers, and SSD storage devices for enterprise systems.",
+            "sic_description": "Memory and storage products",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Semiconductor Materials",
+                "Materials",
+                "Makers of semiconductor wafers, chemicals, substrates, and consumables.",
+                ["ENTG"],
+            ),
+            self._theme(
+                2,
+                "Industrial Robotics",
+                "Automation",
+                "Industrial robotics, factory automation, and autonomous manufacturing systems.",
+                ["ROK"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertIn(draft["possible_new_theme"], {"Memory & Storage", "Semiconductor Memory", "Data Storage"})
+        self.assertFalse(draft["suggested_existing_themes"])
+
+    def test_description_first_sdr_and_autonomous_systems_suppress_cloud_clusters(self):
+        profile = {
+            "company_name": "Spectrum Autonomous",
+            "description": "Builds software-defined radio systems and autonomous systems hardware for wireless communications infrastructure and unmanned platforms.",
+            "sic_description": "Wireless communications equipment",
+        }
+        catalog = [
+            self._theme(1, "Cloud Computing", "Software", "Cloud computing platforms and enterprise infrastructure software.", ["MSFT"]),
+            self._theme(2, "Cloud Infrastructure", "Software", "Cloud infrastructure, observability, and DevOps tooling.", ["AMZN"]),
+            self._theme(3, "Cloud Software", "Software", "Cloud software applications and workflow analytics.", ["DDOG"]),
+            self._theme(4, "Cloud DevOps", "Software", "Cloud-native DevOps, monitoring, and observability platforms.", ["DDOG"]),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertFalse(draft["suggested_existing_themes"])
+        self.assertTrue({"Software-Defined Radio", "Autonomous Systems", "Wireless Communications Infrastructure"} & set(draft["candidate_theme_ideas"]))
+
+    def test_description_first_generic_manufacturing_language_alone_does_not_unlock_materials(self):
+        profile = {
+            "company_name": "Process Optics",
+            "description": "Uses proprietary semiconductor manufacturing processes, packaging techniques, and precision fabrication to build optical networking engines.",
+            "sic_description": "Optical engines",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Semiconductor Materials",
+                "Materials",
+                "Suppliers of semiconductor wafers, substrates, coatings, compounds, and process chemicals.",
+                ["ENTG"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertNotIn("Semiconductor Materials", draft["candidate_theme_ideas"])
+        self.assertFalse(draft["suggested_existing_themes"])
+
+    def test_description_first_damps_same_family_weak_umbrella_clusters(self):
+        profile = {
+            "company_name": "Spectrum Autonomous",
+            "description": "Builds software-defined radio systems and autonomous systems hardware for wireless communications infrastructure and unmanned platforms.",
+            "sic_description": "Wireless communications equipment",
+        }
+        catalog = [
+            self._theme(1, "Cloud Computing", "Software", "Cloud computing platforms and enterprise infrastructure software.", ["MSFT"]),
+            self._theme(2, "Cloud Infrastructure", "Software", "Cloud infrastructure, observability, and DevOps tooling.", ["AMZN"]),
+            self._theme(3, "Cloud Software", "Software", "Cloud software applications and workflow analytics.", ["DDOG"]),
+            self._theme(4, "Cybersecurity", "Software", "Cybersecurity platforms, threat analytics, and security tooling.", ["PANW"]),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+        evaluated = draft["validation_debug"]["evaluated_matches"]
+        cloud_actionable = [item for item in evaluated if item["actionable"] and "Cloud" in item["theme_name"]]
+
+        self.assertLessEqual(len(cloud_actionable), 1)
+
+    def test_description_first_clear_descriptor_surfaces_missing_category_instead_of_unclear(self):
+        profile = {
+            "company_name": "Retail Water Systems",
+            "description": "Builds water treatment equipment and desalination modules for municipal and industrial customers.",
+            "sic_description": "Water equipment",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertTrue(draft["possible_new_theme"])
+        self.assertTrue(draft["validation_debug"]["business_descriptors"])
+        self.assertEqual(draft["validation_debug"]["possible_new_theme_decision"]["status"], "selected_no_actionable_governed_match")
+
+    def test_description_first_does_not_award_direct_fit_for_broad_end_market_adjacency(self):
+        profile = {
+            "company_name": "Photon Link",
+            "description": "Designs optical modules and fiber-optic networking products for hyperscale data-center networking.",
+            "sic_description": "Networking components",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "AI Infrastructure",
+                "Compute",
+                "AI data-center servers, GPU systems, and hyperscale compute infrastructure.",
+                ["NVDA"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertFalse(any(item.get("fit_label") == "direct_fit" for item in draft.get("suggested_existing_themes") or []))
+        self.assertEqual(draft["possible_new_theme"], "Optical Interconnects")
+
+    def test_description_first_mining_processing_and_shipping_does_not_return_domain_unclear(self):
+        profile = {
+            "company_name": "Frontier Tungsten",
+            "description": "Advances mine assets, mineral processing, and shipping of tungsten concentrate from its tungsten project portfolio.",
+            "sic_description": "Mining projects",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertNotEqual(draft["domain_anchor"], "unclear")
+        self.assertEqual(draft["domain_anchor"], "mining/resources")
+        self.assertTrue(draft["possible_new_theme"])
+
+    def test_description_first_extracts_commodity_specific_mining_descriptor(self):
+        profile = {
+            "company_name": "Frontier Tungsten",
+            "description": "Develops tungsten mine projects and processes tungsten ore into concentrate for shipment.",
+            "sic_description": "Mining and processing",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertIn("Tungsten Mining", draft["candidate_theme_ideas"])
+        self.assertIn("Tungsten Mining", draft["validation_debug"]["business_descriptors"])
+
+    def test_description_first_mining_process_language_does_not_collapse_into_generic_materials(self):
+        profile = {
+            "company_name": "Frontier Tungsten",
+            "description": "Owns tungsten mine assets, mineral processing facilities, and ships tungsten concentrate from operating projects.",
+            "sic_description": "Mining operations",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Semiconductor Materials",
+                "Materials",
+                "Makers of semiconductor wafers, substrates, coatings, compounds, and process chemicals.",
+                ["ENTG"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertNotIn("Semiconductor Materials", draft["candidate_theme_ideas"])
+        self.assertFalse(draft["suggested_existing_themes"])
+
+    def test_description_first_clear_mining_descriptor_beats_domain_unclear_when_governed_coverage_is_weak(self):
+        profile = {
+            "company_name": "Frontier Tungsten",
+            "description": "Operates mine projects, mineral processing, and concentrate shipping tied to tungsten ore production.",
+            "sic_description": "Metals mining",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertIn(draft["possible_new_theme"], {"Tungsten Mining", "Critical Minerals Mining", "Metals & Mining"})
+        self.assertEqual(draft["validation_debug"]["possible_new_theme_decision"]["status"], "selected_no_actionable_governed_match")
+
+    def test_description_first_emits_proposed_category_for_clear_missing_theme_case(self):
+        profile = {
+            "company_name": "PocketBank",
+            "description": "Offers a consumer banking app with overdraft protection, credit building, short-term liquidity, and financial management tools.",
+            "sic_description": "Consumer financial services",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme_category"], "Financial Technology")
+
+
+class TestScannerResearchReviewPersistence(unittest.TestCase):
+    def test_save_scanner_research_review_inserts_and_updates_same_draft_context(self):
+        conn = duckdb.connect(":memory:")
+        draft = {
+            "ticker": "NVDA",
+            "generated_at": "2026-03-17 12:00:00",
+            "theme_generation_strategy": "description_theme_generation",
+            "research_mode": "heuristic_fallback",
+            "recommended_action": "watch_only",
+            "confidence": "low",
+            "possible_new_theme": "Optical Interconnects",
+            "domain_anchor": "networking/communications",
+            "dominant_business_role": "component_supplier",
+            "candidate_theme_ideas": ["Optical Interconnects", "Optical Networking"],
+            "suggested_existing_themes": [
+                {"theme_id": 7, "theme_name": "Optical Networking", "fit_label": "adjacent_fit"}
+            ],
+        }
+
+        inserted = save_scanner_research_review(
+            conn,
+            "NVDA",
+            draft,
+            outcome_class="false_positive",
+            reviewer_notes="Too broad for this role.",
+        )
+        updated = save_scanner_research_review(
+            conn,
+            "NVDA",
+            draft,
+            outcome_class="should_have_been_tentative",
+            reviewer_notes="Existing theme should stay secondary.",
+        )
+
+        stored = get_scanner_research_review(conn, "NVDA", draft)
+        count = conn.execute("select count(*) from scanner_research_reviews").fetchone()[0]
+
+        self.assertEqual(count, 1)
+        self.assertEqual(inserted["review_id"], updated["review_id"])
+        self.assertEqual(stored["outcome_class"], "should_have_been_tentative")
+        self.assertEqual(stored["reviewer_notes"], "Existing theme should stay secondary.")
+
+    def test_scanner_research_review_summary_returns_counts_and_recent_rows(self):
+        conn = duckdb.connect(":memory:")
+        first_draft = {
+            "ticker": "NVDA",
+            "generated_at": "2026-03-17 12:00:00",
+            "theme_generation_strategy": "description_theme_generation",
+            "research_mode": "heuristic_fallback",
+            "recommended_action": "watch_only",
+            "confidence": "low",
+        }
+        second_draft = {
+            "ticker": "PLTR",
+            "generated_at": "2026-03-17 12:05:00",
+            "theme_generation_strategy": "description_theme_generation",
+            "research_mode": "openai",
+            "recommended_action": "add_to_existing_theme_review",
+            "confidence": "medium",
+        }
+
+        save_scanner_research_review(conn, "NVDA", first_draft, outcome_class="false_positive", reviewer_notes="Too generic.")
+        save_scanner_research_review(conn, "PLTR", second_draft, outcome_class="direct_fit_correct", reviewer_notes="")
+
+        summary = scanner_research_review_summary(conn, limit=5)
+
+        self.assertEqual(summary["counts_by_outcome"]["false_positive"], 1)
+        self.assertEqual(summary["counts_by_outcome"]["direct_fit_correct"], 1)
+        self.assertEqual(len(summary["recent_reviews"]), 2)
+        self.assertEqual(summary["recent_reviews"][0]["ticker"], "PLTR")
+
+    def test_streamlit_cached_connection_keeps_research_review_queries_usable_across_reruns(self):
+        db_path = Path(__file__).resolve().parent / f"_tmp_research_review_cache_{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}.duckdb"
+        get_db_connection.clear()
+        try:
+            with patch("src.database.DB_PATH", db_path), patch("src.config.DB_PATH", db_path), patch("src.database._has_streamlit_script_run_context", return_value=True):
+                from src.database import init_db
+
+                init_db()
+                draft = {
+                    "ticker": "NVDA",
+                    "generated_at": "2026-03-17 12:00:00",
+                    "theme_generation_strategy": "description_theme_generation",
+                    "research_mode": "heuristic_fallback",
+                    "recommended_action": "watch_only",
+                    "confidence": "low",
+                }
+                with get_conn() as conn:
+                    save_scanner_research_review(conn, "NVDA", draft, outcome_class="false_positive", reviewer_notes="First pass")
+                with get_conn() as conn:
+                    first = get_scanner_research_review(conn, "NVDA", draft)
+                with get_conn() as conn:
+                    second = get_scanner_research_review(conn, "NVDA", draft)
+
+                self.assertIsNotNone(first)
+                self.assertEqual(first["review_id"], second["review_id"])
+        finally:
+            get_db_connection.clear()
+
+
 class TestSuggestionsWorkflow(unittest.TestCase):
     def test_review_suggestion_reports_change_and_noop(self):
         conn = duckdb.connect(":memory:")
@@ -1624,6 +2431,197 @@ class TestSuggestionsWorkflow(unittest.TestCase):
         self.assertIn("Cloud Security (Technology - Software)", str(out.iloc[0]["current_membership_context"]))
         self.assertIn("Edge Computing (Emerging Tech)", str(out.iloc[0]["current_membership_context"]))
         self.assertIn("Emerging Tech", str(out.iloc[0]["current_categories"]))
+        conn.close()
+
+
+class TestScannerAuditProposedNewThemePersistence(unittest.TestCase):
+    @staticmethod
+    def _candidate_summary_df(ticker: str = "AAOI") -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "ticker": ticker,
+                    "source_labels": "scanner_audit",
+                    "recommendation": "review for addition",
+                    "recommendation_reason": "description-first audit",
+                    "persistence_score": 3,
+                    "observed_days": 7,
+                    "observations_last_5d": 3,
+                    "observations_last_10d": 4,
+                    "current_streak": 2,
+                    "distinct_scanner_count": 1,
+                    "first_seen": "2026-03-10",
+                    "last_seen": "2026-03-17",
+                    "scanners": "Growth",
+                    "metadata_basis": "test",
+                }
+            ]
+        )
+
+    @staticmethod
+    def _setup_scanner_audit_tables(conn):
+        conn.execute("create sequence if not exists suggestion_id_seq")
+        conn.execute("create sequence if not exists themes_id_seq")
+        conn.execute("create table themes(id bigint primary key, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+        conn.execute(
+            """
+            create table theme_suggestions(
+                suggestion_id bigint primary key default nextval('suggestion_id_seq'),
+                suggestion_type varchar not null,
+                status varchar not null default 'pending',
+                created_at timestamp not null default current_timestamp,
+                reviewed_at timestamp,
+                source varchar not null,
+                rationale varchar,
+                proposed_theme_name varchar,
+                proposed_theme_category varchar,
+                proposed_ticker varchar,
+                existing_theme_id bigint,
+                proposed_target_theme_id bigint,
+                reviewer_notes varchar,
+                priority varchar not null default 'medium',
+                source_context_json varchar,
+                source_updated_at timestamp
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table governed_ticker_onboarding(
+                ticker varchar primary key,
+                added_at timestamp not null default current_timestamp,
+                onboarding_source varchar not null,
+                history_readiness_status varchar not null default 'unknown',
+                backfill_status varchar not null default 'not_needed',
+                last_backfill_attempt_at timestamp,
+                last_backfill_error varchar,
+                downstream_refresh_needed boolean not null default false,
+                history_row_count bigint not null default 0,
+                history_target_days bigint not null default 30,
+                history_market_data_source varchar,
+                history_latest_trading_date date,
+                updated_at timestamp not null default current_timestamp
+            )
+            """
+        )
+
+    def test_manual_proposed_new_theme_persists_through_send_to_theme_review(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        row = conn.execute(
+            "select proposed_theme_name, proposed_theme_category, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+        queue = list_suggestions(conn, status="pending")
+
+        self.assertEqual(row[0], "Data Center Optics")
+        self.assertEqual(row[1], "Optical Networking")
+        self.assertIn("Data Center Optics", str(row[2]))
+        self.assertEqual(str(queue.iloc[0]["custom_new_theme_names"]), "Data Center Optics")
+        self.assertEqual(str(queue.iloc[0]["proposed_new_theme_category"]), "Optical Networking")
+        conn.close()
+
+    def test_manual_proposed_new_theme_persists_when_existing_themes_are_also_selected(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        row = conn.execute(
+            "select proposed_theme_name, proposed_theme_category, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+
+        self.assertEqual(row[0], "Data Center Optics")
+        self.assertEqual(row[1], "Optical Networking")
+        self.assertIn("AI - Infrastructure", str(row[2]))
+        self.assertIn("Data Center Optics", str(row[2]))
+        conn.close()
+
+    def test_generated_checkbox_selected_proposed_new_theme_persists(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        updated_value, _ = apply_generated_theme_idea_checkbox_selection(
+            "",
+            ["Data Center Optics"],
+            ["Data Center Optics", "Optical Networking"],
+            {},
+        )
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=split_possible_new_theme_ideas(updated_value),
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        row = conn.execute(
+            "select proposed_theme_name, proposed_theme_category, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+
+        self.assertEqual(row[0], "Data Center Optics")
+        self.assertEqual(row[1], "Optical Networking")
+        self.assertIn("Data Center Optics", str(row[2]))
+        conn.close()
+
+    def test_direct_apply_preserves_proposed_new_theme_context_while_only_applying_existing_themes(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")), patch(
+            "src.fetch_data.run_targeted_current_snapshot_hydration",
+            return_value={"refreshed": ["AAOI"]},
+        ):
+            result = apply_scanner_candidate_selected_themes(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        membership = conn.execute("select theme_id, ticker from theme_membership").fetchall()
+        applied_row = conn.execute(
+            "select status, proposed_theme_name, proposed_theme_category, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+        recent = recent_applied_suggestions(conn, limit=5)
+
+        self.assertEqual(membership, [(1, "AAOI")])
+        self.assertEqual(applied_row[0], "applied")
+        self.assertEqual(applied_row[1], "Data Center Optics")
+        self.assertEqual(applied_row[2], "Optical Networking")
+        self.assertIn("Data Center Optics", str(applied_row[3]))
+        self.assertEqual(result["proposed_new_theme_names"], ["Data Center Optics"])
+        self.assertEqual(result["proposed_new_theme_category"], "Optical Networking")
+        self.assertEqual(str(recent.iloc[0]["custom_new_theme_names"]), "Data Center Optics")
+        self.assertEqual(str(recent.iloc[0]["proposed_new_theme_category"]), "Optical Networking")
         conn.close()
 
 

@@ -969,6 +969,16 @@ def _normalize_new_theme_labels(values: list[str] | None) -> list[str]:
     return out
 
 
+def _joined_new_theme_labels(values: list[str] | None) -> str | None:
+    labels = _normalize_new_theme_labels(values)
+    return ", ".join(labels) if labels else None
+
+
+def _normalize_new_theme_category(value: object) -> str | None:
+    cleaned = str(value or "").strip()
+    return cleaned or None
+
+
 def promote_scanner_candidate_to_theme_review(
     conn,
     ticker: str,
@@ -977,6 +987,7 @@ def promote_scanner_candidate_to_theme_review(
     selected_suggested_theme_ids: list[object] | None = None,
     custom_existing_theme_ids: list[object] | None = None,
     custom_new_themes: list[str] | None = None,
+    proposed_new_theme_category: str | None = None,
 ) -> dict[str, object]:
     normalized = normalize_ticker(ticker)
     if not normalized:
@@ -1048,6 +1059,8 @@ def promote_scanner_candidate_to_theme_review(
                 )
     custom_existing_entries = _resolve_theme_entries(conn, custom_existing_ids)
     custom_new_theme_labels = _normalize_new_theme_labels(custom_new_themes)
+    proposed_new_theme_text = _joined_new_theme_labels(custom_new_theme_labels)
+    proposed_new_theme_category_value = _normalize_new_theme_category(proposed_new_theme_category)
     context = dict(existing_context)
     context.update(
         {
@@ -1058,6 +1071,7 @@ def promote_scanner_candidate_to_theme_review(
             "selected_suggested_themes": suggested_theme_entries,
             "custom_existing_themes": custom_existing_entries,
             "custom_new_themes": custom_new_theme_labels,
+            "proposed_new_theme_category": proposed_new_theme_category_value,
         }
     )
     if research_draft:
@@ -1074,6 +1088,8 @@ def promote_scanner_candidate_to_theme_review(
             selection_summary.append("custom existing themes=" + ", ".join(custom_existing_names))
         if custom_new_theme_labels:
             selection_summary.append("custom new themes=" + ", ".join(custom_new_theme_labels))
+        if proposed_new_theme_category_value:
+            selection_summary.append("proposed category=" + proposed_new_theme_category_value)
         rationale = rationale + " Review selections: " + " | ".join(selection_summary) + "."
 
     if existing is None:
@@ -1087,6 +1103,8 @@ def promote_scanner_candidate_to_theme_review(
                 priority=next_priority,
                 rationale=rationale,
                 proposed_ticker=normalized,
+                proposed_theme_name=proposed_new_theme_text,
+                proposed_theme_category=proposed_new_theme_category_value,
             ),
         )
         conn.execute(
@@ -1117,11 +1135,13 @@ def promote_scanner_candidate_to_theme_review(
         SET source = ?,
             rationale = ?,
             priority = ?,
+            proposed_theme_name = ?,
+            proposed_theme_category = ?,
             source_context_json = ?,
             source_updated_at = ?
         WHERE suggestion_id = ?
         """,
-        [updated_source, updated_rationale, merged_priority, context_json, promoted_at, suggestion_id],
+        [updated_source, updated_rationale, merged_priority, proposed_new_theme_text, proposed_new_theme_category_value, context_json, promoted_at, suggestion_id],
     )
     return {
         "action": "updated",
@@ -1139,6 +1159,7 @@ def apply_scanner_candidate_selected_themes(
     selected_suggested_theme_ids: list[object] | None = None,
     custom_existing_theme_ids: list[object] | None = None,
     custom_new_themes: list[str] | None = None,
+    proposed_new_theme_category: str | None = None,
 ) -> dict[str, object]:
     suggested_ids = _normalize_theme_selection_ids(selected_suggested_theme_ids)
     custom_existing_ids = _normalize_theme_selection_ids(custom_existing_theme_ids)
@@ -1153,6 +1174,7 @@ def apply_scanner_candidate_selected_themes(
         selected_suggested_theme_ids=suggested_ids,
         custom_existing_theme_ids=custom_existing_ids,
         custom_new_themes=custom_new_themes,
+        proposed_new_theme_category=proposed_new_theme_category,
     )
     suggestion_id = int(staged["suggestion_id"])
     row = conn.execute(
@@ -1177,6 +1199,8 @@ def apply_scanner_candidate_selected_themes(
 
     selected_existing = list(context.get("selected_suggested_themes") or []) + list(context.get("custom_existing_themes") or [])
     selected_existing = [item for item in selected_existing if isinstance(item, dict) and item.get("theme_id")]
+    custom_new_theme_labels = _normalize_new_theme_labels(list(context.get("custom_new_themes") or []))
+    proposed_new_theme_category_value = _normalize_new_theme_category(context.get("proposed_new_theme_category"))
     if not selected_existing:
         raise ValueError("Direct apply requires at least one selected existing theme.")
 
@@ -1216,6 +1240,8 @@ def apply_scanner_candidate_selected_themes(
         "suggestion_id": suggestion_id,
         "ticker": normalize_ticker(ticker),
         "applied_theme_names": applied_theme_names,
+        "proposed_new_theme_names": custom_new_theme_labels,
+        "proposed_new_theme_category": proposed_new_theme_category_value,
         "onboarding_state": onboarding_state,
         "message": (
             f"Applied selected themes for {normalize_ticker(ticker)} and started onboarding."

@@ -83,12 +83,113 @@ def normalize_possible_new_theme_input(value: object) -> str:
     return str(value or "").strip()
 
 
+def normalize_possible_new_theme_category_input(value: object) -> str:
+    return str(value or "").strip()
+
+
+def split_possible_new_theme_ideas(value: object) -> list[str]:
+    raw = normalize_possible_new_theme_input(value)
+    if not raw:
+        return []
+    ideas: list[str] = []
+    seen: set[str] = set()
+    for part in raw.replace(";", ",").split(","):
+        idea = normalize_possible_new_theme_input(part)
+        normalized_key = idea.casefold()
+        if not idea or normalized_key in seen:
+            continue
+        ideas.append(idea)
+        seen.add(normalized_key)
+    return ideas
+
+
+def join_possible_new_theme_ideas(values: object) -> str:
+    ideas: list[str] = []
+    seen: set[str] = set()
+    for value in list(values or []):
+        idea = normalize_possible_new_theme_input(value)
+        normalized_key = idea.casefold()
+        if not idea or normalized_key in seen:
+            continue
+        ideas.append(idea)
+        seen.add(normalized_key)
+    return ", ".join(ideas)
+
+
+def sync_generated_theme_idea_checkbox_state(
+    current_value: object,
+    generated_ideas: object,
+) -> dict[str, bool]:
+    selected = {idea.casefold() for idea in split_possible_new_theme_ideas(current_value)}
+    synced: dict[str, bool] = {}
+    for idea in list(generated_ideas or []):
+        normalized = normalize_possible_new_theme_input(idea)
+        if not normalized or normalized.casefold() in {key.casefold() for key in synced}:
+            continue
+        synced[normalized] = normalized.casefold() in selected
+    return synced
+
+
+def merge_generated_theme_ideas_with_custom(
+    current_value: object,
+    checked_generated_ideas: object,
+    generated_ideas: object,
+) -> str:
+    current = split_possible_new_theme_ideas(current_value)
+    generated_lookup = {
+        normalize_possible_new_theme_input(idea).casefold(): normalize_possible_new_theme_input(idea)
+        for idea in list(generated_ideas or [])
+        if normalize_possible_new_theme_input(idea)
+    }
+    checked_lookup = {
+        normalize_possible_new_theme_input(idea).casefold(): normalize_possible_new_theme_input(idea)
+        for idea in list(checked_generated_ideas or [])
+        if normalize_possible_new_theme_input(idea)
+    }
+    custom = [idea for idea in current if idea.casefold() not in generated_lookup]
+    merged_generated = [
+        generated_lookup[idea.casefold()]
+        for idea in list(generated_ideas or [])
+        if normalize_possible_new_theme_input(idea)
+        and normalize_possible_new_theme_input(idea).casefold() in checked_lookup
+    ]
+    return join_possible_new_theme_ideas(merged_generated + custom)
+
+
 def prepare_possible_new_theme_prefill(
     current_value: object,
     suggested_value: object,
     prior_state: dict[str, object] | None = None,
 ) -> tuple[str, dict[str, object]]:
     suggested = normalize_possible_new_theme_input(suggested_value)
+    current = None if current_value is None else str(current_value)
+    state = dict(prior_state or {})
+    auto_value = str(state.get("auto_value") or "")
+    user_edited = bool(state.get("user_edited"))
+
+    if current is None:
+        return suggested, {"auto_value": suggested, "user_edited": False}
+
+    if current != auto_value:
+        user_edited = True
+
+    if not user_edited and suggested != auto_value:
+        current = suggested
+        auto_value = suggested
+
+    if current is None:
+        current = suggested
+        auto_value = suggested
+
+    return str(current), {"auto_value": auto_value, "user_edited": user_edited}
+
+
+def prepare_possible_new_theme_category_prefill(
+    current_value: object,
+    suggested_value: object,
+    prior_state: dict[str, object] | None = None,
+) -> tuple[str, dict[str, object]]:
+    suggested = normalize_possible_new_theme_category_input(suggested_value)
     current = None if current_value is None else str(current_value)
     state = dict(prior_state or {})
     auto_value = str(state.get("auto_value") or "")
@@ -118,8 +219,56 @@ def finalize_possible_new_theme_state(
     normalized = normalize_possible_new_theme_input(current_value)
     next_state = dict(state or {})
     auto_value = str(next_state.get("auto_value") or "")
-    next_state["user_edited"] = normalized != auto_value
+    next_state["user_edited"] = normalized != auto_value or bool(next_state.get("forced_user_edited"))
     return next_state
+
+
+def finalize_possible_new_theme_category_state(
+    current_value: object,
+    state: dict[str, object] | None = None,
+) -> dict[str, object]:
+    normalized = normalize_possible_new_theme_category_input(current_value)
+    next_state = dict(state or {})
+    auto_value = str(next_state.get("auto_value") or "")
+    next_state["user_edited"] = normalized != auto_value or bool(next_state.get("forced_user_edited"))
+    return next_state
+
+
+def apply_generated_theme_idea_selection(
+    current_value: object,
+    selected_idea: object,
+    state: dict[str, object] | None = None,
+) -> tuple[str, dict[str, object]]:
+    normalized = normalize_possible_new_theme_input(selected_idea)
+    current = split_possible_new_theme_ideas(current_value)
+    normalized_keys = {idea.casefold() for idea in current}
+    if normalized:
+        if normalized.casefold() in normalized_keys:
+            current = [idea for idea in current if idea.casefold() != normalized.casefold()]
+        else:
+            current.append(normalized)
+    updated_value = join_possible_new_theme_ideas(current)
+    next_state = dict(state or {})
+    next_state["forced_user_edited"] = True
+    next_state["user_edited"] = True
+    return updated_value, next_state
+
+
+def apply_generated_theme_idea_checkbox_selection(
+    current_value: object,
+    checked_generated_ideas: object,
+    generated_ideas: object,
+    state: dict[str, object] | None = None,
+) -> tuple[str, dict[str, object]]:
+    updated_value = merge_generated_theme_ideas_with_custom(
+        current_value,
+        checked_generated_ideas,
+        generated_ideas,
+    )
+    next_state = dict(state or {})
+    next_state["forced_user_edited"] = True
+    next_state["user_edited"] = True
+    return updated_value, next_state
 
 
 def normalize_scanner_research_draft_source(value: object) -> str:

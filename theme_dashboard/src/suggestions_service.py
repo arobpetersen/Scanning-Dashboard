@@ -26,6 +26,7 @@ class SuggestionPayload:
     source: str
     rationale: str = ""
     proposed_theme_name: str | None = None
+    proposed_theme_category: str | None = None
     proposed_ticker: str | None = None
     existing_theme_id: int | None = None
     proposed_target_theme_id: int | None = None
@@ -159,9 +160,9 @@ def create_suggestion(conn, payload: SuggestionPayload) -> int:
         """
         INSERT INTO theme_suggestions(
             suggestion_type, status, source, rationale, priority,
-            proposed_theme_name, proposed_ticker, existing_theme_id, proposed_target_theme_id
+            proposed_theme_name, proposed_theme_category, proposed_ticker, existing_theme_id, proposed_target_theme_id
         )
-        VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING suggestion_id
         """,
         [
@@ -170,6 +171,7 @@ def create_suggestion(conn, payload: SuggestionPayload) -> int:
             (payload.rationale or "").strip(),
             priority,
             payload.proposed_theme_name.strip() if payload.proposed_theme_name else None,
+            payload.proposed_theme_category.strip() if payload.proposed_theme_category else None,
             payload.proposed_ticker.strip().upper() if payload.proposed_ticker else None,
             payload.existing_theme_id,
             payload.proposed_target_theme_id,
@@ -184,6 +186,7 @@ def _compute_validation_status(conn, row: pd.Series) -> str:
         source=str(row["source"]),
         rationale=str(row.get("rationale") or ""),
         proposed_theme_name=row.get("proposed_theme_name"),
+        proposed_theme_category=row.get("proposed_theme_category"),
         proposed_ticker=row.get("proposed_ticker"),
         existing_theme_id=int(row["existing_theme_id"]) if pd.notna(row.get("existing_theme_id")) else None,
         proposed_target_theme_id=int(row["proposed_target_theme_id"]) if pd.notna(row.get("proposed_target_theme_id")) else None,
@@ -259,6 +262,7 @@ def _structured_review_theme_summary(context: dict[str, object]) -> dict[str, ob
     selected_suggested = list(context.get("selected_suggested_themes") or [])
     custom_existing = list(context.get("custom_existing_themes") or [])
     custom_new = [str(value).strip() for value in context.get("custom_new_themes") or [] if str(value).strip()]
+    proposed_category = str(context.get("proposed_new_theme_category") or "").strip()
     selected_existing_entries = selected_suggested + custom_existing
     selected_existing_theme_names = [
         str(item.get("theme_name")).strip()
@@ -271,6 +275,7 @@ def _structured_review_theme_summary(context: dict[str, object]) -> dict[str, ob
     return {
         "selected_existing_theme_names": selected_existing_theme_names,
         "custom_new_theme_names": custom_new,
+        "proposed_new_theme_category": proposed_category,
         "promotion_note": promotion_note,
         "scanner_audit_recommendation": str(scanner_evidence.get("recommendation") or "").strip(),
         "scanner_audit_reason": str(scanner_evidence.get("recommendation_reason") or "").strip(),
@@ -467,7 +472,7 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
     row = conn.execute(
         """
         SELECT suggestion_id, suggestion_type, status, source, proposed_theme_name, proposed_ticker,
-               existing_theme_id, proposed_target_theme_id, priority, source_context_json
+               proposed_theme_category, existing_theme_id, proposed_target_theme_id, priority, source_context_json
         FROM theme_suggestions
         WHERE suggestion_id = ?
         """,
@@ -476,7 +481,7 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
     if row is None:
         raise ValueError("Suggestion not found")
 
-    _, suggestion_type, status, source, proposed_theme_name, proposed_ticker, existing_theme_id, target_theme_id, priority, source_context_json = row
+    _, suggestion_type, status, source, proposed_theme_name, proposed_ticker, proposed_theme_category, existing_theme_id, target_theme_id, priority, source_context_json = row
     if status != "approved":
         raise ValueError("Only approved suggestions can be applied")
 
@@ -484,6 +489,7 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
         suggestion_type=suggestion_type,
         source=source,
         proposed_theme_name=proposed_theme_name,
+        proposed_theme_category=proposed_theme_category,
         proposed_ticker=proposed_ticker,
         existing_theme_id=existing_theme_id,
         proposed_target_theme_id=target_theme_id,
@@ -552,11 +558,12 @@ def suggestion_status_counts(conn) -> pd.DataFrame:
 
 
 def recent_applied_suggestions(conn, limit: int = 10) -> pd.DataFrame:
-    return conn.execute(
+    df = conn.execute(
         """
         SELECT s.suggestion_id, s.suggestion_type, s.source, s.priority, s.proposed_ticker, s.proposed_theme_name,
+               s.proposed_theme_category,
                t.name AS existing_theme_name, tt.name AS target_theme_name,
-               s.reviewer_notes, s.reviewed_at
+               s.reviewer_notes, s.reviewed_at, s.source_context_json
         FROM theme_suggestions s
         LEFT JOIN themes t ON t.id = s.existing_theme_id
         LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
@@ -566,3 +573,16 @@ def recent_applied_suggestions(conn, limit: int = 10) -> pd.DataFrame:
         """,
         [limit],
     ).df()
+    if df.empty:
+        return df
+    df = df.copy()
+    df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+    structured = df["source_context"].apply(_structured_review_theme_summary).apply(pd.Series)
+    df = pd.concat([df, structured], axis=1)
+    df["selected_existing_theme_names"] = df["selected_existing_theme_names"].apply(
+        lambda names: ", ".join(names) if isinstance(names, list) and names else None
+    )
+    df["custom_new_theme_names"] = df["custom_new_theme_names"].apply(
+        lambda names: ", ".join(names) if isinstance(names, list) and names else None
+    )
+    return df.drop(columns=["source_context", "source_context_json"], errors="ignore")
