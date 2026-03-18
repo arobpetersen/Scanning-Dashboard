@@ -89,7 +89,7 @@ def _connection_is_usable(conn) -> bool:
     try:
         conn.execute("SELECT 1")
         return True
-    except duckdb.ConnectionException:
+    except duckdb.Error:
         return False
 
 
@@ -104,6 +104,17 @@ def get_db_connection(db_path: str):
 
 @contextmanager
 def get_fresh_read_conn():
+    conn = _connect_with_retry(database_path_str())
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
+def get_bootstrap_conn():
+    # Schema/bootstrap DDL should not reuse the long-lived shared Streamlit connection.
+    # A short-lived connection avoids carrying forward any poisoned pending-result state.
     conn = _connect_with_retry(database_path_str())
     try:
         yield conn
@@ -528,7 +539,7 @@ def _rebuild_theme_suggestions(conn) -> None:
 
 
 def init_db() -> None:
-    with get_conn() as conn:
+    with get_bootstrap_conn() as conn:
         conn.execute(SCHEMA_SQL)
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_type VARCHAR")
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_theme_name VARCHAR")

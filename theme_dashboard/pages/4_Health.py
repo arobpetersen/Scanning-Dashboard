@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+import pandas as pd
 import streamlit as st
 
 from src.config import (
@@ -13,7 +14,7 @@ from src.config import (
     STALE_DATA_HOURS,
     massive_api_key,
 )
-from src.database import get_conn, init_db
+from src.database import get_conn, get_fresh_read_conn, init_db
 from src.failure_classification import categorize_failure_message
 from src.fetch_data import mark_stale_running_runs
 from src.historical_backfill import (
@@ -373,8 +374,21 @@ with ops_tab:
             st.warning(message)
         else:
             st.error(message)
-    with get_conn() as conn:
-        queue = symbol_hygiene_queue(conn, limit=250)
+    queue_warning_messages: list[str] = []
+    try:
+        with get_conn() as conn:
+            # Authoritative Health-page queue call: explicitly wire the outlier path to a fresh read connection.
+            queue = symbol_hygiene_queue(conn, limit=250, outlier_read_conn_factory=get_fresh_read_conn)
+        queue_warning_messages = [str(message) for message in queue.attrs.get("warnings", []) if str(message).strip()]
+    except Exception as exc:
+        queue = pd.DataFrame()
+        queue_warning_messages = [
+            "Symbol hygiene queue loaded without calculation outlier context because that subquery failed. "
+            f"Details: {exc}"
+        ]
+
+    for message in queue_warning_messages:
+        st.warning(message)
 
     staged_actions = st.session_state.setdefault("symbol_hygiene_staged", {})
 

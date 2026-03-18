@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from .theme_service import add_ticker, create_theme, remove_ticker, update_theme
+from .theme_service import add_ticker, remove_ticker, update_theme
 
 VALID_TYPES = {
     "add_ticker_to_theme",
@@ -283,6 +283,135 @@ def _structured_review_theme_summary(context: dict[str, object]) -> dict[str, ob
     }
 
 
+def _format_structured_name_value(value: object) -> str | None:
+    if isinstance(value, list):
+        cleaned = [str(item).strip() for item in value if str(item or "").strip()]
+        return ", ".join(cleaned) if cleaned else None
+    cleaned = str(value or "").strip()
+    return cleaned or None
+
+
+def _split_structured_theme_names(value: object) -> list[str]:
+    cleaned = _format_structured_name_value(value)
+    if not cleaned:
+        return []
+    items: list[str] = []
+    seen: set[str] = set()
+    for part in cleaned.replace(";", ",").split(","):
+        label = str(part or "").strip()
+        if not label or label.casefold() in seen:
+            continue
+        items.append(label)
+        seen.add(label.casefold())
+    return items
+
+
+def can_follow_up_applied_scanner_audit_review_row(row: dict[str, object] | pd.Series | object) -> bool:
+    if not isinstance(row, (dict, pd.Series)):
+        return False
+    source = str(row.get("source") or "").strip().lower()
+    suggestion_type = str(row.get("suggestion_type") or "").strip().lower()
+    status = str(row.get("status") or "").strip().lower()
+    proposed_new_themes = _split_structured_theme_names(row.get("custom_new_theme_names") or row.get("proposed_theme_name"))
+    return source == "scanner_audit" and suggestion_type == "review_theme" and status == "applied" and bool(proposed_new_themes)
+
+
+def can_apply_queue_suggestion_row(row: dict[str, object] | pd.Series | object) -> bool:
+    if not isinstance(row, (dict, pd.Series)):
+        return False
+    if str(row.get("status") or "").strip().lower() != "approved":
+        return False
+    suggestion_type = str(row.get("suggestion_type") or "").strip().lower()
+    if suggestion_type != "review_theme":
+        return True
+    selected_existing_theme_names = _format_structured_name_value(
+        row.get("selected_existing_theme_names") or row.get("existing_theme_name")
+    )
+    return bool(selected_existing_theme_names)
+
+
+def can_fast_path_create_governed_theme_row(row: dict[str, object] | pd.Series | object) -> bool:
+    if not isinstance(row, (dict, pd.Series)):
+        return False
+    if str(row.get("status") or "").strip().lower() != "approved":
+        return False
+    if str(row.get("suggestion_type") or "").strip().lower() != "review_theme":
+        return False
+    proposed_theme_name = _format_structured_name_value(row.get("custom_new_theme_names") or row.get("proposed_theme_name"))
+    proposed_ticker = str(row.get("proposed_ticker") or "").strip().upper()
+    return bool(proposed_theme_name and proposed_ticker)
+
+
+def _resolve_or_create_theme_for_fast_path(conn, theme_name: str, category: str | None) -> tuple[int, bool, str]:
+    existing = conn.execute(
+        """
+        SELECT id, category
+        FROM themes
+        WHERE lower(name) = lower(?)
+        ORDER BY id
+        LIMIT 1
+        """,
+        [theme_name],
+    ).fetchone()
+    if existing is not None:
+        return int(existing[0]), False, str(existing[1] or "")
+
+    conn.execute(
+        """
+        INSERT INTO themes(id, name, category, is_active)
+        VALUES (nextval('themes_id_seq'), ?, ?, TRUE)
+        """,
+        [theme_name.strip(), str(category or "").strip() or "Uncategorized"],
+    )
+    created = conn.execute(
+        """
+        SELECT id, category
+        FROM themes
+        WHERE lower(name) = lower(?)
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        [theme_name],
+    ).fetchone()
+    if created is None:
+        raise ValueError("Governed theme could not be created.")
+    return int(created[0]), True, str(created[1] or "")
+
+
+def _apply_review_theme_display_fallbacks(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    enriched = df.copy()
+    if "custom_new_theme_names" in enriched.columns and "proposed_theme_name" in enriched.columns:
+        enriched["custom_new_theme_names"] = enriched.apply(
+            lambda row: row["custom_new_theme_names"]
+            if _format_structured_name_value(row.get("custom_new_theme_names"))
+            else (
+                row.get("proposed_theme_name")
+                if str(row.get("suggestion_type") or "").strip() == "review_theme"
+                else None
+            ),
+            axis=1,
+        )
+    if "proposed_new_theme_category" in enriched.columns and "proposed_theme_category" in enriched.columns:
+        enriched["proposed_new_theme_category"] = enriched.apply(
+            lambda row: row["proposed_new_theme_category"]
+            if str(row.get("proposed_new_theme_category") or "").strip()
+            else (
+                row.get("proposed_theme_category")
+                if str(row.get("suggestion_type") or "").strip() == "review_theme"
+                else None
+            ),
+            axis=1,
+        )
+    if "selected_existing_theme_names" in enriched.columns:
+        enriched["selected_existing_theme_names"] = enriched["selected_existing_theme_names"].apply(_format_structured_name_value)
+    if "custom_new_theme_names" in enriched.columns:
+        enriched["custom_new_theme_names"] = enriched["custom_new_theme_names"].apply(_format_structured_name_value)
+    return enriched
+
+
 def list_suggestions(
     conn,
     status: str | None = None,
@@ -335,12 +464,7 @@ def list_suggestions(
     df["source_context"] = df["source_context_json"].apply(_parse_source_context)
     structured = df["source_context"].apply(_structured_review_theme_summary).apply(pd.Series)
     df = pd.concat([df, structured], axis=1)
-    df["selected_existing_theme_names"] = df["selected_existing_theme_names"].apply(
-        lambda names: ", ".join(names) if isinstance(names, list) and names else None
-    )
-    df["custom_new_theme_names"] = df["custom_new_theme_names"].apply(
-        lambda names: ", ".join(names) if isinstance(names, list) and names else None
-    )
+    df = _apply_review_theme_display_fallbacks(df)
     df["validation_status"] = df.apply(lambda r: _compute_validation_status(conn, r), axis=1)
     return df
 
@@ -425,6 +549,12 @@ def bulk_update_filtered_status(
 def review_suggestion(conn, suggestion_id: int, new_status: str, reviewer_notes: str) -> dict[str, object]:
     if new_status not in {"approved", "rejected"}:
         raise ValueError("Review status must be approved or rejected")
+    return update_suggestion_status(conn, suggestion_id, new_status, reviewer_notes)
+
+
+def update_suggestion_status(conn, suggestion_id: int, new_status: str, reviewer_notes: str) -> dict[str, object]:
+    if new_status not in {"approved", "rejected", "obsolete"}:
+        raise ValueError("Status update must be approved, rejected, or obsolete")
 
     existing = conn.execute(
         """
@@ -447,7 +577,7 @@ def review_suggestion(conn, suggestion_id: int, new_status: str, reviewer_notes:
             "message": f"Suggestion #{int(suggestion_id)} is already {new_status}.",
         }
     if current_status not in {"pending", "approved", "rejected"}:
-        raise ValueError(f"Suggestion #{int(suggestion_id)} cannot be reviewed from status '{current_status}'.")
+        raise ValueError(f"Suggestion #{int(suggestion_id)} cannot be updated from status '{current_status}'.")
 
     conn.execute(
         """
@@ -546,6 +676,80 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
     )
 
 
+def fast_path_create_governed_theme_and_assign_ticker(conn, suggestion_id: int, reviewer_notes: str = "") -> dict[str, object]:
+    row = conn.execute(
+        """
+        SELECT suggestion_id, suggestion_type, status, source, proposed_theme_name, proposed_ticker,
+               proposed_theme_category, source_context_json
+        FROM theme_suggestions
+        WHERE suggestion_id = ?
+        """,
+        [suggestion_id],
+    ).fetchone()
+    if row is None:
+        raise ValueError("Suggestion not found")
+
+    selected_id, suggestion_type, status, source, proposed_theme_name, proposed_ticker, proposed_theme_category, source_context_json = row
+    if str(status or "").strip().lower() != "approved":
+        raise ValueError("Fast path requires an approved suggestion.")
+    if str(suggestion_type or "").strip().lower() != "review_theme":
+        raise ValueError("Fast path only supports approved review_theme suggestions.")
+
+    context = _parse_source_context(source_context_json)
+    proposed_theme_names = _split_structured_theme_names(context.get("custom_new_theme_names") or proposed_theme_name)
+    ticker = str(proposed_ticker or "").strip().upper()
+    if not proposed_theme_names:
+        raise ValueError("Approved suggestion has no proposed new theme to create.")
+    if not ticker:
+        raise ValueError("Approved suggestion has no ticker to assign.")
+
+    theme_name = proposed_theme_names[0]
+    category_value = str(context.get("proposed_new_theme_category") or proposed_theme_category or "").strip()
+    theme_id, created_theme, stored_category = _resolve_or_create_theme_for_fast_path(conn, theme_name, category_value)
+    add_result = add_ticker(conn, theme_id, ticker, onboarding_source=f"suggestion_fast_path:{source}")
+
+    updated_context = dict(context)
+    updated_context.update(
+        {
+            "applied_via_fast_path": True,
+            "created_from_suggestion_id": int(selected_id),
+            "created_governed_theme_id": int(theme_id),
+            "created_governed_theme_name": theme_name,
+            "created_governed_theme_category": stored_category or category_value or "Uncategorized",
+            "fast_path_assigned_ticker": ticker,
+        }
+    )
+    updated_context_json = json.dumps(updated_context, sort_keys=True)
+    note_text = reviewer_notes.strip()
+    conn.execute(
+        """
+        UPDATE theme_suggestions
+        SET status = 'applied',
+            reviewed_at = COALESCE(reviewed_at, CURRENT_TIMESTAMP),
+            reviewer_notes = CASE WHEN ? = '' THEN reviewer_notes ELSE ? END,
+            source_context_json = ?
+        WHERE suggestion_id = ?
+        """,
+        [note_text, note_text, updated_context_json, suggestion_id],
+    )
+    return {
+        "suggestion_id": int(selected_id),
+        "status": "applied",
+        "theme_id": int(theme_id),
+        "theme_name": theme_name,
+        "theme_category": stored_category or category_value or "Uncategorized",
+        "created_theme": bool(created_theme),
+        "ticker": ticker,
+        "ticker_added_to_theme": bool(add_result.get("added_to_theme")),
+        "newly_governed": bool(add_result.get("newly_governed")),
+        "onboarding_state": add_result.get("onboarding_state"),
+        "message": (
+            f"{'Created' if created_theme else 'Reused'} governed theme `{theme_name}` "
+            f"and {'assigned' if add_result.get('added_to_theme') else 'kept'} {ticker}."
+        ),
+    }
+
+
 def suggestion_status_counts(conn) -> pd.DataFrame:
     return conn.execute(
         """
@@ -579,10 +783,5 @@ def recent_applied_suggestions(conn, limit: int = 10) -> pd.DataFrame:
     df["source_context"] = df["source_context_json"].apply(_parse_source_context)
     structured = df["source_context"].apply(_structured_review_theme_summary).apply(pd.Series)
     df = pd.concat([df, structured], axis=1)
-    df["selected_existing_theme_names"] = df["selected_existing_theme_names"].apply(
-        lambda names: ", ".join(names) if isinstance(names, list) and names else None
-    )
-    df["custom_new_theme_names"] = df["custom_new_theme_names"].apply(
-        lambda names: ", ".join(names) if isinstance(names, list) and names else None
-    )
+    df = _apply_review_theme_display_fallbacks(df)
     return df.drop(columns=["source_context", "source_context_json"], errors="ignore")

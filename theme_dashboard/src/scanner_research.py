@@ -257,6 +257,9 @@ GENERIC_PRODUCT_MODIFIER_STOPWORDS = {
     "advanced",
     "american",
     "analytics",
+    "build",
+    "building",
+    "builds",
     "business",
     "cloud",
     "commercial",
@@ -271,14 +274,29 @@ GENERIC_PRODUCT_MODIFIER_STOPWORDS = {
     "infrastructure",
     "integrated",
     "intelligent",
+    "maker",
+    "makers",
+    "manufacture",
+    "manufactured",
+    "manufactures",
+    "manufacturing",
     "mission",
     "next",
     "nextgen",
     "next-gen",
     "platform",
     "platforms",
+    "produce",
+    "producer",
+    "producers",
+    "produces",
+    "provides",
+    "provider",
+    "providers",
     "service",
     "services",
+    "selling",
+    "sells",
     "smart",
     "software",
     "solution",
@@ -289,6 +307,95 @@ GENERIC_PRODUCT_MODIFIER_STOPWORDS = {
     "technology",
     "technologies",
     "workflow",
+}
+
+AUTONOMOUS_COMPONENT_DRIFT_TOKENS = {
+    "ai",
+    "artificial intelligence",
+    "robotics",
+    "robotic",
+    "edge computing",
+    "edge ai",
+    "semiconductor",
+    "semiconductors",
+    "equipment",
+}
+
+AUTONOMOUS_SYSTEM_DIRECT_TOKENS = {
+    "drone",
+    "drones",
+    "uav",
+    "uavs",
+    "unmanned",
+    "autonomous system",
+    "autonomous systems",
+}
+
+DIGITAL_ASSET_INFRASTRUCTURE_DIRECT_TOKENS = {
+    "stablecoin",
+    "stablecoins",
+    "digital asset",
+    "blockchain payments",
+    "on-chain payments",
+    "onchain payments",
+    "crypto payments",
+    "payment rails",
+    "settlement infrastructure",
+    "tokenized dollar",
+    "digital dollar",
+    "crypto",
+    "blockchain settlement",
+    "digital asset settlement",
+}
+
+DIGITAL_ASSET_INFRASTRUCTURE_GENERIC_DRIFT_TOKENS = {
+    "payment",
+    "payments",
+    "fintech",
+    "bank",
+    "banking",
+    "software",
+    "cloud",
+    "devops",
+    "observability",
+}
+
+UPSTREAM_OIL_GAS_DIRECT_TOKENS = {
+    "upstream oil and gas",
+    "oil and gas exploration and production",
+    "exploration and production",
+    "e&p",
+    "working interest",
+    "working interests",
+    "operated interest",
+    "operated interests",
+    "oil and gas assets",
+    "oil and gas properties",
+    "onshore oil and gas assets",
+}
+
+UPSTREAM_OIL_GAS_DRIFT_TOKENS = {
+    "lng",
+    "liquefied natural gas",
+    "energy transition",
+    "renewable",
+    "renewables",
+    "clean energy",
+    "decarbonization",
+    "solar",
+    "battery",
+    "hydrogen",
+}
+
+UPSTREAM_OIL_GAS_GEOGRAPHY_BUCKET_TOKENS = {
+    "permian",
+    "marcellus",
+    "haynesville",
+    "bakken",
+    "eagle ford",
+    "appalachia",
+    "midland basin",
+    "delaware basin",
 }
 
 DESCRIPTION_NATIVE_DESCRIPTOR_RULES = (
@@ -317,6 +424,43 @@ DESCRIPTION_NATIVE_DESCRIPTOR_RULES = (
         "family": "optical_networking",
     },
     {
+        "label": "Additive Manufacturing",
+        "phrases": (
+            "additive manufacturing",
+            "additive manufacturing systems",
+            "additive manufacturing platform",
+            "additive manufacturing software",
+        ),
+        "layers": {"system", "platform", "software_application"},
+        "family": "industrial_additive_manufacturing",
+    },
+    {
+        "label": "Industrial 3D Printing",
+        "phrases": (
+            "industrial 3d printing",
+            "industrial 3d printer",
+            "industrial 3d printers",
+            "3d printing systems",
+            "3d printer systems",
+            "industrial printer systems",
+        ),
+        "layers": {"system", "device"},
+        "family": "industrial_additive_manufacturing",
+    },
+    {
+        "label": "Industrial Manufacturing Systems",
+        "phrases": (
+            "manufacturing systems",
+            "production systems",
+            "fabrication systems",
+            "manufacturing software",
+            "production software",
+            "fabrication software",
+        ),
+        "layers": {"system", "platform", "software_application"},
+        "family": "industrial_additive_manufacturing",
+    },
+    {
         "label": "Digital Asset Market Infrastructure",
         "phrases": (
             "digital asset platform",
@@ -331,6 +475,75 @@ DESCRIPTION_NATIVE_DESCRIPTOR_RULES = (
         ),
         "layers": {"platform", "network_service"},
         "family": "digital_asset_infrastructure",
+    },
+    {
+        "label": "Stablecoins / Digital Assets Infrastructure",
+        "phrases": (
+            "stablecoin",
+            "stablecoins",
+            "stablecoin infrastructure",
+            "digital dollar",
+            "tokenized dollar",
+            "tokenized cash",
+            "digital asset financial infrastructure",
+            "digital asset infrastructure",
+        ),
+        "layers": {"platform", "network_service"},
+        "family": "digital_asset_infrastructure",
+    },
+    {
+        "label": "Blockchain Payments",
+        "phrases": (
+            "blockchain payments",
+            "on-chain payments",
+            "onchain payments",
+            "blockchain payment rails",
+            "crypto payments rails",
+            "payments rails",
+            "settlement infrastructure",
+            "on-chain settlement",
+            "digital asset settlement",
+        ),
+        "layers": {"platform", "network_service"},
+        "family": "digital_asset_infrastructure",
+    },
+    {
+        "label": "Crypto Payments Infrastructure",
+        "phrases": (
+            "crypto payments infrastructure",
+            "blockchain payments infrastructure",
+            "stablecoin payments infrastructure",
+            "digital asset payments infrastructure",
+        ),
+        "layers": {"platform", "network_service"},
+        "family": "digital_asset_infrastructure",
+    },
+    {
+        "label": "Oil & Gas Exploration & Production",
+        "phrases": (
+            "oil and gas exploration and production",
+            "exploration and production",
+            "upstream oil and gas",
+            "oil and gas assets",
+            "oil and gas properties",
+            "working interests",
+            "operated interests",
+            "onshore oil and gas assets",
+        ),
+        "layers": {"extractive_resource"},
+        "family": "upstream_oil_gas",
+    },
+    {
+        "label": "Upstream Oil & Gas",
+        "phrases": (
+            "upstream oil and gas",
+            "oil and gas producer",
+            "oil and gas producers",
+            "upstream producer",
+            "upstream producers",
+        ),
+        "layers": {"extractive_resource"},
+        "family": "upstream_oil_gas",
     },
     {
         "label": "Consumer Fintech",
@@ -479,13 +692,72 @@ MERCHANT_INPUT_PROCESS_CONTEXTS = {
     "manufacturing processes",
 }
 
+INDUSTRIAL_ADDITIVE_MANUFACTURING_SIGNALS = {
+    "additive manufacturing",
+    "industrial 3d printing",
+    "3d printing",
+    "3d printer",
+    "3d printers",
+    "industrial printer",
+    "industrial printers",
+}
+
+INDUSTRIAL_MANUFACTURING_SYSTEM_SIGNALS = {
+    "printer systems",
+    "printing systems",
+    "production systems",
+    "manufacturing systems",
+    "fabrication systems",
+    "industrial manufacturing software",
+    "manufacturing software",
+    "production software",
+    "fabrication software",
+}
+
+INDUSTRIAL_MANUFACTURING_CONTEXT_SIGNALS = {
+    "industrial",
+    "manufacturing",
+    "production",
+    "fabrication",
+    "factory",
+    "printer system",
+    "hardware",
+}
+
+INDUSTRIAL_MANUFACTURING_DRIFT_TOKENS = {
+    "luxury",
+    "luxury goods",
+    "europe",
+    "european",
+    "asia",
+    "asian",
+    "china",
+    "chinese",
+    "japan",
+    "japanese",
+    "india",
+    "indian",
+    "germany",
+    "german",
+    "france",
+    "french",
+    "italy",
+    "italian",
+    "america",
+    "american",
+    "latin america",
+    "middle east",
+}
+
 MISSING_THEME_CATEGORY_BY_FAMILY = {
+    "industrial_additive_manufacturing": "Additive Manufacturing / Industrial 3D Printing",
     "optical_networking": "Optical Networking",
     "digital_asset_infrastructure": "Crypto Infrastructure / Digital Assets",
     "consumer_fintech": "Financial Technology",
     "memory_storage": "Semiconductors / Storage",
     "wireless_systems": "Wireless Infrastructure",
     "autonomous_systems": "Autonomous Systems",
+    "upstream_oil_gas": "Oil & Gas / Upstream",
     "extractive_resources": "Metals & Mining",
 }
 
@@ -1376,6 +1648,8 @@ def _domain_anchor(profile: dict[str, object], candidate: dict[str, object], *ex
             )
         )
     )
+    if "industrial_additive_manufacturing" in descriptor_families:
+        return "industrial manufacturing/additive"
     if "extractive_resources" in descriptor_families:
         return "mining/resources"
     archetypes = sorted(_candidate_archetypes(profile, candidate, *extra_parts))
@@ -1405,6 +1679,7 @@ def _candidate_theme_ideas_from_description(profile: dict[str, object], candidat
     dominant_role = _dominant_economic_role(profile, candidate)
     ideas: list[str] = []
     native_descriptors = _description_native_business_descriptors(description)
+    strong_digital_asset_infrastructure = _has_strong_digital_asset_infrastructure_signals(description)
     explicit_cloud_software_signals = any(
         token in description
         for token in ["cloud", "saas", "observability", "workflow", "devops", "enterprise software"]
@@ -1415,7 +1690,7 @@ def _candidate_theme_ideas_from_description(profile: dict[str, object], candidat
     identity_signals = any(token in description for token in ["identity verification", "digital identity", "authentication", "identity"])
 
     def add(label: str | None) -> None:
-        normalized = _normalize_optional_theme_label(label)
+        normalized = _canonicalize_direct_family_theme_label(label)
         if normalized and normalized not in ideas:
             ideas.append(normalized)
 
@@ -1441,13 +1716,13 @@ def _candidate_theme_ideas_from_description(profile: dict[str, object], candidat
         add("Identity Verification")
     if lending_signals:
         add("Consumer Lending")
-        if payments_signals:
+        if payments_signals and not strong_digital_asset_infrastructure:
             add("Digital Payments")
             add("Fintech Payments")
-    elif payments_signals:
+    elif payments_signals and not strong_digital_asset_infrastructure:
         add("Digital Payments")
         add("Fintech Payments")
-    if "fintech_payments_lending" in archetypes:
+    if "fintech_payments_lending" in archetypes and not strong_digital_asset_infrastructure:
         add("Fintech Payments")
         add("Digital Payments")
         if lending_signals:
@@ -1470,8 +1745,13 @@ def _candidate_theme_ideas_from_description(profile: dict[str, object], candidat
             if "data center" in description or "hyperscale" in description:
                 add("Data Center Optics")
             add("Optical Networking")
-    if "software_devops_cloud" in archetypes and dominant_role == "software_service_provider" and (
+    if (
+        "software_devops_cloud" in archetypes
+        and dominant_role == "software_service_provider"
+        and not strong_digital_asset_infrastructure
+        and (
         explicit_cloud_software_signals or not native_descriptors
+        )
     ):
         add("Cloud Software")
     if (domain_anchor == "unclear" and not dominant_role) or not ideas:
@@ -1480,7 +1760,7 @@ def _candidate_theme_ideas_from_description(profile: dict[str, object], candidat
     if not ideas:
         fallback = _candidate_new_theme_label(profile, candidate)
         add(fallback)
-    return ideas[:5]
+    return _sort_theme_ideas_by_specificity(ideas)[:5]
 
 
 def _direct_phrase_theme_ideas(text: object) -> list[str]:
@@ -1490,7 +1770,7 @@ def _direct_phrase_theme_ideas(text: object) -> list[str]:
     ideas: list[str] = []
 
     def add(label: str | None) -> None:
-        normalized = _normalize_optional_theme_label(label)
+        normalized = _canonicalize_direct_family_theme_label(label)
         if normalized and normalized not in ideas:
             ideas.append(normalized)
 
@@ -1520,7 +1800,54 @@ def _direct_phrase_theme_ideas(text: object) -> list[str]:
             add(str(family.get("base_label") or ""))
     for label in _generic_product_phrase_theme_ideas(normalized_text):
         add(label)
-    return ideas[:5]
+    return _sort_theme_ideas_by_specificity(ideas)[:5]
+
+
+def _canonicalize_direct_family_theme_label(label: str | None) -> str | None:
+    normalized = _normalize_optional_theme_label(label)
+    if not normalized:
+        return None
+    normalized_lower = normalized.lower()
+    for family in DIRECT_PHRASE_THEME_FAMILIES:
+        aliases = tuple(family.get("aliases") or ())
+        if not any(_contains_phrase(normalized_lower, alias) for alias in aliases):
+            continue
+        if any(_contains_phrase(normalized_lower, token) for token in ("component", "components", "module", "modules")):
+            return str(family.get("component_label") or f"{family.get('base_label')} Components")
+        if any(_contains_phrase(normalized_lower, token) for token in ("system", "systems")):
+            return str(family.get("systems_label") or family.get("base_label"))
+        if any(_contains_phrase(normalized_lower, token) for token in ("equipment", "equipments")):
+            return str(family.get("equipment_label") or f"{family.get('base_label')} Equipment")
+        return str(family.get("base_label") or normalized)
+    return normalized
+
+
+def _theme_idea_specificity_rank(label: str) -> tuple[int, int]:
+    normalized = _normalize_optional_theme_label(label) or ""
+    normalized_lower = normalized.lower()
+    family_index = len(DIRECT_PHRASE_THEME_FAMILIES)
+    family_specificity = 9
+    for idx, family in enumerate(DIRECT_PHRASE_THEME_FAMILIES):
+        aliases = tuple(family.get("aliases") or ())
+        if not any(_contains_phrase(normalized_lower, alias) for alias in aliases):
+            continue
+        family_index = idx
+        if any(_contains_phrase(normalized_lower, token) for token in ("component", "components", "module", "modules")):
+            family_specificity = 0
+        elif any(_contains_phrase(normalized_lower, token) for token in ("system", "systems", "equipment", "equipments")):
+            family_specificity = 1
+        else:
+            family_specificity = 2
+        break
+    return family_index, family_specificity
+
+
+def _sort_theme_ideas_by_specificity(ideas: list[str]) -> list[str]:
+    if len(ideas) <= 1:
+        return ideas
+    indexed = list(enumerate(ideas))
+    indexed.sort(key=lambda item: (_theme_idea_specificity_rank(item[1]), item[0]))
+    return [item[1] for item in indexed]
 
 
 def _generic_product_phrase_theme_ideas(text: object) -> list[str]:
@@ -1530,7 +1857,7 @@ def _generic_product_phrase_theme_ideas(text: object) -> list[str]:
     ideas: list[str] = []
 
     def add(label: str | None) -> None:
-        normalized = _normalize_optional_theme_label(label)
+        normalized = _canonicalize_direct_family_theme_label(label)
         if normalized and normalized not in ideas:
             ideas.append(normalized)
 
@@ -1592,7 +1919,7 @@ def _extractive_resource_descriptors(text: object) -> list[str]:
     return descriptors[:5]
 
 
-def _description_native_business_descriptors(text: object) -> list[str]:
+def _upstream_oil_gas_descriptors(text: object) -> list[str]:
     normalized_text = _normalize_text(text).lower()
     if not normalized_text:
         return []
@@ -1603,10 +1930,217 @@ def _description_native_business_descriptors(text: object) -> list[str]:
         if normalized and normalized not in descriptors:
             descriptors.append(normalized)
 
+    if any(_contains_phrase(normalized_text, token) for token in UPSTREAM_OIL_GAS_DIRECT_TOKENS):
+        add("Oil & Gas Exploration & Production")
+        add("Upstream Oil & Gas")
+        return descriptors[:5]
+
+    oil_gas_tokens = (
+        _contains_phrase(normalized_text, "oil and gas")
+        or _contains_phrase(normalized_text, "natural gas")
+        or (_contains_phrase(normalized_text, "oil") and _contains_phrase(normalized_text, "gas"))
+    )
+    operational_tokens = sum(
+        int(_contains_phrase(normalized_text, token))
+        for token in (
+            "exploration",
+            "explore",
+            "development",
+            "develop",
+            "production",
+            "produce",
+            "producing",
+            "acquisition",
+            "acquire",
+            "acquiring",
+            "assets",
+            "properties",
+            "working interests",
+            "operated interests",
+            "onshore",
+            "basin",
+            "acreage",
+            "wells",
+            "reserves",
+        )
+    )
+    if oil_gas_tokens and operational_tokens >= 2:
+        add("Oil & Gas Exploration & Production")
+        if any(_contains_phrase(normalized_text, token) for token in ("upstream", "working interests", "operated interests", "onshore", "basin", "acreage", "wells", "reserves")):
+            add("Upstream Oil & Gas")
+    return descriptors[:5]
+
+
+def _industrial_additive_manufacturing_descriptors(text: object) -> list[str]:
+    normalized_text = _normalize_text(text).lower()
+    if not normalized_text:
+        return []
+    descriptors: list[str] = []
+
+    def add(label: str | None) -> None:
+        normalized = _normalize_optional_theme_label(label)
+        if normalized and normalized not in descriptors:
+            descriptors.append(normalized)
+
+    additive_signals = any(_contains_phrase(normalized_text, phrase) for phrase in INDUSTRIAL_ADDITIVE_MANUFACTURING_SIGNALS)
+    system_signals = any(_contains_phrase(normalized_text, phrase) for phrase in INDUSTRIAL_MANUFACTURING_SYSTEM_SIGNALS)
+    industrial_context = any(_contains_phrase(normalized_text, phrase) for phrase in INDUSTRIAL_MANUFACTURING_CONTEXT_SIGNALS)
+    printer_hardware_signals = any(
+        _contains_phrase(normalized_text, phrase)
+        for phrase in {
+            "printer",
+            "printers",
+            "printing system",
+            "printing systems",
+            "hardware system",
+            "hardware systems",
+        }
+    )
+    software_signals = any(_contains_phrase(normalized_text, phrase) for phrase in {"software", "software platform", "workflow software"})
+    hardware_tied_software = software_signals and (system_signals or printer_hardware_signals) and industrial_context
+
+    if additive_signals:
+        add("Additive Manufacturing")
+    if additive_signals and (industrial_context or system_signals or printer_hardware_signals):
+        add("Industrial 3D Printing")
+    if system_signals and (additive_signals or industrial_context or hardware_tied_software):
+        add("Industrial Manufacturing Systems")
+    elif hardware_tied_software and additive_signals:
+        add("Industrial Manufacturing Systems")
+    return descriptors[:5]
+
+
+def _theme_looks_industrial_manufacturing_drift(theme_entry: dict[str, object]) -> bool:
+    theme_text = " ".join(
+        [
+            _normalize_text(theme_entry.get("theme_name")).lower(),
+            _normalize_text(theme_entry.get("category")).lower(),
+            _normalize_text(theme_entry.get("theme_description")).lower(),
+        ]
+    )
+    return any(_contains_phrase(theme_text, token) for token in INDUSTRIAL_MANUFACTURING_DRIFT_TOKENS)
+
+
+def _theme_looks_autonomous_component_drift(theme_entry: dict[str, object]) -> bool:
+    theme_text = " ".join(
+        [
+            _normalize_text(theme_entry.get("theme_name")).lower(),
+            _normalize_text(theme_entry.get("category")).lower(),
+            _normalize_text(theme_entry.get("theme_description")).lower(),
+        ]
+    )
+    if any(_contains_phrase(theme_text, token) for token in AUTONOMOUS_SYSTEM_DIRECT_TOKENS):
+        return False
+    return any(_contains_phrase(theme_text, token) for token in AUTONOMOUS_COMPONENT_DRIFT_TOKENS)
+
+
+def _theme_looks_autonomous_product_family_bucket(theme_entry: dict[str, object]) -> bool:
+    theme_text = " ".join(
+        [
+            _normalize_text(theme_entry.get("theme_name")).lower(),
+            _normalize_text(theme_entry.get("category")).lower(),
+            _normalize_text(theme_entry.get("theme_description")).lower(),
+        ]
+    )
+    if not any(_contains_phrase(theme_text, token) for token in AUTONOMOUS_SYSTEM_DIRECT_TOKENS):
+        return False
+    return not any(_contains_phrase(theme_text, token) for token in ("component", "components", "module", "modules", "part", "parts"))
+
+
+def _has_strong_digital_asset_infrastructure_signals(text: object) -> bool:
+    normalized_text = _normalize_text(text).lower()
+    if not normalized_text:
+        return False
+    if any(_contains_phrase(normalized_text, token) for token in DIGITAL_ASSET_INFRASTRUCTURE_DIRECT_TOKENS):
+        return True
+    return (
+        ("stablecoin" in normalized_text or "stablecoins" in normalized_text)
+        and any(token in normalized_text for token in ("payments", "settlement", "infrastructure", "rails"))
+    )
+
+
+def _theme_supports_digital_asset_infrastructure(theme_entry: dict[str, object]) -> bool:
+    theme_text = " ".join(
+        [
+            _normalize_text(theme_entry.get("theme_name")).lower(),
+            _normalize_text(theme_entry.get("category")).lower(),
+            _normalize_text(theme_entry.get("theme_description")).lower(),
+        ]
+    )
+    return any(_contains_phrase(theme_text, token) for token in DIGITAL_ASSET_INFRASTRUCTURE_DIRECT_TOKENS)
+
+
+def _theme_looks_digital_asset_infrastructure_drift(theme_entry: dict[str, object]) -> bool:
+    theme_text = " ".join(
+        [
+            _normalize_text(theme_entry.get("theme_name")).lower(),
+            _normalize_text(theme_entry.get("category")).lower(),
+            _normalize_text(theme_entry.get("theme_description")).lower(),
+        ]
+    )
+    if _theme_supports_digital_asset_infrastructure(theme_entry):
+        return False
+    return any(_contains_phrase(theme_text, token) for token in DIGITAL_ASSET_INFRASTRUCTURE_GENERIC_DRIFT_TOKENS)
+
+
+def _theme_supports_upstream_oil_gas(theme_entry: dict[str, object]) -> bool:
+    theme_text = " ".join(
+        [
+            _normalize_text(theme_entry.get("theme_name")).lower(),
+            _normalize_text(theme_entry.get("category")).lower(),
+            _normalize_text(theme_entry.get("theme_description")).lower(),
+        ]
+    )
+    return any(_contains_phrase(theme_text, token) for token in UPSTREAM_OIL_GAS_DIRECT_TOKENS) or (
+        _contains_phrase(theme_text, "oil")
+        and _contains_phrase(theme_text, "gas")
+        and any(_contains_phrase(theme_text, token) for token in ("exploration", "production", "upstream"))
+    )
+
+
+def _theme_looks_upstream_oil_gas_drift(theme_entry: dict[str, object]) -> bool:
+    theme_text = " ".join(
+        [
+            _normalize_text(theme_entry.get("theme_name")).lower(),
+            _normalize_text(theme_entry.get("category")).lower(),
+            _normalize_text(theme_entry.get("theme_description")).lower(),
+        ]
+    )
+    if _theme_supports_upstream_oil_gas(theme_entry):
+        return False
+    return any(_contains_phrase(theme_text, token) for token in UPSTREAM_OIL_GAS_DRIFT_TOKENS)
+
+
+def _theme_looks_upstream_oil_gas_geography_bucket(theme_entry: dict[str, object]) -> bool:
+    theme_text = " ".join(
+        [
+            _normalize_text(theme_entry.get("theme_name")).lower(),
+            _normalize_text(theme_entry.get("category")).lower(),
+            _normalize_text(theme_entry.get("theme_description")).lower(),
+        ]
+    )
+    return any(_contains_phrase(theme_text, token) for token in UPSTREAM_OIL_GAS_GEOGRAPHY_BUCKET_TOKENS)
+
+
+def _description_native_business_descriptors(text: object) -> list[str]:
+    normalized_text = _normalize_text(text).lower()
+    if not normalized_text:
+        return []
+    descriptors: list[str] = []
+
+    def add(label: str | None) -> None:
+        normalized = _canonicalize_direct_family_theme_label(label)
+        if normalized and normalized not in descriptors:
+            descriptors.append(normalized)
+
     for rule in DESCRIPTION_NATIVE_DESCRIPTOR_RULES:
         if any(_contains_phrase(normalized_text, phrase) for phrase in tuple(rule.get("phrases") or ())):
             add(str(rule.get("label") or ""))
+    for label in _industrial_additive_manufacturing_descriptors(normalized_text):
+        add(label)
     for label in _extractive_resource_descriptors(normalized_text):
+        add(label)
+    for label in _upstream_oil_gas_descriptors(normalized_text):
         add(label)
     for label in _direct_phrase_theme_ideas(normalized_text):
         add(label)
@@ -1644,6 +2178,13 @@ def _descriptor_families(descriptors: list[str]) -> set[str]:
         families.add("autonomous_systems")
     if any("banking" in _normalize_text(descriptor).lower() or "fintech" in _normalize_text(descriptor).lower() for descriptor in descriptors):
         families.add("consumer_fintech")
+    if any(
+        "upstream oil" in _normalize_text(descriptor).lower()
+        or "exploration & production" in _normalize_text(descriptor).lower()
+        or "oil & gas" in _normalize_text(descriptor).lower()
+        for descriptor in descriptors
+    ):
+        families.add("upstream_oil_gas")
     if any(
         "mining" in _normalize_text(descriptor).lower()
         or "mineral processing" in _normalize_text(descriptor).lower()
@@ -1745,10 +2286,22 @@ def _generated_idea_analysis(idea: str) -> dict[str, object]:
     )
     idea_layers = _descriptor_value_chain_layers([normalized])
     idea_families = _descriptor_families([normalized])
+    if "autonomous_systems" in idea_families:
+        roles.discard("server_systems")
+        roles.discard("software_tooling")
+        archetypes.discard("ai_infrastructure_data_centers")
+        archetypes.discard("software_devops_cloud")
+        economic_roles.discard("software_service_provider")
+        economic_roles.discard("infrastructure_operator")
+        economic_roles.discard("end_platform_operator")
     if "software_tooling" in roles and _contains_phrase(normalized.lower(), "software-defined radio"):
         roles.discard("software_tooling")
         economic_roles.discard("software_service_provider")
         archetypes.discard("software_devops_cloud")
+    if "digital_asset_infrastructure" in idea_families and _has_strong_digital_asset_infrastructure_signals(normalized):
+        roles.discard("software_tooling")
+        archetypes.discard("software_devops_cloud")
+        economic_roles.discard("software_service_provider")
     if not _merchant_input_evidence(normalized) and idea_layers & {
         "component",
         "module",
@@ -1786,6 +2339,7 @@ def _theme_match_from_generated_idea(
     clear_business_descriptor = bool(candidate_analysis.get("clear_business_descriptor"))
     merchant_input_evidence = bool(candidate_analysis.get("merchant_input_evidence"))
     value_chain_layers = set(candidate_analysis.get("value_chain_layers") or set())
+    descriptor_families = set(candidate_analysis.get("descriptor_families") or set())
     idea_analysis = _generated_idea_analysis(idea)
     idea_tokens = set(idea_analysis.get("idea_tokens") or set())
     idea_concepts = set(idea_analysis.get("idea_concepts") or set())
@@ -1851,6 +2405,67 @@ def _theme_match_from_generated_idea(
         score -= 8
     if descriptor_led_generic_umbrella_overlap:
         score -= 18
+    industrial_manufacturing_drift_overlap = (
+        "industrial_additive_manufacturing" in descriptor_families
+        and _theme_looks_industrial_manufacturing_drift(prepared_theme)
+        and not role_overlap
+        and not specific_overlap
+    )
+    if industrial_manufacturing_drift_overlap:
+        score -= 18
+    autonomous_component_drift_overlap = (
+        "autonomous_systems" in descriptor_families
+        and bool({"component", "module"} & value_chain_layers)
+        and _theme_looks_autonomous_component_drift(prepared_theme)
+        and not role_overlap
+        and not specific_overlap
+        and not economic_role_overlap
+    )
+    if autonomous_component_drift_overlap:
+        score -= 18
+        direct_role_fit = False
+    autonomous_product_family_overlap = (
+        "autonomous_systems" in descriptor_families
+        and bool({"component", "module"} & value_chain_layers)
+        and _theme_looks_autonomous_product_family_bucket(prepared_theme)
+        and not role_overlap
+        and not economic_role_overlap
+    )
+    if autonomous_product_family_overlap:
+        score -= 12
+        direct_role_fit = False
+        indirect_only_fit = True
+    digital_asset_infrastructure_drift_overlap = (
+        "digital_asset_infrastructure" in descriptor_families
+        and _theme_looks_digital_asset_infrastructure_drift(prepared_theme)
+        and set(role_overlap) <= WEAK_ROLE_SIGNALS
+        and set(specific_overlap) <= {"payments"}
+        and set(economic_role_overlap) <= {"financial_platform", "software_service_provider", "end_platform_operator"}
+    )
+    if digital_asset_infrastructure_drift_overlap:
+        score -= 18
+        direct_role_fit = False
+        indirect_only_fit = True
+    upstream_oil_gas_drift_overlap = (
+        "upstream_oil_gas" in descriptor_families
+        and _theme_looks_upstream_oil_gas_drift(prepared_theme)
+        and set(role_overlap) <= WEAK_ROLE_SIGNALS
+        and set(economic_role_overlap) <= {"software_service_provider", "end_platform_operator", "infrastructure_operator"}
+    )
+    if upstream_oil_gas_drift_overlap:
+        score -= 18
+        direct_role_fit = False
+        indirect_only_fit = True
+    upstream_oil_gas_geography_overlap = (
+        "upstream_oil_gas" in descriptor_families
+        and _theme_looks_upstream_oil_gas_geography_bucket(prepared_theme)
+        and not token_overlap
+        and not specific_overlap
+    )
+    if upstream_oil_gas_geography_overlap:
+        score -= 14
+        direct_role_fit = False
+        indirect_only_fit = True
     theme_anchor_alignment = "unclear"
     if domain_anchor != "unclear":
         theme_anchor = _domain_anchor(
@@ -1885,6 +2500,18 @@ def _theme_match_from_generated_idea(
         score -= 10
     if descriptor_led_generic_umbrella_overlap:
         score = min(score, 8 if market_overlap else 6)
+    if industrial_manufacturing_drift_overlap:
+        score = min(score, 4)
+    if autonomous_component_drift_overlap:
+        score = min(score, 4)
+    if autonomous_product_family_overlap:
+        score = min(score, 9 if specific_overlap else 7)
+    if digital_asset_infrastructure_drift_overlap:
+        score = min(score, 5)
+    if upstream_oil_gas_drift_overlap:
+        score = min(score, 5)
+    if upstream_oil_gas_geography_overlap:
+        score = min(score, 4)
     if clear_business_descriptor and "end_market_only" not in value_chain_layers and market_overlap and not core_overlap:
         score -= 5
     if archetype_relation == "incompatible" and not role_overlap and not specific_overlap and not economic_role_overlap:
@@ -1892,7 +2519,7 @@ def _theme_match_from_generated_idea(
     if not role_overlap and not specific_overlap and not archetype_overlap and not economic_role_overlap and len(token_overlap) <= 1:
         score = min(score, 4)
     effective_role_overlap = bool(role_overlap)
-    if weak_generic_business_model_overlap or descriptor_led_generic_umbrella_overlap:
+    if weak_generic_business_model_overlap or descriptor_led_generic_umbrella_overlap or autonomous_component_drift_overlap or autonomous_product_family_overlap or digital_asset_infrastructure_drift_overlap or upstream_oil_gas_drift_overlap or upstream_oil_gas_geography_overlap:
         effective_role_overlap = False
     if effective_role_overlap:
         fit_label = "direct_fit"
@@ -2098,6 +2725,7 @@ def _theme_fit_details(
     clear_business_descriptor = bool(analysis.get("clear_business_descriptor"))
     merchant_input_evidence = bool(analysis.get("merchant_input_evidence"))
     value_chain_layers = set(analysis.get("value_chain_layers") or set())
+    descriptor_families = set(analysis.get("descriptor_families") or set())
     theme_roles = set(prepared_theme.get("_theme_roles") or set())
     theme_markets = set(prepared_theme.get("_theme_markets") or set())
     theme_archetypes = set(prepared_theme.get("_theme_archetypes") or set())
@@ -2134,6 +2762,7 @@ def _theme_fit_details(
         direct_role_fit = False
     if descriptor_led_generic_umbrella_overlap:
         direct_role_fit = False
+    autonomous_product_family_overlap = False
     indirect_only_fit = not direct_role_fit and bool(market_overlap or generic_overlap or specific_overlap or archetype_relation == "adjacent")
     if theme_roles and candidate_roles and not role_overlap:
         candidate_families = {ROLE_FAMILY.get(role) for role in candidate_roles}
@@ -2158,6 +2787,58 @@ def _theme_fit_details(
         score -= 6
     if descriptor_led_generic_umbrella_overlap:
         score -= 18
+    industrial_manufacturing_drift_overlap = (
+        "industrial_additive_manufacturing" in descriptor_families
+        and _theme_looks_industrial_manufacturing_drift(prepared_theme)
+        and not role_overlap
+        and not specific_overlap
+    )
+    if industrial_manufacturing_drift_overlap:
+        score -= 18
+    autonomous_component_drift_overlap = (
+        "autonomous_systems" in descriptor_families
+        and bool({"component", "module"} & value_chain_layers)
+        and _theme_looks_autonomous_component_drift(prepared_theme)
+        and not role_overlap
+        and not specific_overlap
+        and not economic_role_overlap
+    )
+    if autonomous_component_drift_overlap:
+        score -= 18
+    autonomous_product_family_overlap = (
+        "autonomous_systems" in descriptor_families
+        and bool({"component", "module"} & value_chain_layers)
+        and _theme_looks_autonomous_product_family_bucket(prepared_theme)
+        and not role_overlap
+        and not economic_role_overlap
+    )
+    if autonomous_product_family_overlap:
+        score -= 12
+    digital_asset_infrastructure_drift_overlap = (
+        "digital_asset_infrastructure" in descriptor_families
+        and _theme_looks_digital_asset_infrastructure_drift(prepared_theme)
+        and set(role_overlap) <= WEAK_ROLE_SIGNALS
+        and set(specific_overlap) <= {"payments"}
+        and set(economic_role_overlap) <= {"financial_platform", "software_service_provider", "end_platform_operator"}
+    )
+    if digital_asset_infrastructure_drift_overlap:
+        score -= 18
+    upstream_oil_gas_drift_overlap = (
+        "upstream_oil_gas" in descriptor_families
+        and _theme_looks_upstream_oil_gas_drift(prepared_theme)
+        and set(role_overlap) <= WEAK_ROLE_SIGNALS
+        and set(economic_role_overlap) <= {"software_service_provider", "end_platform_operator", "infrastructure_operator"}
+    )
+    if upstream_oil_gas_drift_overlap:
+        score -= 18
+    upstream_oil_gas_geography_overlap = (
+        "upstream_oil_gas" in descriptor_families
+        and _theme_looks_upstream_oil_gas_geography_bucket(prepared_theme)
+        and not token_overlap
+        and not specific_overlap
+    )
+    if upstream_oil_gas_geography_overlap:
+        score -= 14
     if bool(prepared_theme.get("_is_generic_factor_theme")):
         if strong_role_evidence:
             score -= 16
@@ -2200,11 +2881,35 @@ def _theme_fit_details(
         score -= 12
     if descriptor_led_generic_umbrella_overlap:
         score = min(score, 8 if market_overlap else 6)
+    if industrial_manufacturing_drift_overlap:
+        score = min(score, 4)
+    if autonomous_component_drift_overlap:
+        score = min(score, 4)
+    if autonomous_product_family_overlap:
+        score = min(score, 9 if specific_overlap else 7)
+    if digital_asset_infrastructure_drift_overlap:
+        score = min(score, 5)
+    if upstream_oil_gas_drift_overlap:
+        score = min(score, 5)
+    if upstream_oil_gas_geography_overlap:
+        score = min(score, 4)
     if clear_business_descriptor and "end_market_only" not in value_chain_layers and market_overlap and not role_overlap and not specific_overlap and not economic_role_overlap:
         score -= 6
 
     if score <= 0:
         why = ""
+    elif industrial_manufacturing_drift_overlap:
+        why = "Geography/luxury drift suppressed because the description points to an industrial manufacturing systems business."
+    elif autonomous_component_drift_overlap:
+        why = "Broad AI/equipment adjacency suppressed because the description points to autonomous-system components rather than a broad platform or equipment bucket."
+    elif autonomous_product_family_overlap:
+        why = "Broader autonomous product-family themes were de-prioritized because the description points more specifically to components and modules."
+    elif digital_asset_infrastructure_drift_overlap:
+        why = "Generic payments, banking, or software adjacency was suppressed because the description points to digital-asset infrastructure and settlement rails."
+    elif upstream_oil_gas_drift_overlap:
+        why = "LNG, energy transition, or adjacent energy drift was suppressed because the description points to upstream oil and gas exploration and production."
+    elif upstream_oil_gas_geography_overlap:
+        why = "Unsupported regional energy bucket was suppressed because the description does not explicitly anchor the company to that geography."
     elif not merchant_input_evidence and _theme_looks_merchant_input(prepared_theme):
         why = "Merchant-input theme suppressed because the description lacks explicit input/material evidence."
     elif descriptor_led_generic_umbrella_overlap or (
@@ -2249,6 +2954,9 @@ def _theme_fit_details(
         "generic_business_model_only": generic_business_model_only,
         "descriptor_led_generic_umbrella_overlap": descriptor_led_generic_umbrella_overlap,
         "strong_role_evidence": strong_role_evidence,
+        "digital_asset_infrastructure_drift_overlap": digital_asset_infrastructure_drift_overlap,
+        "upstream_oil_gas_drift_overlap": upstream_oil_gas_drift_overlap,
+        "upstream_oil_gas_geography_overlap": upstream_oil_gas_geography_overlap,
     }
 
 

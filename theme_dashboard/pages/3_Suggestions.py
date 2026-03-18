@@ -20,6 +20,7 @@ from src.scanner_audit import (
     recent_scanner_import_runs,
     reset_scanner_audit_data,
     scanner_import_overview,
+    send_preserved_applied_scanner_audit_theme_to_review,
     set_scanner_candidate_review_state,
 )
 from src.scanner_research import (
@@ -33,10 +34,12 @@ from src.suggestions_page_state import (
     build_scanner_research_debug_entry,
     finalize_possible_new_theme_category_state,
     finalize_possible_new_theme_state,
+    has_meaningful_theme_review_selection,
     join_possible_new_theme_ideas,
     normalize_theme_id_list,
     prepare_possible_new_theme_category_prefill,
     prepare_possible_new_theme_prefill,
+    reconcile_possible_new_theme_from_generated_checkbox_state,
     resolve_active_suggestions_tab,
     resolve_scanner_audit_ticker,
     split_possible_new_theme_ideas,
@@ -60,12 +63,17 @@ from src.suggestions_service import (
     SuggestionPayload,
     apply_suggestion,
     bulk_update_filtered_status,
+    can_apply_queue_suggestion_row,
+    can_fast_path_create_governed_theme_row,
     count_filtered_suggestions,
     create_suggestion,
+    fast_path_create_governed_theme_and_assign_ticker,
     list_suggestions,
     recent_applied_suggestions,
     review_suggestion,
     suggestion_status_counts,
+    can_follow_up_applied_scanner_audit_review_row,
+    update_suggestion_status,
 )
 from src.theme_service import get_theme_members, list_themes, seed_if_needed
 
@@ -144,6 +152,54 @@ def _render_structured_review_context(row) -> None:
             )
         if research_summary:
             st.caption(f"Research summary: {research_summary}")
+
+
+def _queue_selection_label(row) -> str:
+    suggestion_id = int(row.get("suggestion_id") or 0)
+    status = str(row.get("status") or "").strip() or "unknown"
+    suggestion_type = str(row.get("suggestion_type") or "").strip() or "n/a"
+    ticker = str(row.get("proposed_ticker") or "").strip().upper()
+    proposed_theme_name = str(row.get("proposed_theme_name") or "").strip()
+    context_label = ticker or proposed_theme_name or str(row.get("existing_theme_name") or "").strip() or "no context"
+    return f"#{suggestion_id} | {status} | {suggestion_type} | {context_label}"
+
+
+def _queue_visibility_note(status_filter: str, new_status: str) -> str:
+    if status_filter not in {"all", new_status}:
+        return f" It will disappear on rerun if your current filter excludes {new_status} items."
+    return " It remains visible because the current filter still includes that status."
+
+
+def _render_queue_detail_panel(row) -> None:
+    with st.container(border=True):
+        st.write(
+            f"**Suggestion #{int(row['suggestion_id'])}** "
+            f"`{row.get('suggestion_type')}` from `{row.get('source')}`"
+        )
+        meta_parts = [
+            f"status=`{row.get('status')}`",
+            f"priority=`{row.get('priority')}`",
+            f"validation=`{row.get('validation_status')}`",
+        ]
+        st.caption(" | ".join(meta_parts))
+        if str(row.get("proposed_ticker") or "").strip():
+            st.write(f"Ticker: `{str(row.get('proposed_ticker') or '').strip().upper()}`")
+        proposed_theme = str(row.get("custom_new_theme_names") or row.get("proposed_theme_name") or "").strip()
+        proposed_category = str(row.get("proposed_new_theme_category") or row.get("proposed_theme_category") or "").strip()
+        selected_existing = str(row.get("selected_existing_theme_names") or row.get("existing_theme_name") or "").strip()
+        if selected_existing:
+            st.write(f"Selected existing themes: `{selected_existing}`")
+        if proposed_theme:
+            st.write(f"Proposed new themes: `{proposed_theme}`")
+        if proposed_category:
+            st.write(f"Proposed category: `{proposed_category}`")
+        if str(row.get("rationale") or "").strip():
+            st.write(f"Rationale: {str(row.get('rationale') or '').strip()}")
+        if str(row.get("reviewer_notes") or "").strip():
+            st.write(f"Reviewer notes: {str(row.get('reviewer_notes') or '').strip()}")
+        if str(row.get("proposed_ticker") or "").strip():
+            _render_ticker_membership_context(row)
+        _render_structured_review_context(row)
 
 
 def _sync_selected_existing_from_suggested_checkbox(
@@ -338,41 +394,39 @@ if active_suggestions_tab == "Queue":
             queue[["suggestion_id", "status", "priority", "validation_status", "suggestion_type", "source", "proposed_ticker", "existing_theme_name", "proposed_theme_name", "rationale", "created_at", "reviewer_notes"]],
             width="stretch",
         )
+        queue_rows = queue.to_dict("records")
+        queue_row_by_id = {int(row["suggestion_id"]): row for row in queue_rows}
+        selected_queue_id = st.selectbox(
+            "Selected suggestion",
+            options=list(queue_row_by_id.keys()),
+            format_func=lambda suggestion_id: _queue_selection_label(queue_row_by_id[int(suggestion_id)]),
+            key="queue_selected_suggestion_id",
+        )
+        selected_row = queue_row_by_id[int(selected_queue_id)]
+        _render_queue_detail_panel(selected_row)
 
-        pending = queue[queue["status"] == "pending"]
-        approved = queue[queue["status"] == "approved"]
-        if not pending.empty:
-            selected = st.selectbox("Pending suggestion", options=pending["suggestion_id"].tolist())
-            selected_row = pending[pending["suggestion_id"] == selected].iloc[0]
-            st.caption(
-                f"Selected pending suggestion #{int(selected_row['suggestion_id'])}: "
-                f"`{selected_row['suggestion_type']}` from `{selected_row['source']}`"
-            )
-            if str(selected_row.get("proposed_ticker") or "").strip():
-                _render_ticker_membership_context(selected_row)
-            _render_structured_review_context(selected_row)
-            rnotes = st.text_input("Review notes", value="", key="rnotes")
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("Approve"):
+        action_notes = st.text_input(
+            "Row action notes",
+            value=str(selected_row.get("reviewer_notes") or ""),
+            key=f"queue_action_notes_{int(selected_queue_id)}",
+        )
+        selected_status = str(selected_row.get("status") or "").strip().lower()
+        action_c1, action_c2, action_c3 = st.columns(3)
+        if selected_status in {"pending", "approved"}:
+            with action_c1:
+                if st.button("Approve", key=f"queue_approve_{int(selected_queue_id)}"):
                     try:
                         with get_conn() as conn:
-                            result = review_suggestion(conn, int(selected), "approved", rnotes)
-                        new_status = str(result.get("new_status") or "approved")
+                            result = review_suggestion(conn, int(selected_queue_id), "approved", action_notes)
                         if bool(result.get("changed")):
-                            visible_note = (
-                                " It will disappear on rerun if your current filter excludes approved items."
-                                if status_filter not in {"all", "approved"}
-                                else " It remains visible because the current filter still includes approved items."
-                            )
                             st.session_state["suggestions_feedback"] = {
                                 "level": "success",
-                                "message": f"{result['message']}{visible_note}",
+                                "message": f"{result['message']}{_queue_visibility_note(status_filter, 'approved')}",
                             }
                         else:
                             st.session_state["suggestions_feedback"] = {
                                 "level": "warning",
-                                "message": str(result.get("message") or f"Suggestion #{selected} is already {new_status}."),
+                                "message": str(result.get("message") or f"Suggestion #{selected_queue_id} is already approved."),
                             }
                     except Exception as exc:
                         st.session_state["suggestions_feedback"] = {
@@ -380,25 +434,20 @@ if active_suggestions_tab == "Queue":
                             "message": f"Approve failed: {exc}",
                         }
                     st.rerun()
-            with c2:
-                if st.button("Reject"):
+            with action_c2:
+                if st.button("Reject", key=f"queue_reject_{int(selected_queue_id)}"):
                     try:
                         with get_conn() as conn:
-                            result = review_suggestion(conn, int(selected), "rejected", rnotes)
+                            result = review_suggestion(conn, int(selected_queue_id), "rejected", action_notes)
                         if bool(result.get("changed")):
-                            visible_note = (
-                                " It will disappear on rerun if your current filter excludes rejected items."
-                                if status_filter not in {"all", "rejected"}
-                                else " It remains visible because the current filter still includes rejected items."
-                            )
                             st.session_state["suggestions_feedback"] = {
                                 "level": "success",
-                                "message": f"{result['message']}{visible_note}",
+                                "message": f"{result['message']}{_queue_visibility_note(status_filter, 'rejected')}",
                             }
                         else:
                             st.session_state["suggestions_feedback"] = {
                                 "level": "warning",
-                                "message": str(result.get("message") or f"Suggestion #{selected} is already rejected."),
+                                "message": str(result.get("message") or f"Suggestion #{selected_queue_id} is already rejected."),
                             }
                     except Exception as exc:
                         st.session_state["suggestions_feedback"] = {
@@ -406,20 +455,99 @@ if active_suggestions_tab == "Queue":
                             "message": f"Reject failed: {exc}",
                         }
                     st.rerun()
-        if not approved.empty:
-            aid = st.selectbox("Approved suggestion", options=approved["suggestion_id"].tolist())
-            approved_row = approved[approved["suggestion_id"] == aid].iloc[0]
-            st.caption(
-                f"Selected approved suggestion #{int(approved_row['suggestion_id'])}: "
-                f"`{approved_row['suggestion_type']}` from `{approved_row['source']}`"
+        if selected_status in {"pending", "approved", "rejected"}:
+            with action_c3:
+                if st.button("Mark obsolete", key=f"queue_obsolete_{int(selected_queue_id)}"):
+                    try:
+                        with get_conn() as conn:
+                            result = update_suggestion_status(conn, int(selected_queue_id), "obsolete", action_notes)
+                        if bool(result.get("changed")):
+                            st.session_state["suggestions_feedback"] = {
+                                "level": "success",
+                                "message": f"{result['message']}{_queue_visibility_note(status_filter, 'obsolete')}",
+                            }
+                        else:
+                            st.session_state["suggestions_feedback"] = {
+                                "level": "warning",
+                                "message": str(result.get("message") or f"Suggestion #{selected_queue_id} is already obsolete."),
+                            }
+                    except Exception as exc:
+                        st.session_state["suggestions_feedback"] = {
+                            "level": "error",
+                            "message": f"Mark obsolete failed: {exc}",
+                        }
+                    st.rerun()
+        if selected_status == "approved" and can_apply_queue_suggestion_row(selected_row):
+            apply_notes = st.text_input(
+                "Apply notes",
+                value="",
+                key=f"queue_apply_notes_{int(selected_queue_id)}",
             )
-            if str(approved_row.get("proposed_ticker") or "").strip():
-                _render_ticker_membership_context(approved_row)
-            _render_structured_review_context(approved_row)
-            anotes = st.text_input("Apply notes", value="", key="anotes")
-            if st.button("Apply approved"):
-                with get_conn() as conn:
-                    apply_suggestion(conn, int(aid), anotes)
+            if st.button("Apply approved", key=f"queue_apply_{int(selected_queue_id)}"):
+                try:
+                    with get_conn() as conn:
+                        apply_suggestion(conn, int(selected_queue_id), apply_notes)
+                    st.session_state["suggestions_feedback"] = {
+                        "level": "success",
+                        "message": f"Suggestion #{int(selected_queue_id)} applied.{_queue_visibility_note(status_filter, 'applied')}",
+                    }
+                except Exception as exc:
+                    st.session_state["suggestions_feedback"] = {
+                        "level": "error",
+                        "message": f"Apply failed: {exc}",
+                    }
+                st.rerun()
+        elif selected_status == "approved" and str(selected_row.get("suggestion_type") or "").strip().lower() == "review_theme":
+            st.caption(
+                "This approved review item only contains proposed new-theme context and no governed theme selection, "
+                "so there is nothing governed to apply to membership yet."
+            )
+        if can_fast_path_create_governed_theme_row(selected_row):
+            fast_path_notes = st.text_input(
+                "Fast-path notes",
+                value="",
+                key=f"queue_fast_path_notes_{int(selected_queue_id)}",
+            )
+            if st.button(
+                "Create governed theme and assign ticker",
+                key=f"queue_fast_path_create_theme_{int(selected_queue_id)}",
+            ):
+                try:
+                    with get_conn() as conn:
+                        result = fast_path_create_governed_theme_and_assign_ticker(conn, int(selected_queue_id), fast_path_notes)
+                    clear_scanner_candidate_summary_cache()
+                    clear_current_market_view_caches()
+                    st.session_state["suggestions_feedback"] = {
+                        "level": "success",
+                        "message": f"{result['message']}{_queue_visibility_note(status_filter, 'applied')}",
+                    }
+                except Exception as exc:
+                    st.session_state["suggestions_feedback"] = {
+                        "level": "error",
+                        "message": f"Fast-path theme creation failed: {exc}",
+                    }
+                st.rerun()
+        if can_follow_up_applied_scanner_audit_review_row(selected_row):
+            st.caption("This applied Scanner Audit row still has preserved proposed new-theme context that can be staged back into Theme Review.")
+            if st.button(
+                "Send preserved proposed theme to Theme Review",
+                key=f"queue_follow_up_theme_review_{int(selected_queue_id)}",
+            ):
+                try:
+                    with get_conn() as conn:
+                        result = send_preserved_applied_scanner_audit_theme_to_review(conn, int(selected_queue_id))
+                    st.session_state["suggestions_feedback"] = {
+                        "level": "success",
+                        "message": (
+                            f"{result['message']}"
+                            + _queue_visibility_note(status_filter, "pending")
+                        ),
+                    }
+                except Exception as exc:
+                    st.session_state["suggestions_feedback"] = {
+                        "level": "error",
+                        "message": f"Could not send preserved proposed theme to Theme Review. {exc}",
+                    }
                 st.rerun()
 
     if not recent_applied.empty:
@@ -824,6 +952,26 @@ if active_suggestions_tab == "Scanner Audit":
                 custom_new_state_key = f"scanner_custom_new_state_{selected_audit_ticker}"
                 custom_new_category_key = f"scanner_custom_new_category_{selected_audit_ticker}"
                 custom_new_category_state_key = f"scanner_custom_new_category_state_{selected_audit_ticker}"
+                generated_theme_ideas = existing_draft.get("candidate_theme_ideas") or []
+                generated_checkbox_keys = {
+                    str(idea): f"scanner_generated_theme_checkbox_{selected_audit_ticker}_{idx}"
+                    for idx, idea in enumerate(generated_theme_ideas)
+                    if str(idea or "").strip()
+                }
+                generated_checkbox_session_state = {
+                    idea: bool(st.session_state.get(checkbox_key))
+                    for idea, checkbox_key in generated_checkbox_keys.items()
+                    if checkbox_key in st.session_state
+                }
+                if generated_checkbox_session_state:
+                    reconciled_new_theme_value, reconciled_new_theme_state = reconcile_possible_new_theme_from_generated_checkbox_state(
+                        st.session_state.get(custom_new_key),
+                        generated_theme_ideas,
+                        generated_checkbox_session_state,
+                        st.session_state.get(custom_new_state_key),
+                    )
+                    st.session_state[custom_new_key] = reconciled_new_theme_value
+                    st.session_state[custom_new_state_key] = reconciled_new_theme_state
                 prepared_new_theme_value, prepared_new_theme_state = prepare_possible_new_theme_prefill(
                     st.session_state.get(custom_new_key),
                     existing_draft.get("possible_new_theme"),
@@ -885,16 +1033,11 @@ if active_suggestions_tab == "Scanner Audit":
                     unsafe_allow_html=True,
                 )
                 with main_review_col:
-                    generated_theme_ideas = existing_draft.get("candidate_theme_ideas") or []
                     if generated_theme_ideas:
                         generated_checkbox_state = sync_generated_theme_idea_checkbox_state(
                             st.session_state.get(custom_new_key),
                             generated_theme_ideas,
                         )
-                        generated_checkbox_keys = {
-                            idea: f"scanner_generated_theme_checkbox_{selected_audit_ticker}_{idx}"
-                            for idx, idea in enumerate(generated_checkbox_state.keys())
-                        }
                         for idea, is_checked in generated_checkbox_state.items():
                             st.session_state[generated_checkbox_keys[idea]] = bool(is_checked)
                         st.markdown("**Generated Theme Ideas**")
@@ -1120,8 +1263,18 @@ if active_suggestions_tab == "Scanner Audit":
                     )
                     if not can_promote:
                         st.info("This candidate is already governed. Promotion is reserved for uncovered candidates.")
-                    send_disabled = (not can_promote) or (existing_draft is None)
+                    can_send_review = (
+                        can_promote
+                        and existing_draft is not None
+                        and has_meaningful_theme_review_selection(
+                            selected_existing_theme_ids,
+                            st.session_state.get(custom_new_key),
+                        )
+                    )
+                    send_disabled = not can_send_review
                     apply_now_disabled = send_disabled or not bool(selected_suggested_theme_ids or custom_existing_theme_ids)
+                    if can_promote and existing_draft is not None and send_disabled:
+                        st.caption("Theme Review promotion requires at least one selected existing theme or a proposed new theme. Category alone is not enough.")
                     if apply_now_disabled and existing_draft is not None:
                         st.caption("Direct apply requires at least one selected existing theme. Custom new-theme ideas can still be staged for later review.")
                     action_c1, action_c2 = st.columns(2)

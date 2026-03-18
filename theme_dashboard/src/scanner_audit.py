@@ -988,6 +988,7 @@ def promote_scanner_candidate_to_theme_review(
     custom_existing_theme_ids: list[object] | None = None,
     custom_new_themes: list[str] | None = None,
     proposed_new_theme_category: str | None = None,
+    follow_up_source_suggestion_id: int | None = None,
 ) -> dict[str, object]:
     normalized = normalize_ticker(ticker)
     if not normalized:
@@ -1061,6 +1062,8 @@ def promote_scanner_candidate_to_theme_review(
     custom_new_theme_labels = _normalize_new_theme_labels(custom_new_themes)
     proposed_new_theme_text = _joined_new_theme_labels(custom_new_theme_labels)
     proposed_new_theme_category_value = _normalize_new_theme_category(proposed_new_theme_category)
+    if not suggested_theme_entries and not custom_existing_entries and not custom_new_theme_labels:
+        raise ValueError("Select at least one existing theme or enter a proposed new theme to send to Theme Review.")
     context = dict(existing_context)
     context.update(
         {
@@ -1074,6 +1077,8 @@ def promote_scanner_candidate_to_theme_review(
             "proposed_new_theme_category": proposed_new_theme_category_value,
         }
     )
+    if follow_up_source_suggestion_id is not None:
+        context["follow_up_source_suggestion_id"] = int(follow_up_source_suggestion_id)
     if research_draft:
         context["research_draft"] = research_draft
     context_json = json.dumps(context, sort_keys=True)
@@ -1149,6 +1154,62 @@ def promote_scanner_candidate_to_theme_review(
         "ticker": normalized,
         "message": f"Updated existing review candidate for {normalized}.",
     }
+
+
+def send_preserved_applied_scanner_audit_theme_to_review(conn, suggestion_id: int) -> dict[str, object]:
+    row = conn.execute(
+        """
+        SELECT suggestion_id, suggestion_type, status, source, proposed_ticker, proposed_theme_name,
+               proposed_theme_category, source_context_json
+        FROM theme_suggestions
+        WHERE suggestion_id = ?
+        """,
+        [suggestion_id],
+    ).fetchone()
+    if row is None:
+        raise ValueError("Suggestion not found.")
+
+    selected_id, suggestion_type, status, source, proposed_ticker, proposed_theme_name, proposed_theme_category, source_context_json = row
+    if str(source or "").strip().lower() != "scanner_audit" or str(suggestion_type or "").strip().lower() != "review_theme":
+        raise ValueError("Only scanner_audit review_theme rows support this follow-up action.")
+    if str(status or "").strip().lower() != "applied":
+        raise ValueError("This follow-up action is only available for applied scanner_audit review rows.")
+
+    context = _parse_source_context(source_context_json)
+    research_draft = context.get("research_draft") if isinstance(context.get("research_draft"), dict) else None
+    selected_suggested_theme_ids = [
+        int(item.get("theme_id"))
+        for item in list(context.get("selected_suggested_themes") or [])
+        if isinstance(item, dict) and item.get("theme_id") not in (None, "")
+    ]
+    custom_existing_theme_ids = [
+        int(item.get("theme_id"))
+        for item in list(context.get("custom_existing_themes") or [])
+        if isinstance(item, dict) and item.get("theme_id") not in (None, "")
+    ]
+    custom_new_themes = _normalize_new_theme_labels(list(context.get("custom_new_themes") or []))
+    if not custom_new_themes:
+        custom_new_themes = _normalize_new_theme_labels(
+            [part.strip() for part in str(proposed_theme_name or "").replace(";", ",").split(",")]
+        )
+    proposed_new_theme_category_value = _normalize_new_theme_category(
+        context.get("proposed_new_theme_category") or proposed_theme_category
+    )
+    if not custom_new_themes:
+        raise ValueError("This applied scanner_audit row does not have a preserved proposed new theme to send.")
+
+    promotion_note = str(context.get("promotion_note") or "").strip()
+    return promote_scanner_candidate_to_theme_review(
+        conn,
+        str(proposed_ticker or ""),
+        promotion_note,
+        research_draft=research_draft,
+        selected_suggested_theme_ids=selected_suggested_theme_ids,
+        custom_existing_theme_ids=custom_existing_theme_ids,
+        custom_new_themes=custom_new_themes,
+        proposed_new_theme_category=proposed_new_theme_category_value,
+        follow_up_source_suggestion_id=int(selected_id),
+    )
 
 
 def apply_scanner_candidate_selected_themes(

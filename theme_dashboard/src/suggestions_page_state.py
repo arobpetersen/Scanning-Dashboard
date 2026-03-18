@@ -116,6 +116,13 @@ def join_possible_new_theme_ideas(values: object) -> str:
     return ", ".join(ideas)
 
 
+def has_meaningful_theme_review_selection(
+    selected_existing_ids: object,
+    proposed_new_theme_value: object,
+) -> bool:
+    return bool(normalize_theme_id_list(selected_existing_ids) or split_possible_new_theme_ideas(proposed_new_theme_value))
+
+
 def sync_generated_theme_idea_checkbox_state(
     current_value: object,
     generated_ideas: object,
@@ -269,6 +276,33 @@ def apply_generated_theme_idea_checkbox_selection(
     next_state["forced_user_edited"] = True
     next_state["user_edited"] = True
     return updated_value, next_state
+
+
+def reconcile_possible_new_theme_from_generated_checkbox_state(
+    current_value: object,
+    generated_ideas: object,
+    checkbox_state_by_idea: dict[str, bool] | None,
+    state: dict[str, object] | None = None,
+) -> tuple[str, dict[str, object]]:
+    relevant_state = {
+        normalize_possible_new_theme_input(idea): bool(is_checked)
+        for idea, is_checked in dict(checkbox_state_by_idea or {}).items()
+        if normalize_possible_new_theme_input(idea)
+    }
+    if not relevant_state:
+        return normalize_possible_new_theme_input(current_value), dict(state or {})
+    checked_generated = [
+        normalize_possible_new_theme_input(idea)
+        for idea in list(generated_ideas or [])
+        if normalize_possible_new_theme_input(idea)
+        and bool(relevant_state.get(normalize_possible_new_theme_input(idea), False))
+    ]
+    return apply_generated_theme_idea_checkbox_selection(
+        current_value,
+        checked_generated,
+        generated_ideas,
+        state,
+    )
 
 
 def normalize_scanner_research_draft_source(value: object) -> str:

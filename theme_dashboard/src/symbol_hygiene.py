@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import duckdb
 import pandas as pd
 
 from .config import (
@@ -14,7 +15,7 @@ from .config import (
     CURRENT_RANKING_RETURN_CAP_PCT,
 )
 from .failure_classification import categorize_failure_message
-from .queries import latest_ticker_snapshots
+from .queries import preferred_ticker_snapshot_source
 
 ACTIVE = "active"
 WATCH = "watch"
@@ -273,7 +274,8 @@ def _base_symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
         membership_columns = "mc.current_theme_names, mc.current_categories,"
         membership_join = "LEFT JOIN membership_context mc ON mc.ticker = s.ticker"
 
-    return conn.execute(
+    return _execute_df(
+        conn,
         f"""
         WITH latest_market_data AS (
             SELECT
@@ -320,7 +322,7 @@ def _base_symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
         LIMIT ?
         """,
         [limit],
-    ).df()
+    )
 
 
 def _allowlisted_calculation_outlier(state_row) -> bool:
@@ -331,15 +333,45 @@ def _allowlisted_calculation_outlier(state_row) -> bool:
     return last_failure_category == CALCULATION_OUTLIER and "kept active by reviewer" in suggested_reason.lower()
 
 
+def _execute_df(conn, sql: str, params: list[object] | None = None) -> pd.DataFrame:
+    result = conn.execute(sql, params or [])
+    columns = [str(desc[0]) for desc in (result.description or [])]
+    rows = result.fetchall()
+    return pd.DataFrame.from_records(rows, columns=columns)
+
+
 def _calculation_outlier_candidates(conn) -> pd.DataFrame:
     if not _table_exists(conn, "theme_membership") or not _table_exists(conn, "themes"):
         return pd.DataFrame()
 
-    latest = latest_ticker_snapshots(conn)
+    preferred_source = preferred_ticker_snapshot_source(conn)
+    if not preferred_source:
+        return pd.DataFrame()
+
+    latest = _execute_df(
+        conn,
+        """
+        SELECT
+            s.ticker,
+            s.price,
+            s.avg_volume,
+            s.perf_1w,
+            s.perf_1m,
+            s.perf_3m,
+            s.last_updated
+        FROM ticker_snapshots s
+        JOIN refresh_runs r ON r.run_id = s.run_id
+        WHERE r.status IN ('success', 'partial')
+          AND s.snapshot_source = ?
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) = 1
+        """,
+        [preferred_source],
+    )
     if latest.empty:
         return pd.DataFrame()
 
-    membership = conn.execute(
+    membership = _execute_df(
+        conn,
         """
         SELECT
             m.ticker,
@@ -352,8 +384,8 @@ def _calculation_outlier_candidates(conn) -> pd.DataFrame:
         FROM theme_membership m
         JOIN themes t ON t.id = m.theme_id
         GROUP BY m.ticker
-        """
-    ).df()
+        """,
+    )
     if membership.empty:
         return pd.DataFrame()
 
@@ -418,8 +450,35 @@ def _calculation_outlier_candidates(conn) -> pd.DataFrame:
             "affected_calculation_surfaces",
         ]
     ].reset_index(drop=True)
-def sync_calculation_outlier_flags(conn) -> dict[str, int]:
-    candidates = _calculation_outlier_candidates(conn)
+
+
+def _load_calculation_outlier_candidates(
+    conn,
+    *,
+    read_conn_factory=None,
+) -> tuple[pd.DataFrame, list[str]]:
+    warnings: list[str] = []
+    if read_conn_factory is not None:
+        try:
+            with read_conn_factory() as read_conn:
+                return _calculation_outlier_candidates(read_conn), warnings
+        except Exception as exc:
+            warnings.append(
+                "Calculation outlier check could not use the isolated read path; "
+                f"falling back to the shared connection. Details: {exc}"
+            )
+    try:
+        return _calculation_outlier_candidates(conn), warnings
+    except (duckdb.Error, Exception) as exc:
+        warnings.append(
+            "Calculation outlier check is temporarily unavailable, so the rest of the symbol hygiene queue "
+            f"will continue without that advisory context. Details: {exc}"
+        )
+        return pd.DataFrame(), warnings
+
+
+def sync_calculation_outlier_flags(conn, *, read_conn_factory=None) -> dict[str, object]:
+    candidates, warnings = _load_calculation_outlier_candidates(conn, read_conn_factory=read_conn_factory)
     candidate_map = {str(row["ticker"]).strip().upper(): row for _, row in candidates.iterrows()}
     candidate_tickers = set(candidate_map.keys())
     flagged = 0
@@ -490,16 +549,26 @@ def sync_calculation_outlier_flags(conn) -> dict[str, int]:
         )
         cleared += 1
 
-    return {"flagged": flagged, "cleared": cleared}
+    return {"flagged": flagged, "cleared": cleared, "warnings": warnings}
 
 
-def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
-    sync_calculation_outlier_flags(conn)
+def symbol_hygiene_queue(conn, limit: int = 200, *, outlier_read_conn_factory=None) -> pd.DataFrame:
+    # Authoritative Health-page runtime path:
+    # keep the main queue on the shared app connection, but isolate the heavier outlier read path when a
+    # fresh-read factory is provided so reruns cannot fall back to an older ambiguous helper path.
+    sync_result = sync_calculation_outlier_flags(conn, read_conn_factory=outlier_read_conn_factory)
+    warnings = list(sync_result.get("warnings") or [])
     queue = _base_symbol_hygiene_queue(conn, limit=limit)
+    queue.attrs["warnings"] = warnings
     if queue.empty:
         return queue
 
-    outlier_context = _calculation_outlier_candidates(conn)
+    outlier_context, outlier_warnings = _load_calculation_outlier_candidates(
+        conn,
+        read_conn_factory=outlier_read_conn_factory,
+    )
+    warnings.extend(outlier_warnings)
+    queue.attrs["warnings"] = warnings
     if outlier_context.empty:
         return queue
 
@@ -514,6 +583,7 @@ def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
         on=["ticker", "current_theme_names", "current_categories"],
         how="left",
     )
+    queue.attrs["warnings"] = warnings
     return queue
 
 
