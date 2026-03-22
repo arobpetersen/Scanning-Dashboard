@@ -37,10 +37,14 @@ from src.streamlit_utils import (
     clear_current_market_view_caches,
     db_cache_token,
     extract_selected_row,
+    get_canonical_multiselect_values,
     load_theme_health_overview_cached,
+    queue_feedback_message,
     render_dataframe,
+    render_feedback_message,
     reset_perf_timings,
     show_perf_summary,
+    sync_valid_multiselect_state,
     stop_for_database_error,
 )
 from src.suggestions_service import suggestion_status_counts
@@ -93,20 +97,12 @@ try:
 except Exception as exc:
     stop_for_database_error(exc)
 db_token = db_cache_token()
+render_feedback_message(st.session_state, "governed_onboarding_feedback")
 
 ops_tab, themes_tab = st.tabs(["Operations", "Theme Health"])
 
 with ops_tab:
-    refresh_feedback = st.session_state.pop("refresh_recovery_feedback", None)
-    if refresh_feedback:
-        level = str(refresh_feedback.get("level") or "info")
-        message = str(refresh_feedback.get("message") or "")
-        if level == "success":
-            st.success(message)
-        elif level == "warning":
-            st.warning(message)
-        else:
-            st.error(message)
+    render_feedback_message(st.session_state, "refresh_recovery_feedback")
 
     st.write(f"Default provider: `{DEFAULT_PROVIDER}`")
     st.write(f"Massive configured: `{bool(massive_api_key())}` ({MASSIVE_API_KEY_ENV})")
@@ -233,69 +229,107 @@ with ops_tab:
             .astype(str)
             .tolist()
         )
-        selected_onboarding_tickers = st.multiselect(
+        selected_onboarding_tickers = sync_valid_multiselect_state(
+            st.session_state,
+            "governed_onboarding_tickers",
+            pending_backfill_options,
+            default=pending_backfill_options[:5],
+        )
+        st.multiselect(
             "Tickers for onboarding history hydration",
             options=pending_backfill_options,
-            default=pending_backfill_options[:5],
             key="governed_onboarding_tickers",
             help="Fetches and persists ticker daily history only for newly governed tickers that still need stored history depth.",
         )
         if st.button(
             "Hydrate ticker history for onboarding",
             type="primary",
-            disabled=not bool(selected_onboarding_tickers),
+            disabled=not bool(get_canonical_multiselect_values(st.session_state, "governed_onboarding_tickers")),
             key="run_governed_onboarding_backfill",
         ):
             try:
+                selected_onboarding_tickers = get_canonical_multiselect_values(st.session_state, "governed_onboarding_tickers")
                 with get_conn() as conn:
                     result = run_governed_ticker_onboarding_backfill(conn, selected_onboarding_tickers)
                 updated_rows = result.get("updated_rows") or []
                 updated_summary = ", ".join(
                     f"{row['ticker']}={row['backfill_status']}" for row in updated_rows[:5]
                 )
-                st.success(
+                feedback_message = (
                     f"Onboarding history hydration finished with status `{result.get('status')}` for "
                     f"{len(result.get('tickers') or [])} ticker(s). {updated_summary}"
                 )
                 current_snapshot_result = result.get("current_snapshot_result") or {}
                 if current_snapshot_result:
-                    st.caption(
-                        "Targeted current snapshot hydration: "
+                    feedback_message += (
+                        " Targeted current snapshot hydration: "
                         f"status=`{current_snapshot_result.get('status') or 'unknown'}` | "
-                        f"run_id=`{current_snapshot_result.get('run_id') or 'n/a'}`"
+                        f"run_id=`{current_snapshot_result.get('run_id') or 'n/a'}`."
                     )
+                queue_feedback_message(
+                    st.session_state,
+                    "governed_onboarding_feedback",
+                    level="success",
+                    message=feedback_message,
+                )
                 clear_current_market_view_caches()
                 st.rerun()
             except Exception as exc:
-                st.error(f"Onboarding history hydration failed: {exc}")
+                queue_feedback_message(
+                    st.session_state,
+                    "governed_onboarding_feedback",
+                    level="error",
+                    message=f"Onboarding history hydration failed: {exc}",
+                )
+                st.rerun()
         downstream_options = (
             governed_onboarding[governed_onboarding["downstream_refresh_needed"] == True]["ticker"]
             .astype(str)
             .tolist()
         )
-        selected_reconstruction_tickers = st.multiselect(
+        selected_reconstruction_tickers = sync_valid_multiselect_state(
+            st.session_state,
+            "governed_onboarding_reconstruction_tickers",
+            downstream_options,
+            default=downstream_options[:5],
+        )
+        st.multiselect(
             "Tickers for affected-theme reconstruction",
             options=downstream_options,
-            default=downstream_options[:5],
             key="governed_onboarding_reconstruction_tickers",
             help="Rebuilds reconstructed theme history for themes affected by these newly governed tickers after ticker history is ready.",
         )
         if st.button(
             "Run affected-theme reconstruction",
-            disabled=not bool(selected_reconstruction_tickers),
+            disabled=not bool(get_canonical_multiselect_values(st.session_state, "governed_onboarding_reconstruction_tickers")),
             key="run_governed_onboarding_theme_reconstruction",
         ):
             try:
+                selected_reconstruction_tickers = get_canonical_multiselect_values(
+                    st.session_state,
+                    "governed_onboarding_reconstruction_tickers",
+                )
                 with get_conn() as conn:
                     result = run_governed_ticker_onboarding_theme_reconstruction(conn, selected_reconstruction_tickers)
-                st.success(
+                queue_feedback_message(
+                    st.session_state,
+                    "governed_onboarding_feedback",
+                    level="success",
+                    message=(
                     f"Affected-theme reconstruction finished with status `{result.get('status')}` for "
                     f"{len(result.get('tickers') or [])} ticker(s)."
+                    ),
                 )
                 clear_current_market_view_caches()
                 st.rerun()
             except Exception as exc:
-                st.error(f"Affected-theme reconstruction failed: {exc}")
+                queue_feedback_message(
+                    st.session_state,
+                    "governed_onboarding_feedback",
+                    level="error",
+                    message=f"Affected-theme reconstruction failed: {exc}",
+                )
+                st.rerun()
         st.caption(
             "History hydration is ticker-scoped. Affected-theme reconstruction is a separate explicit step once ticker history is ready."
         )
@@ -375,16 +409,7 @@ with ops_tab:
             render_dataframe("health_recent_failures", recent_failures, width="stretch")
 
     st.subheader("Symbol hygiene review queue")
-    feedback = st.session_state.pop("symbol_hygiene_feedback", None)
-    if feedback:
-        level = str(feedback.get("level") or "info")
-        message = str(feedback.get("message") or "")
-        if level == "success":
-            st.success(message)
-        elif level == "warning":
-            st.warning(message)
-        else:
-            st.error(message)
+    render_feedback_message(st.session_state, "symbol_hygiene_feedback")
     queue_warning_messages: list[str] = []
     try:
         with get_conn() as conn:
@@ -609,15 +634,19 @@ with ops_tab:
                             note="Run manually marked interrupted from Refresh history.",
                         )
                     if changed:
-                        st.session_state["refresh_recovery_feedback"] = {
-                            "level": "success",
-                            "message": f"Marked refresh run #{selected_run_id} interrupted. New refreshes are unblocked.",
-                        }
+                        queue_feedback_message(
+                            st.session_state,
+                            "refresh_recovery_feedback",
+                            level="success",
+                            message=f"Marked refresh run #{selected_run_id} interrupted. New refreshes are unblocked.",
+                        )
                     else:
-                        st.session_state["refresh_recovery_feedback"] = {
-                            "level": "warning",
-                            "message": f"Refresh run #{selected_run_id} was no longer running, so nothing was changed.",
-                        }
+                        queue_feedback_message(
+                            st.session_state,
+                            "refresh_recovery_feedback",
+                            level="warning",
+                            message=f"Refresh run #{selected_run_id} was no longer running, so nothing was changed.",
+                        )
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Failed to mark run interrupted: {exc}")
@@ -787,7 +816,13 @@ with themes_tab:
                             )
                         else:
                             rebuild_bits = ""
-                        st.success(f"{success_message}{rebuild_bits}")
+                        clear_current_market_view_caches()
+                        queue_feedback_message(
+                            st.session_state,
+                            "governed_onboarding_feedback",
+                            level="success",
+                            message=f"{success_message}{rebuild_bits}",
+                        )
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Could not update ticker calculation suppression. {exc}")
@@ -810,20 +845,31 @@ with themes_tab:
                         st.session_state["health_selected_theme_id"] = theme_id
                         status = str(rebuild_result.get("status") or "unknown")
                         if status in {"no_scope", "no_ticker_history", "no_reconstructed_scope", "no_history_rows", "no_op"}:
-                            st.info(
-                                f"Rebuild result for `{rebuild_member}`: {status}. "
-                                f"Affected themes={len(rebuild_result.get('affected_theme_ids', []))}, "
-                                f"replaced={int(rebuild_result.get('rows_replaced') or 0)}, "
-                                f"written={int(rebuild_result.get('rows_written') or 0)}."
+                            queue_feedback_message(
+                                st.session_state,
+                                "governed_onboarding_feedback",
+                                level="warning",
+                                message=(
+                                    f"Rebuild result for `{rebuild_member}`: {status}. "
+                                    f"Affected themes={len(rebuild_result.get('affected_theme_ids', []))}, "
+                                    f"replaced={int(rebuild_result.get('rows_replaced') or 0)}, "
+                                    f"written={int(rebuild_result.get('rows_written') or 0)}."
+                                ),
                             )
                         else:
-                            st.success(
-                                f"Rebuilt recent reconstructed history for `{rebuild_member}` "
-                                f"over {rebuild_result.get('window_start')} to {rebuild_result.get('window_end')} "
-                                f"| labels={', '.join(rebuild_result.get('labels_rebuilt') or []) or 'none'} "
-                                f"| replaced={int(rebuild_result.get('rows_replaced') or 0)} "
-                                f"| written={int(rebuild_result.get('rows_written') or 0)}."
+                            queue_feedback_message(
+                                st.session_state,
+                                "governed_onboarding_feedback",
+                                level="success",
+                                message=(
+                                    f"Rebuilt recent reconstructed history for `{rebuild_member}` "
+                                    f"over {rebuild_result.get('window_start')} to {rebuild_result.get('window_end')} "
+                                    f"| labels={', '.join(rebuild_result.get('labels_rebuilt') or []) or 'none'} "
+                                    f"| replaced={int(rebuild_result.get('rows_replaced') or 0)} "
+                                    f"| written={int(rebuild_result.get('rows_written') or 0)}."
+                                ),
                             )
+                        clear_current_market_view_caches()
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Recent reconstructed-history rebuild failed. {exc}")
@@ -846,8 +892,12 @@ with themes_tab:
                         with get_conn() as conn:
                             result = replace_ticker_in_theme(conn, theme_id, current_member, replacement_member)
                         st.session_state["health_selected_theme_id"] = theme_id
-                        st.success(
-                            f"Removed {result['removed_ticker']} from {theme_name} and added {result['added_ticker']}."
+                        clear_current_market_view_caches()
+                        queue_feedback_message(
+                            st.session_state,
+                            "governed_onboarding_feedback",
+                            level="success",
+                            message=f"Removed {result['removed_ticker']} from {theme_name} and added {result['added_ticker']}.",
                         )
                         st.rerun()
                     except Exception as exc:
@@ -889,7 +939,13 @@ with themes_tab:
                         with get_conn() as conn:
                             update_theme(conn, theme_id, edit_name, edit_category, edit_active)
                         st.session_state["health_selected_theme_id"] = theme_id
-                        st.success(f"Updated theme `{intended_name}`.")
+                        clear_current_market_view_caches()
+                        queue_feedback_message(
+                            st.session_state,
+                            "governed_onboarding_feedback",
+                            level="success",
+                            message=f"Updated theme `{intended_name}`.",
+                        )
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Could not update theme. {exc}")

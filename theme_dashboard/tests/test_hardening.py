@@ -96,6 +96,7 @@ from src.scanner_research import (
     scanner_research_review_summary,
 )
 from src.streamlit_utils import _load_theme_inflections_cached, _load_theme_momentum_cached, resolve_valid_selectbox_value
+from src import streamlit_utils
 from src.eod_refresh import has_eod_run_for_date, run_scheduled_eod_refresh
 from src.rankings import _build_current_ranking_metrics, _compute_theme_metrics, compute_theme_rankings, theme_confidence_factor
 
@@ -2037,6 +2038,63 @@ class TestThemesPageRemovalFlow(unittest.TestCase):
         self.assertIn('st.warning(f"No membership row was removed for {remove_result[\'ticker\']} in {selected[\'name\']} [{selected_id}].")', content)
         self.assertNotIn('st.session_state[remove_select_key] = next_remove_ticker', content)
         self.assertNotIn('st.session_state.pop(remove_select_key, None)\n                        else:', content)
+
+
+class TestStreamlitHealthMutationState(unittest.TestCase):
+    def test_sync_valid_multiselect_state_prefers_session_state_selection(self):
+        session_state = {"governed_onboarding_reconstruction_tickers": ["LPTH"]}
+
+        selected = streamlit_utils.sync_valid_multiselect_state(
+            session_state,
+            "governed_onboarding_reconstruction_tickers",
+            ["LPTH", "AAOI"],
+            default=["AAOI"],
+        )
+
+        self.assertEqual(selected, ["LPTH"])
+        self.assertEqual(session_state["governed_onboarding_reconstruction_tickers"], ["LPTH"])
+
+    def test_sync_valid_multiselect_state_preserves_selection_across_rerun_until_options_change(self):
+        session_state = {"governed_onboarding_reconstruction_tickers": ["LPTH", "AAOI"]}
+
+        selected = streamlit_utils.sync_valid_multiselect_state(
+            session_state,
+            "governed_onboarding_reconstruction_tickers",
+            ["LPTH", "AAOI", "NVDA"],
+            default=["NVDA"],
+        )
+
+        self.assertEqual(selected, ["LPTH", "AAOI"])
+        self.assertEqual(streamlit_utils.get_canonical_multiselect_values(session_state, "governed_onboarding_reconstruction_tickers"), ["LPTH", "AAOI"])
+
+    def test_queue_feedback_message_persists_success_payload_for_post_rerun_render(self):
+        session_state = {}
+
+        streamlit_utils.queue_feedback_message(
+            session_state,
+            "governed_onboarding_feedback",
+            level="success",
+            message="Affected-theme reconstruction finished.",
+        )
+
+        self.assertEqual(
+            session_state["governed_onboarding_feedback"],
+            {"level": "success", "message": "Affected-theme reconstruction finished."},
+        )
+
+    def test_clear_current_market_view_caches_clears_theme_analytics_loaders(self):
+        with patch.object(streamlit_utils._load_current_ranking_snapshot_cached, "clear") as clear_current, patch.object(
+            streamlit_utils._load_theme_rankings_cached, "clear"
+        ) as clear_rankings, patch.object(streamlit_utils._load_theme_momentum_cached, "clear") as clear_momentum, patch.object(
+            streamlit_utils._load_theme_inflections_cached, "clear"
+        ) as clear_inflections, patch.object(streamlit_utils._load_theme_health_overview_cached, "clear") as clear_health:
+            streamlit_utils.clear_current_market_view_caches()
+
+        clear_current.assert_called_once()
+        clear_rankings.assert_called_once()
+        clear_momentum.assert_called_once()
+        clear_inflections.assert_called_once()
+        clear_health.assert_called_once()
 
 
 class TestRefreshUniverseSemantics(unittest.TestCase):
@@ -4896,3 +4954,27 @@ class TestRefreshRunRecovery(unittest.TestCase):
         self.assertIn("mark_selected_refresh_run_interrupted", content)
         self.assertIn("mark_refresh_run_interrupted(", content)
         self.assertIn("Refresh history", content)
+
+    def test_health_page_reconstruction_uses_canonical_session_state_and_safe_rerun_feedback(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "4_Health.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('key="governed_onboarding_reconstruction_tickers"', content)
+        self.assertIn('disabled=not bool(get_canonical_multiselect_values(st.session_state, "governed_onboarding_reconstruction_tickers"))', content)
+        self.assertIn('selected_reconstruction_tickers = get_canonical_multiselect_values(', content)
+        self.assertIn('"governed_onboarding_reconstruction_tickers",', content)
+        self.assertIn('queue_feedback_message(', content)
+        self.assertIn('"governed_onboarding_feedback"', content)
+        self.assertIn("clear_current_market_view_caches()", content)
+        self.assertIn("st.rerun()", content)
+        self.assertIn('message=f"Affected-theme reconstruction failed: {exc}"', content)
+
+    def test_health_page_backfill_uses_canonical_session_state_and_persists_feedback_before_rerun(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "4_Health.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('key="governed_onboarding_tickers"', content)
+        self.assertIn('disabled=not bool(get_canonical_multiselect_values(st.session_state, "governed_onboarding_tickers"))', content)
+        self.assertIn('selected_onboarding_tickers = get_canonical_multiselect_values(st.session_state, "governed_onboarding_tickers")', content)
+        self.assertIn('render_feedback_message(st.session_state, "governed_onboarding_feedback")', content)
+        self.assertIn('message=f"Onboarding history hydration failed: {exc}"', content)

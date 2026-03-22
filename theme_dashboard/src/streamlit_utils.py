@@ -20,6 +20,50 @@ def resolve_valid_selectbox_value(current_value, options: list[str]) -> str | No
     return str(options[0])
 
 
+def get_canonical_multiselect_values(session_state, key: str) -> list[str]:
+    raw_value = session_state.get(key, [])
+    if isinstance(raw_value, (list, tuple, set)):
+        return [str(value) for value in raw_value if str(value).strip()]
+    return []
+
+
+def sync_valid_multiselect_state(
+    session_state,
+    key: str,
+    options,
+    *,
+    default: list[str] | None = None,
+) -> list[str]:
+    normalized_options = [str(option) for option in options if str(option).strip()]
+    valid_options = set(normalized_options)
+    current_value = [value for value in get_canonical_multiselect_values(session_state, key) if value in valid_options]
+    if key not in session_state and default is not None:
+        current_value = [str(value) for value in default if str(value).strip() and str(value) in valid_options]
+    session_state[key] = current_value
+    return current_value
+
+
+def queue_feedback_message(session_state, key: str, *, level: str, message: str) -> None:
+    session_state[key] = {
+        "level": str(level or "info"),
+        "message": str(message or ""),
+    }
+
+
+def render_feedback_message(session_state, key: str) -> None:
+    feedback = session_state.pop(key, None)
+    if not feedback:
+        return
+    level = str(feedback.get("level") or "info")
+    message = str(feedback.get("message") or "")
+    if level == "success":
+        st.success(message)
+    elif level == "warning":
+        st.warning(message)
+    else:
+        st.error(message)
+
+
 def extract_selected_row(event) -> int | None:
     """Best-effort extraction of a selected row index across Streamlit event payload shapes."""
     selection = {}
@@ -156,6 +200,8 @@ def load_current_ranking_snapshot_cached(db_token: tuple[str, int]):
 def clear_current_market_view_caches() -> None:
     _load_current_ranking_snapshot_cached.clear()
     _load_theme_rankings_cached.clear()
+    _load_theme_momentum_cached.clear()
+    _load_theme_inflections_cached.clear()
     _load_theme_health_overview_cached.clear()
 
 
