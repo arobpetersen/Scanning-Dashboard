@@ -28,6 +28,7 @@ from src.scanner_research_service import (
     load_research_review,
     load_research_review_summary,
     persist_research_review,
+    research_status_metadata,
 )
 from src.suggestions_page_state import (
     apply_generated_theme_idea_checkbox_selection,
@@ -48,6 +49,7 @@ from src.suggestions_page_state import (
     sync_suggested_theme_checkbox_state,
 )
 from src.streamlit_utils import (
+    clear_scanner_research_state,
     clear_scanner_candidate_summary_cache,
     clear_current_market_view_caches,
     db_cache_token,
@@ -487,6 +489,8 @@ if active_suggestions_tab == "Queue":
                 try:
                     with get_conn() as conn:
                         apply_suggestion(conn, int(selected_queue_id), apply_notes)
+                    clear_scanner_research_state(st.session_state)
+                    clear_current_market_view_caches()
                     st.session_state["suggestions_feedback"] = {
                         "level": "success",
                         "message": f"Suggestion #{int(selected_queue_id)} applied.{_queue_visibility_note(status_filter, 'applied')}",
@@ -515,6 +519,7 @@ if active_suggestions_tab == "Queue":
                 try:
                     with get_conn() as conn:
                         result = fast_path_create_governed_theme_and_assign_ticker(conn, int(selected_queue_id), fast_path_notes)
+                    clear_scanner_research_state(st.session_state)
                     clear_scanner_candidate_summary_cache()
                     clear_current_market_view_caches()
                     st.session_state["suggestions_feedback"] = {
@@ -874,20 +879,27 @@ if active_suggestions_tab == "Scanner Audit":
                     "This is an agent-assisted advisory draft grounded on the current governed theme catalog where practical. "
                     "It is not a governed-theme assignment and still requires human review."
                 )
-                research_mode = str(existing_draft.get("research_mode") or "heuristic_fallback")
-                mode_label = "OpenAI" if research_mode == "openai" else "Heuristic fallback"
-                meta_caption = (
-                    f"Generated at `{existing_draft.get('generated_at') or 'n/a'}` | "
-                    f"strategy=`{existing_draft.get('theme_generation_strategy') or selected_strategy}` | "
-                    f"Research Mode: `{mode_label}` | "
-                    f"recommended_action=`{existing_draft.get('recommended_action') or 'watch_only'}` | "
-                    f"confidence=`{existing_draft.get('confidence') or 'low'}`"
+                debug_entry = debug_store.get(selected_audit_ticker) or {}
+                status_meta = research_status_metadata(
+                    existing_draft,
+                    draft_source=debug_entry.get("draft_source") or existing_draft.get("draft_source"),
                 )
+                research_mode = str(status_meta.get("research_mode") or "heuristic_fallback")
+                meta_parts = [
+                    f"generated=`{status_meta.get('generated_at') or 'n/a'}`",
+                    f"draft=`{status_meta.get('draft_source_label') or 'Reused session draft'}`",
+                    f"mode=`{status_meta.get('research_mode_label') or 'Heuristic fallback'}`",
+                    f"strategy=`{status_meta.get('theme_generation_strategy') or selected_strategy}`",
+                    f"recommended_action=`{status_meta.get('recommended_action') or 'watch_only'}`",
+                    f"confidence=`{status_meta.get('confidence') or 'low'}`",
+                ]
+                if status_meta.get("timing_label"):
+                    meta_parts.append(f"latency=`{status_meta.get('timing_label')}`")
+                meta_caption = " | ".join(meta_parts)
                 review_gutter_col, review_shell_col, review_tail_col = st.columns([0.015, 0.935, 0.05], gap="small")
                 with review_shell_col:
                     st.caption(meta_caption)
                     main_review_col, side_review_col = st.columns([0.76, 0.24], gap="large")
-                debug_entry = debug_store.get(selected_audit_ticker) or {}
                 timing_summary = existing_draft.get("research_timing_summary") or {}
                 decision_trace = existing_draft.get("research_decision_trace") or {}
                 validation_debug = existing_draft.get("validation_debug") or {}
@@ -906,8 +918,8 @@ if active_suggestions_tab == "Scanner Audit":
                             f"prefiltered=`{context_meta.get('catalog_was_prefiltered')}` | "
                             f"estimated_chars=`{context_meta.get('estimated_context_chars', 'n/a')}`"
                         )
-                    if research_mode != "openai" and existing_draft.get("fallback_reason"):
-                        st.caption(f"Heuristic fallback: {existing_draft.get('fallback_reason')}")
+                    if research_mode != "openai" and status_meta.get("fallback_reason"):
+                        st.caption(f"Heuristic fallback: {status_meta.get('fallback_reason')}")
                     if research_error:
                         debug_parts = []
                         if research_error.get("status_code") is not None:
@@ -1290,6 +1302,7 @@ if active_suggestions_tab == "Scanner Audit":
                                     custom_new_themes=custom_new_themes,
                                     proposed_new_theme_category=proposed_new_theme_category,
                                 )
+                            clear_scanner_research_state(st.session_state)
                             clear_scanner_candidate_summary_cache()
                             clear_current_market_view_caches()
                             onboarding_state = result.get("onboarding_state") or {}

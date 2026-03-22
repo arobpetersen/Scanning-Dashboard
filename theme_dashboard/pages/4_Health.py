@@ -34,6 +34,7 @@ from src.queries import (
     theme_member_hygiene_context,
 )
 from src.streamlit_utils import (
+    clear_scanner_research_state,
     clear_current_market_view_caches,
     db_cache_token,
     extract_selected_row,
@@ -903,6 +904,7 @@ with themes_tab:
                         with get_conn() as conn:
                             result = replace_ticker_in_theme(conn, theme_id, current_member, replacement_member)
                         st.session_state["health_selected_theme_id"] = theme_id
+                        clear_scanner_research_state(st.session_state)
                         clear_current_market_view_caches()
                         queue_feedback_message(
                             st.session_state,
@@ -950,6 +952,7 @@ with themes_tab:
                         with get_conn() as conn:
                             update_theme(conn, theme_id, edit_name, edit_category, edit_active)
                         st.session_state["health_selected_theme_id"] = theme_id
+                        clear_scanner_research_state(st.session_state)
                         clear_current_market_view_caches()
                         queue_feedback_message(
                             st.session_state,

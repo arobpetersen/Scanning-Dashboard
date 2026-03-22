@@ -21,6 +21,25 @@ from .scanner_research_heuristics import (
 )
 
 
+class RecoverableResearchGenerationError(RuntimeError):
+    """AI-path degradation that should fall back to the heuristic baseline."""
+
+    def __init__(self, message: str, *, details: dict[str, object] | None = None):
+        super().__init__(message)
+        self.details = dict(details or {})
+        self.details.setdefault("error_class", self.__class__.__name__)
+        self.details.setdefault("error_message", str(message or "").strip())
+
+
+def _recoverable_error_from_exception(exc: Exception) -> RecoverableResearchGenerationError:
+    from . import scanner_research as legacy
+
+    return RecoverableResearchGenerationError(
+        legacy._compact_error_reason(exc),
+        details=legacy._extract_openai_error_details(exc),
+    )
+
+
 def call_openai_research(api_key: str, context: dict[str, object], *, max_output_tokens: int = 550) -> dict[str, object]:
     from . import scanner_research as legacy
 
@@ -223,7 +242,14 @@ def ai_research_draft_for_strategy(
     normalized_strategy = legacy._normalize_research_strategy(strategy)
     api_key = openai_api_key()
     if not api_key:
-        raise ValueError(f"{OPENAI_API_KEY_ENV} is not set.")
+        raise RecoverableResearchGenerationError(
+            f"{OPENAI_API_KEY_ENV} is not set.",
+            details={
+                "error_class": "MissingOpenAIAPIKey",
+                "model": AI_MODEL,
+                "error_message": f"{OPENAI_API_KEY_ENV} is not set.",
+            },
+        )
     baseline_start = legacy._now_perf()
     heuristic_baseline = legacy._baseline_research_draft(candidate, catalog, profile)
     baseline_ms = legacy._elapsed_ms(baseline_start)
@@ -238,12 +264,26 @@ def ai_research_draft_for_strategy(
     context = build_ai_context(candidate, profile, filtered_catalog, heuristic_baseline)
     context_meta["estimated_context_chars"] = legacy._estimate_context_size_chars(context)
     request_start = legacy._now_perf()
-    raw = legacy._call_openai_research(
-        api_key,
-        context,
-        max_output_tokens=400,
-    )
+    try:
+        raw = legacy._call_openai_research(
+            api_key,
+            context,
+            max_output_tokens=400,
+        )
+    except (requests.RequestException, json.JSONDecodeError, RecoverableResearchGenerationError) as exc:
+        if isinstance(exc, RecoverableResearchGenerationError):
+            raise
+        raise _recoverable_error_from_exception(exc) from exc
     ai_request_ms = legacy._elapsed_ms(request_start)
+    if not isinstance(raw, dict):
+        raise RecoverableResearchGenerationError(
+            "OpenAI response was not a JSON object.",
+            details={
+                "error_class": "InvalidOpenAIResponse",
+                "model": AI_MODEL,
+                "error_message": "OpenAI response was not a JSON object.",
+            },
+        )
     normalize_start = legacy._now_perf()
     ai_draft = normalize_ai_draft_payload(
         raw,

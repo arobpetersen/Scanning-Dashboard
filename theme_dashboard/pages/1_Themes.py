@@ -13,6 +13,7 @@ from src.leaderboard_utils import (
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.queries import ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
 from src.streamlit_utils import (
+    clear_scanner_research_state,
     clear_current_market_view_caches,
     db_cache_token,
     extract_selected_row,
@@ -454,6 +455,8 @@ with manage_tab:
         try:
             with get_conn() as conn:
                 create_theme(conn, new_name, new_category, new_is_active)
+            clear_scanner_research_state(st.session_state)
+            clear_current_market_view_caches()
             st.success("Theme created")
             st.rerun()
         except Exception as exc:
@@ -478,6 +481,8 @@ with manage_tab:
         try:
             with get_conn() as conn:
                 update_theme(conn, selected_id, edit_name, edit_category, edit_active)
+            clear_scanner_research_state(st.session_state)
+            clear_current_market_view_caches()
             st.success("Theme updated")
             st.rerun()
         except Exception as exc:
@@ -487,6 +492,8 @@ with manage_tab:
         try:
             with get_conn() as conn:
                 delete_theme(conn, selected_id)
+            clear_scanner_research_state(st.session_state)
+            clear_current_market_view_caches()
             st.success("Theme deleted")
             st.rerun()
         except Exception as exc:
@@ -504,6 +511,7 @@ with manage_tab:
             try:
                 with get_conn() as conn:
                     add_ticker(conn, selected_id, new_ticker, onboarding_source="themes_page_manual_add")
+                clear_scanner_research_state(st.session_state)
                 clear_current_market_view_caches()
                 st.success(f"Added {new_ticker.strip().upper()}")
                 st.rerun()
@@ -530,6 +538,7 @@ with manage_tab:
                         remove_result = remove_ticker(conn, selected_id, remove_tkr)
                     members = remove_result["members"]
                     if remove_result["removed"]:
+                        clear_scanner_research_state(st.session_state)
                         clear_current_market_view_caches()
                         st.session_state["manage_ticker_feedback"] = {
                             "level": "success",
@@ -648,6 +657,7 @@ with manage_tab:
                                     run_kind="ticker_intake_backfill",
                                     replace_existing=True,
                                 )
+                        clear_scanner_research_state(st.session_state)
                         clear_current_market_view_caches()
                         if int(result["added_count"]) == 0 and int(result["removed_count"]) == 0:
                             st.session_state["manage_ticker_feedback"] = {

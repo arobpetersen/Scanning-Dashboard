@@ -6,7 +6,7 @@ from unittest.mock import patch
 import duckdb
 
 from src.database import SCHEMA_SQL
-from src.scanner_research_cache import _PROFILE_CACHE
+from src.scanner_research_cache import _DESCRIPTION_ANALYSIS_CACHE, _PROFILE_CACHE, _THEME_PREPROCESS_CACHE
 from src.scanner_research_analysis import (
     build_candidate_analysis,
     candidate_analysis,
@@ -17,6 +17,7 @@ from src.scanner_research_heuristics import (
     truncate_existing_theme_suggestions,
 )
 from src.scanner_research_merge import (
+    RecoverableResearchGenerationError,
     ai_research_draft_for_strategy,
     best_suggested_theme_fit_details,
     merge_ai_with_heuristic_draft,
@@ -30,7 +31,9 @@ from src.scanner_research_service import (
     load_research_review,
     load_research_review_summary,
     persist_research_review,
+    research_status_metadata,
 )
+from src.streamlit_utils import clear_scanner_research_state
 
 
 class TestResearchDraftContract(unittest.TestCase):
@@ -108,9 +111,14 @@ class TestScannerResearchService(unittest.TestCase):
             patch("src.scanner_research_service.theme_catalog_context", return_value=[{"theme_id": 1, "theme_name": "AI - Infrastructure", "category": "AI"}]),
             patch("src.scanner_research_service.preprocessed_catalog", side_effect=lambda catalog: catalog),
             patch("src.scanner_research_service.load_company_profile_with_cache", return_value={"company_name": "NVIDIA", "description": "Accelerated computing company."}),
-            patch("src.scanner_research_service.ai_research_draft_for_strategy", side_effect=RuntimeError("HTTP 429 rate limit")),
+            patch(
+                "src.scanner_research_service.ai_research_draft_for_strategy",
+                side_effect=RecoverableResearchGenerationError(
+                    "HTTP 429 rate limit",
+                    details={"message": "HTTP 429 rate limit", "status_code": 429},
+                ),
+            ),
             patch("src.scanner_research_service.baseline_research_draft", return_value=baseline_payload),
-            patch("src.scanner_research._extract_openai_error_details", return_value={"message": "HTTP 429 rate limit"}),
             patch("src.scanner_research._format_openai_error_summary", return_value="HTTP 429 rate limit"),
         ):
             draft = generate_research_draft(object(), "NVDA")
@@ -119,9 +127,21 @@ class TestScannerResearchService(unittest.TestCase):
         self.assertEqual(draft.ticker, "NVDA")
         self.assertEqual(draft.research_mode, "heuristic_fallback")
         self.assertEqual(draft.fallback_reason, "HTTP 429 rate limit")
-        self.assertEqual(draft.research_error, {"message": "HTTP 429 rate limit"})
+        self.assertEqual(draft.research_error.get("message"), "HTTP 429 rate limit")
+        self.assertEqual(draft.research_error.get("status_code"), 429)
         self.assertEqual(draft.theme_generation_strategy, "description_theme_generation")
         self.assertIn("total_ms", draft.research_timing_summary)
+
+    def test_generate_research_draft_propagates_unexpected_internal_errors(self):
+        with (
+            patch("src.scanner_research_service.candidate_context", return_value={"ticker": "NVDA"}),
+            patch("src.scanner_research_service.theme_catalog_context", return_value=[]),
+            patch("src.scanner_research_service.preprocessed_catalog", side_effect=lambda catalog: catalog),
+            patch("src.scanner_research_service.load_company_profile_with_cache", return_value={"company_name": "NVIDIA"}),
+            patch("src.scanner_research_service.ai_research_draft_for_strategy", side_effect=RuntimeError("unexpected bug")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unexpected bug"):
+                generate_research_draft(object(), "NVDA")
 
     def test_get_or_create_research_draft_reuses_existing_draft_and_returns_page_facing_feedback(self):
         existing = ResearchDraft.from_mapping(
@@ -176,13 +196,37 @@ class TestScannerResearchService(unittest.TestCase):
         self.assertEqual(summary["counts_by_outcome"]["direct_fit_correct"], 1)
         self.assertEqual(summary["recent_reviews"][0]["ticker"], "PLTR")
 
+    def test_research_status_metadata_surfaces_mode_source_fallback_and_timing(self):
+        metadata = research_status_metadata(
+            {
+                "ticker": "AAOI",
+                "generated_at": "2026-03-22 10:00:00",
+                "research_mode": "heuristic_fallback",
+                "theme_generation_strategy": "description_theme_generation",
+                "fallback_reason": "HTTP 429 rate limit",
+                "recommended_action": "watch_only",
+                "confidence": "medium",
+                "research_timing_summary": {"total_ms": 187.4},
+                "draft_source": "forced_regeneration",
+            }
+        )
+
+        self.assertEqual(metadata["research_mode_label"], "Heuristic fallback")
+        self.assertEqual(metadata["draft_source_label"], "Regenerated")
+        self.assertEqual(metadata["fallback_reason"], "HTTP 429 rate limit")
+        self.assertEqual(metadata["timing_label"], "187.4 ms")
+
 
 class TestExtractedResearchHelpers(unittest.TestCase):
     def setUp(self):
         _PROFILE_CACHE.clear()
+        _DESCRIPTION_ANALYSIS_CACHE.clear()
+        _THEME_PREPROCESS_CACHE.clear()
 
     def tearDown(self):
         _PROFILE_CACHE.clear()
+        _DESCRIPTION_ANALYSIS_CACHE.clear()
+        _THEME_PREPROCESS_CACHE.clear()
 
     def test_preprocessed_theme_entry_adds_expected_analysis_fields(self):
         entry = preprocessed_theme_entry(
@@ -376,3 +420,24 @@ class TestExtractedResearchHelpers(unittest.TestCase):
             )
 
         self.assertEqual(best["score"], 12)
+
+    def test_clear_scanner_research_state_clears_caches_and_session_drafts(self):
+        _PROFILE_CACHE["NVDA"] = {"company_name": "NVIDIA"}
+        _DESCRIPTION_ANALYSIS_CACHE[("NVDA",)] = {"candidate_roles": ["ai_compute"]}
+        _THEME_PREPROCESS_CACHE[(1,)] = {"theme_name": "AI - Infrastructure"}
+        session_state = {
+            "scanner_research_drafts": {"NVDA": {"ticker": "NVDA"}},
+            "scanner_research_debug": {"NVDA": {"draft_source": "fresh_generation"}},
+            "scanner_research_feedback": {"level": "success", "message": "Generated"},
+            "keep_me": True,
+        }
+
+        clear_scanner_research_state(session_state)
+
+        self.assertEqual(_PROFILE_CACHE, {})
+        self.assertEqual(_DESCRIPTION_ANALYSIS_CACHE, {})
+        self.assertEqual(_THEME_PREPROCESS_CACHE, {})
+        self.assertNotIn("scanner_research_drafts", session_state)
+        self.assertNotIn("scanner_research_debug", session_state)
+        self.assertNotIn("scanner_research_feedback", session_state)
+        self.assertTrue(session_state["keep_me"])

@@ -20,6 +20,7 @@ from src.scanner_research import (
     get_or_create_scanner_research_draft,
     theme_catalog_context,
 )
+from src.scanner_research_merge import RecoverableResearchGenerationError
 from src.scanner_audit import (
     apply_scanner_candidate_selected_themes,
     import_tc2000_exports,
@@ -1819,7 +1820,13 @@ class TestScannerAudit(unittest.TestCase):
         conn.close()
 
     @patch("src.scanner_research.openai_api_key", return_value="test-key")
-    @patch("src.scanner_research._call_openai_research", side_effect=RuntimeError("HTTP 429 rate limit while calling provider with api_key=secret123"))
+    @patch(
+        "src.scanner_research._call_openai_research",
+        side_effect=RecoverableResearchGenerationError(
+            "HTTP 429 rate limit while calling provider with api_key=secret123",
+            details={"status_code": 429, "error_message": "HTTP 429 rate limit while calling provider with api_key=secret123"},
+        ),
+    )
     @patch("src.scanner_research._load_company_profile", return_value={})
     def test_generate_scanner_research_draft_records_compact_fallback_reason(self, _mock_profile, _mock_call, _mock_key):
         conn = self._conn()

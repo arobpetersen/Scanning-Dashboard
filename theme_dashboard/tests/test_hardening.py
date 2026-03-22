@@ -3354,6 +3354,14 @@ class TestSuggestionsWorkflow(unittest.TestCase):
         self.assertIn("there is nothing governed to apply to membership yet", content)
         self.assertIn("Create governed theme and assign ticker", content)
         self.assertIn("clear_scanner_candidate_summary_cache()", content)
+        self.assertIn("clear_scanner_research_state(st.session_state)", content)
+
+    def test_theme_and_health_pages_clear_scanner_research_state_on_theme_mutations(self):
+        themes_source = (Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py").read_text(encoding="utf-8")
+        health_source = (Path(__file__).resolve().parents[1] / "pages" / "4_Health.py").read_text(encoding="utf-8")
+
+        self.assertIn("clear_scanner_research_state(st.session_state)", themes_source)
+        self.assertIn("clear_scanner_research_state(st.session_state)", health_source)
 
     def test_update_suggestion_status_supports_obsolete_from_selected_row_path(self):
         conn = duckdb.connect(":memory:")

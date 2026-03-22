@@ -28,7 +28,7 @@ from .scanner_research_persistence import (
 )
 from .scanner_research_profiles import candidate_context, load_company_profile_with_cache, theme_catalog_context
 from .scanner_research_analysis import preprocessed_catalog
-from .scanner_research_merge import ai_research_draft_for_strategy, baseline_research_draft
+from .scanner_research_merge import RecoverableResearchGenerationError, ai_research_draft_for_strategy, baseline_research_draft
 
 
 DEFAULT_RESEARCH_STRATEGY = "description_theme_generation"
@@ -70,10 +70,12 @@ def generate_research_draft(conn, ticker: str, *, strategy: str = DEFAULT_RESEAR
             strategy=normalized_strategy,
         )
         research_mode = "openai"
-    except Exception as exc:
+    except RecoverableResearchGenerationError as exc:
         draft_payload = baseline_research_draft(candidate, preprocessed_theme_catalog, profile)
-        research_error = legacy._extract_openai_error_details(exc)
-        fallback_reason = legacy._format_openai_error_summary(research_error)
+        research_error = dict(getattr(exc, "details", {}) or {})
+        if not research_error:
+            research_error = legacy._extract_openai_error_details(exc)
+        fallback_reason = legacy._format_openai_error_summary(research_error) if research_error else str(exc)
 
     draft = ResearchDraft.from_mapping(draft_payload)
     draft.ticker = candidate["ticker"]
@@ -95,6 +97,40 @@ def generate_research_draft(conn, ticker: str, *, strategy: str = DEFAULT_RESEAR
     )
     draft.research_timing_summary = timing
     return draft
+
+
+def research_status_metadata(
+    draft: dict[str, object] | ResearchDraft | None,
+    *,
+    draft_source: object | None = None,
+) -> dict[str, object]:
+    draft_model = draft if isinstance(draft, ResearchDraft) else ResearchDraft.from_mapping(draft)
+    resolved_source = str(draft_source or draft_model.draft_source or "reused_session_draft").strip() or "reused_session_draft"
+    source_labels = {
+        "fresh_generation": "Fresh generation",
+        "forced_regeneration": "Regenerated",
+        "reused_session_draft": "Reused session draft",
+    }
+    mode = str(draft_model.research_mode or "heuristic_fallback").strip() or "heuristic_fallback"
+    mode_label = "AI-assisted" if mode == "openai" else "Heuristic fallback"
+    timing = dict(draft_model.research_timing_summary or {})
+    total_ms = timing.get("total_ms")
+    if not isinstance(total_ms, (int, float)):
+        total_ms = timing.get("strategy_total_ms")
+    timing_label = f"{float(total_ms):.1f} ms" if isinstance(total_ms, (int, float)) else ""
+    return {
+        "generated_at": draft_model.generated_at or "",
+        "research_mode": mode,
+        "research_mode_label": mode_label,
+        "draft_source": resolved_source,
+        "draft_source_label": source_labels.get(resolved_source, "Reused session draft"),
+        "theme_generation_strategy": draft_model.theme_generation_strategy or DEFAULT_RESEARCH_STRATEGY,
+        "recommended_action": draft_model.recommended_action or "watch_only",
+        "confidence": draft_model.confidence or "low",
+        "fallback_reason": draft_model.fallback_reason or "",
+        "timing_label": timing_label,
+        "timing_summary": timing,
+    }
 
 
 def get_or_create_research_draft(

@@ -4269,6 +4269,8 @@ def _ai_research_draft_for_strategy(
 
 
 def generate_scanner_research_draft(conn, ticker: str, *, strategy: str = "description_theme_generation") -> dict[str, object]:
+    from .scanner_research_merge import RecoverableResearchGenerationError
+
     total_start = _now_perf()
     candidate_start = _now_perf()
     candidate = _candidate_context(conn, ticker)
@@ -4291,10 +4293,12 @@ def generate_scanner_research_draft(conn, ticker: str, *, strategy: str = "descr
     try:
         draft = _ai_research_draft_for_strategy(candidate, preprocessed_catalog, profile, strategy=normalized_strategy)
         research_mode = "openai"
-    except Exception as exc:
+    except RecoverableResearchGenerationError as exc:
         draft = _baseline_research_draft(candidate, preprocessed_catalog, profile)
-        research_error = _extract_openai_error_details(exc)
-        fallback_reason = _format_openai_error_summary(research_error)
+        research_error = dict(getattr(exc, "details", {}) or {})
+        if not research_error:
+            research_error = _extract_openai_error_details(exc)
+        fallback_reason = _format_openai_error_summary(research_error) if research_error else str(exc)
 
     draft["ticker"] = candidate["ticker"]
     draft["generated_at"] = generated_at

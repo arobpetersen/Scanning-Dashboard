@@ -11,6 +11,7 @@ from .momentum_engine import compute_theme_momentum
 from .queries import theme_health_overview
 from .rankings import compute_current_ranking_snapshot, compute_theme_rankings
 from .scanner_audit import scanner_candidate_summary
+from .scanner_research_cache import clear_scanner_research_caches
 
 def resolve_valid_selectbox_value(current_value, options: list[str]) -> str | None:
     if not options:
@@ -62,6 +63,17 @@ def render_feedback_message(session_state, key: str) -> None:
         st.warning(message)
     else:
         st.error(message)
+
+
+def clear_scanner_research_state(session_state) -> None:
+    """Clear non-authoritative research caches plus stored page draft state."""
+
+    clear_scanner_research_caches()
+    if session_state is None:
+        return
+    session_state.pop("scanner_research_drafts", None)
+    session_state.pop("scanner_research_debug", None)
+    session_state.pop("scanner_research_feedback", None)
 
 
 def extract_selected_row(event) -> int | None:
