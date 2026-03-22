@@ -42,13 +42,14 @@ def _is_duckdb_result_state_error(exc: Exception) -> bool:
 def _seed_if_needed_core(conn) -> bool:
     """Idempotent seed/backfill.
 
-    Seeds themes and membership when DB is empty, and also backfills membership if themes
-    exist but `theme_membership` is empty or partially missing.
+    Seeds themes and membership when DB is empty, backfills membership when the membership
+    table is empty, and seeds memberships for newly inserted themes. It intentionally does
+    not re-add missing membership rows for already-existing themes once governed membership
+    has been established, so manual removals remain removed.
     """
     seed_themes = load_seed_file(SEED_PATH)
 
     prepared_themes: list[tuple[str, str, list[str]]] = []
-    expected_pairs: set[tuple[str, str]] = set()
     for theme in seed_themes:
         name = theme.get("name", "").strip()
         if not name:
@@ -58,33 +59,19 @@ def _seed_if_needed_core(conn) -> bool:
         tickers = sorted({_normalize_ticker(t) for t in theme.get("tickers", []) if t and t.strip()})
         prepared_themes.append((name, category, tickers))
 
-        for ticker in tickers:
-            expected_pairs.add((name, ticker))
-
     if not prepared_themes:
         return False
 
     themes_count = int(conn.execute("SELECT COUNT(*) FROM themes").fetchone()[0])
+    membership_count = int(conn.execute("SELECT COUNT(*) FROM theme_membership").fetchone()[0])
     seed_theme_names = {name for name, _, _ in prepared_themes}
 
     existing_theme_names = {row[0] for row in conn.execute("SELECT name FROM themes").fetchall()}
     missing_theme_names = seed_theme_names - existing_theme_names
+    seed_all_memberships = themes_count == 0 or membership_count == 0
+    membership_seed_themes = set(seed_theme_names if seed_all_memberships else missing_theme_names)
 
-    existing_pairs: set[tuple[str, str]] = set()
-    existing_rows = conn.execute(
-        """
-        SELECT t.name, m.ticker
-        FROM themes t
-        JOIN theme_membership m ON m.theme_id = t.id
-        """
-    ).fetchall()
-    for theme_name, ticker in existing_rows:
-        if theme_name in seed_theme_names:
-            existing_pairs.add((theme_name, ticker))
-
-    missing_memberships = expected_pairs - existing_pairs
-
-    if themes_count > 0 and not missing_theme_names and not missing_memberships:
+    if themes_count > 0 and not missing_theme_names and not seed_all_memberships:
         return False
 
     changed = False
@@ -106,6 +93,9 @@ def _seed_if_needed_core(conn) -> bool:
                     [name, category],
                 ).fetchone()[0]
                 changed = True
+
+            if name not in membership_seed_themes:
+                continue
 
             for ticker in tickers:
                 before = conn.execute(
@@ -215,11 +205,22 @@ def add_ticker(conn, theme_id: int, ticker: str, *, onboarding_source: str = "go
     }
 
 
-def remove_ticker(conn, theme_id: int, ticker: str) -> None:
-    conn.execute(
-        "DELETE FROM theme_membership WHERE theme_id = ? AND ticker = ?",
-        [theme_id, _normalize_ticker(ticker)],
-    )
+def remove_ticker(conn, theme_id: int, ticker: str) -> dict[str, object]:
+    normalized_ticker = _normalize_ticker(ticker)
+    removed_row = conn.execute(
+        "DELETE FROM theme_membership WHERE theme_id = ? AND ticker = ? RETURNING ticker",
+        [theme_id, normalized_ticker],
+    ).fetchone()
+    members = get_theme_members(conn, theme_id)
+    remaining_tickers = members["ticker"].tolist() if not members.empty else []
+    return {
+        "ticker": normalized_ticker,
+        "theme_id": int(theme_id),
+        "removed": removed_row is not None,
+        "removed_count": 1 if removed_row is not None else 0,
+        "members": members,
+        "remaining_tickers": remaining_tickers,
+    }
 
 
 def replace_ticker_in_theme(conn, theme_id: int, current_ticker: str, replacement_ticker: str) -> dict[str, str | int]:

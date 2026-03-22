@@ -12,6 +12,14 @@ from .queries import theme_health_overview
 from .rankings import compute_current_ranking_snapshot, compute_theme_rankings
 from .scanner_audit import scanner_candidate_summary
 
+def resolve_valid_selectbox_value(current_value, options: list[str]) -> str | None:
+    if not options:
+        return None
+    if current_value in options:
+        return str(current_value)
+    return str(options[0])
+
+
 def extract_selected_row(event) -> int | None:
     """Best-effort extraction of a selected row index across Streamlit event payload shapes."""
     selection = {}

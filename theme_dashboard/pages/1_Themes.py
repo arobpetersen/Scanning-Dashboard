@@ -20,6 +20,7 @@ from src.streamlit_utils import (
     load_theme_momentum_cached,
     render_dataframe,
     reset_perf_timings,
+    resolve_valid_selectbox_value,
     show_perf_summary,
     stop_for_database_error,
 )
@@ -513,15 +514,30 @@ with manage_tab:
         if members.empty:
             st.info("No members to remove.")
         else:
+            remove_select_key = f"remove_ticker_{selected_id}"
+            remove_options = members["ticker"].tolist()
+            next_remove_value = resolve_valid_selectbox_value(st.session_state.get(remove_select_key), remove_options)
+            if next_remove_value is None:
+                st.session_state.pop(remove_select_key, None)
+            else:
+                st.session_state[remove_select_key] = next_remove_value
             with st.form("remove_ticker_form"):
-                remove_tkr = st.selectbox("Remove ticker", members["ticker"].tolist())
+                remove_tkr = st.selectbox("Remove ticker", remove_options, key=remove_select_key)
                 remove_submitted = st.form_submit_button("Remove")
             if remove_submitted:
                 try:
                     with get_conn() as conn:
-                        remove_ticker(conn, selected_id, remove_tkr)
-                    st.success(f"Removed {remove_tkr}")
-                    st.rerun()
+                        remove_result = remove_ticker(conn, selected_id, remove_tkr)
+                    members = remove_result["members"]
+                    if remove_result["removed"]:
+                        clear_current_market_view_caches()
+                        st.session_state["manage_ticker_feedback"] = {
+                            "level": "success",
+                            "message": f"Removed {remove_result['ticker']} from {selected['name']} [{selected_id}]",
+                        }
+                        st.rerun()
+                    else:
+                        st.warning(f"No membership row was removed for {remove_result['ticker']} in {selected['name']} [{selected_id}].")
                 except Exception as exc:
                     st.error(f"Remove ticker failed: {exc}")
 

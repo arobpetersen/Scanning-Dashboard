@@ -5,6 +5,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Callable, Iterable
 
+import pandas as pd
+
 from .config import LIVE_FETCH_REFERENCE_ON_REFRESH, LIVE_RATE_LIMIT_STOP_THRESHOLD, REFRESH_STALE_TIMEOUT_MINUTES
 from .failure_classification import categorize_failure_message
 from .provider_live import LiveProvider
@@ -47,6 +49,43 @@ def mark_stale_running_runs(conn, stale_minutes: int = REFRESH_STALE_TIMEOUT_MIN
             [f"Run marked stale after exceeding {stale_minutes} minutes.", stale_before],
         )
     return int(stale_count)
+
+
+def running_refresh_runs(conn, stale_minutes: int = REFRESH_STALE_TIMEOUT_MINUTES) -> pd.DataFrame:
+    running = conn.execute(
+        """
+        SELECT run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count, scope_type, scope_theme_name, error_message
+        FROM refresh_runs
+        WHERE status = 'running'
+        ORDER BY run_id DESC
+        """
+    ).df()
+    if running.empty:
+        return running
+
+    started = pd.to_datetime(running["started_at"], errors="coerce")
+    now = pd.Timestamp.utcnow().tz_localize(None)
+    age_minutes = ((now - started).dt.total_seconds() / 60.0).round(1)
+    running["age_minutes"] = age_minutes
+    running["likely_stale"] = age_minutes >= float(stale_minutes)
+    return running
+
+
+def mark_refresh_run_interrupted(conn, run_id: int, *, note: str | None = None) -> bool:
+    normalized_run_id = int(run_id)
+    updated = conn.execute(
+        """
+        UPDATE refresh_runs
+        SET status = 'interrupted',
+            finished_at = CURRENT_TIMESTAMP,
+            error_message = COALESCE(?, error_message, 'Run manually marked interrupted by operator.')
+        WHERE run_id = ?
+          AND status = 'running'
+        RETURNING run_id
+        """,
+        [note, normalized_run_id],
+    ).fetchone()
+    return updated is not None
 
 
 def _current_running_run(conn):

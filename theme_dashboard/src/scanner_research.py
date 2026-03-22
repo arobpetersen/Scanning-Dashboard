@@ -651,7 +651,14 @@ DESCRIPTION_NATIVE_DESCRIPTOR_RULES = (
     },
     {
         "label": "Wireless Communications Infrastructure",
-        "phrases": ("wireless communications infrastructure", "wireless infrastructure", "radio infrastructure"),
+        "phrases": (
+            "wireless communications infrastructure",
+            "wireless infrastructure",
+            "radio infrastructure",
+            "wireless communications equipment",
+            "communications equipment",
+            "wireless equipment",
+        ),
         "layers": {"system", "platform", "network_service"},
         "family": "wireless_systems",
     },
@@ -1833,7 +1840,7 @@ def _candidate_theme_ideas_from_description(profile: dict[str, object], candidat
     if not ideas:
         fallback = _candidate_new_theme_label(profile, candidate)
         add(fallback)
-    return _sort_theme_ideas_by_specificity(ideas)[:5]
+    return _collapse_autonomy_stack_labels(_sort_theme_ideas_by_specificity(ideas), description)[:5]
 
 
 def _direct_phrase_theme_ideas(text: object) -> list[str]:
@@ -2123,6 +2130,88 @@ def _industrial_additive_manufacturing_descriptors(text: object) -> list[str]:
     return descriptors[:5]
 
 
+def _autonomy_stack_descriptors(text: object) -> list[str]:
+    normalized_text = _normalize_text(text).lower()
+    if not normalized_text:
+        return []
+    descriptors: list[str] = []
+
+    def add(label: str | None) -> None:
+        normalized = _normalize_optional_theme_label(label)
+        if normalized and normalized not in descriptors:
+            descriptors.append(normalized)
+
+    autonomy_signals = any(
+        _contains_phrase(normalized_text, token)
+        for token in (
+            "autonomous",
+            "autonomy",
+            "robotics",
+            "robotic",
+            "drone",
+            "drones",
+            "uav",
+            "uavs",
+            "unmanned",
+            "uncrewed",
+        )
+    )
+    if not autonomy_signals:
+        return []
+
+    direct_phrase_ideas = _direct_phrase_theme_ideas(normalized_text)
+    if any(
+        any(token in _normalize_text(label).lower() for token in ("components", "component", "equipment"))
+        for label in direct_phrase_ideas
+    ):
+        return []
+
+    has_uncrewed_signals = any(
+        _contains_phrase(normalized_text, token)
+        for token in (
+            "drone",
+            "drones",
+            "uav",
+            "uavs",
+            "unmanned",
+            "uncrewed",
+            "unmanned platform",
+            "unmanned platforms",
+            "uncrewed system",
+            "uncrewed systems",
+            "unmanned system",
+            "unmanned systems",
+        )
+    )
+    has_robotics_signals = any(
+        _contains_phrase(normalized_text, token)
+        for token in (
+            "robotics",
+            "robotic",
+            "autonomous robotics",
+            "robotics hardware",
+        )
+    )
+    has_autonomous_vehicle_signals = any(
+        _contains_phrase(normalized_text, token)
+        for token in (
+            "autonomous vehicle",
+            "autonomous vehicles",
+            "driverless vehicle",
+            "driverless vehicles",
+        )
+    )
+
+    if has_uncrewed_signals or has_robotics_signals:
+        add("Autonomous Robotics / Uncrewed Systems")
+        add("Autonomous Systems")
+    elif has_autonomous_vehicle_signals:
+        add("Autonomous Vehicles")
+    elif any(_contains_phrase(normalized_text, token) for token in ("autonomous systems", "autonomous system")):
+        add("Autonomous Systems")
+    return descriptors[:3]
+
+
 def _theme_looks_industrial_manufacturing_drift(theme_entry: dict[str, object]) -> bool:
     theme_text = " ".join(
         [
@@ -2306,9 +2395,138 @@ def _descriptor_text_support_score(descriptor: str, normalized_text: str) -> int
     return score
 
 
+def _is_autonomy_stack_label(label: object) -> bool:
+    normalized = _normalize_text(label).lower()
+    if not normalized:
+        return False
+    return normalized in {
+        "ai - robotics",
+        "robotics & automation",
+        "industrial robotics",
+        "autonomous systems",
+        "autonomous vehicles",
+        "autonomous robotics / uncrewed systems",
+        "uncrewed systems",
+        "unmanned systems",
+    }
+
+
+def _is_communications_stack_label(label: object) -> bool:
+    normalized = _normalize_text(label).lower()
+    if not normalized:
+        return False
+    return any(
+        token in normalized
+        for token in (
+            "software-defined radio",
+            "software defined radio",
+            "sdr",
+            "wireless communications",
+            "communications equipment",
+            "wireless equipment",
+            "radio infrastructure",
+            "communications infrastructure",
+        )
+    )
+
+
+def _collapse_autonomy_stack_labels(labels: list[str], normalized_text: str) -> list[str]:
+    if not labels:
+        return []
+    text = _normalize_text(normalized_text).lower()
+    autonomy_indices = [idx for idx, label in enumerate(labels) if _is_autonomy_stack_label(label)]
+    communication_indices = [idx for idx, label in enumerate(labels) if _is_communications_stack_label(label)]
+    if not autonomy_indices:
+        deduped: list[str] = []
+        for label in labels:
+            if label not in deduped:
+                deduped.append(label)
+        return deduped
+
+    has_uncrewed_signals = any(
+        _contains_phrase(text, token)
+        for token in (
+            "drone",
+            "drones",
+            "uav",
+            "uavs",
+            "unmanned",
+            "uncrewed",
+            "unmanned aircraft",
+            "uncrewed aircraft",
+            "unmanned platform",
+            "unmanned platforms",
+        )
+    ) or any(
+        any(token in _normalize_text(label).lower() for token in ("drone", "uav", "unmanned", "uncrewed"))
+        for label in labels
+    )
+    has_robotics_signals = any(
+        _contains_phrase(text, token)
+        for token in (
+            "robotics",
+            "robotic",
+            "autonomous robotics",
+        )
+    ) or any("robotics" in _normalize_text(label).lower() for label in labels)
+    has_autonomous_vehicle_signals = any(
+        _contains_phrase(text, token)
+        for token in (
+            "autonomous vehicle",
+            "autonomous vehicles",
+            "driverless vehicle",
+            "driverless vehicles",
+        )
+    ) or any("autonomous vehicles" in _normalize_text(label).lower() for label in labels)
+
+    if has_uncrewed_signals or has_robotics_signals:
+        autonomy_primary = "Autonomous Robotics / Uncrewed Systems"
+    elif has_autonomous_vehicle_signals:
+        autonomy_primary = "Autonomous Vehicles"
+    else:
+        autonomy_primary = "Autonomous Systems"
+
+    communications_secondary = None
+    if any(
+        _contains_phrase(text, token)
+        for token in ("software-defined radio", "software defined radio", "sdr")
+    ) or any("software-defined radio" in _normalize_text(label).lower() for label in labels):
+        communications_secondary = "Software-Defined Radio"
+    elif communication_indices:
+        communications_secondary = "Wireless Communications Infrastructure"
+
+    cleaned: list[str] = []
+    inserted_primary = False
+    inserted_secondary = False
+    primary_insert_index = min(autonomy_indices)
+    for idx, label in enumerate(labels):
+        if idx == primary_insert_index and not inserted_primary:
+            cleaned.append(autonomy_primary)
+            inserted_primary = True
+            if communications_secondary:
+                cleaned.append(communications_secondary)
+                inserted_secondary = True
+        if idx in autonomy_indices or idx in communication_indices:
+            continue
+        if label not in cleaned:
+            cleaned.append(label)
+
+    if not inserted_primary:
+        cleaned.insert(0, autonomy_primary)
+    if communications_secondary and not inserted_secondary and communications_secondary not in cleaned:
+        insert_at = cleaned.index(autonomy_primary) + 1 if autonomy_primary in cleaned else 0
+        cleaned.insert(insert_at, communications_secondary)
+
+    deduped: list[str] = []
+    for label in cleaned:
+        if label not in deduped:
+            deduped.append(label)
+    return deduped
+
+
 def _rank_description_business_descriptors(descriptors: list[tuple[str, int]], normalized_text: str) -> list[str]:
     if len(descriptors) <= 1:
-        return [item[0] for item in descriptors]
+        return _collapse_autonomy_stack_labels([item[0] for item in descriptors], normalized_text)
     indexed = list(enumerate(descriptors))
     indexed.sort(
         key=lambda item: (
@@ -2329,7 +2547,7 @@ def _rank_description_business_descriptors(descriptors: list[tuple[str, int]], n
             seen_family_keys.add(family_key)
         if len(selected) >= 3:
             break
-    return selected
+    return _collapse_autonomy_stack_labels(selected, normalized_text)[:3]
 
 
 def _description_business_descriptor_bundle(text: object) -> dict[str, object]:
@@ -2349,6 +2567,8 @@ def _description_business_descriptor_bundle(text: object) -> dict[str, object]:
     for label in _description_rule_business_descriptors(normalized_text):
         add(label, source_rank=1)
     for label in _connected_operations_platform_descriptors(normalized_text):
+        add(label, source_rank=1)
+    for label in _autonomy_stack_descriptors(normalized_text):
         add(label, source_rank=1)
     for label in _industrial_additive_manufacturing_descriptors(normalized_text):
         add(label, source_rank=1)

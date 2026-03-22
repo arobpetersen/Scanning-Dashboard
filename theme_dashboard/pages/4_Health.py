@@ -16,7 +16,7 @@ from src.config import (
 )
 from src.database import get_conn, get_fresh_read_conn, init_db
 from src.failure_classification import categorize_failure_message
-from src.fetch_data import mark_stale_running_runs
+from src.fetch_data import mark_refresh_run_interrupted, mark_stale_running_runs
 from src.historical_backfill import (
     SUPPRESSION_REBUILD_LOOKBACK_DAYS,
     rebuild_recent_reconstructed_history,
@@ -97,6 +97,17 @@ db_token = db_cache_token()
 ops_tab, themes_tab = st.tabs(["Operations", "Theme Health"])
 
 with ops_tab:
+    refresh_feedback = st.session_state.pop("refresh_recovery_feedback", None)
+    if refresh_feedback:
+        level = str(refresh_feedback.get("level") or "info")
+        message = str(refresh_feedback.get("message") or "")
+        if level == "success":
+            st.success(message)
+        elif level == "warning":
+            st.warning(message)
+        else:
+            st.error(message)
+
     st.write(f"Default provider: `{DEFAULT_PROVIDER}`")
     st.write(f"Massive configured: `{bool(massive_api_key())}` ({MASSIVE_API_KEY_ENV})")
     st.write(f"Live sources: quote/profile=`{LIVE_QUOTE_PROFILE_SOURCE}`, historical=`{LIVE_HISTORICAL_SOURCE}`")
@@ -546,7 +557,70 @@ with ops_tab:
                     )
 
     st.subheader("Refresh history")
-    render_dataframe("health_refresh_history", history, width="stretch")
+    refresh_event = render_dataframe(
+        "health_refresh_history",
+        history,
+        width="stretch",
+        on_select="rerun",
+        selection_mode="single-row",
+        key="health_refresh_history_table",
+    )
+    selected_refresh_row = extract_selected_row(refresh_event)
+    selected_refresh = None
+    if selected_refresh_row is not None and 0 <= selected_refresh_row < len(history):
+        selected_refresh = history.reset_index(drop=True).iloc[int(selected_refresh_row)]
+        selected_run_id = int(selected_refresh["run_id"])
+        st.session_state["health_selected_refresh_run_id"] = selected_run_id
+    else:
+        selected_run_id = st.session_state.get("health_selected_refresh_run_id")
+        if selected_run_id is not None:
+            matching_refresh = history[history["run_id"] == int(selected_run_id)]
+            if not matching_refresh.empty:
+                selected_refresh = matching_refresh.reset_index(drop=True).iloc[0]
+
+    if selected_refresh is not None:
+        selected_run_id = int(selected_refresh["run_id"])
+        selected_status = str(selected_refresh.get("status") or "")
+        started_at = pd.to_datetime(selected_refresh.get("started_at"), errors="coerce")
+        age_minutes = None
+        if pd.notna(started_at):
+            age_minutes = (datetime.now(timezone.utc).replace(tzinfo=None) - started_at.to_pydatetime()).total_seconds() / 60.0
+        stale_hint = age_minutes is not None and age_minutes >= REFRESH_STALE_TIMEOUT_MINUTES
+        st.caption(
+            f"Selected run #{selected_run_id} | status=`{selected_status or 'n/a'}`"
+            + (f" | age_minutes=`{age_minutes:.1f}`" if age_minutes is not None else "")
+        )
+        if selected_status == "running":
+            if stale_hint:
+                st.warning(
+                    f"Run #{selected_run_id} looks stale based on the `{REFRESH_STALE_TIMEOUT_MINUTES}` minute timeout. "
+                    "Use the recovery action below only if you know the process is no longer active."
+                )
+            if st.button(
+                "Mark selected running run interrupted",
+                key="mark_selected_refresh_run_interrupted",
+                type="secondary",
+            ):
+                try:
+                    with get_conn() as conn:
+                        changed = mark_refresh_run_interrupted(
+                            conn,
+                            selected_run_id,
+                            note="Run manually marked interrupted from Refresh history.",
+                        )
+                    if changed:
+                        st.session_state["refresh_recovery_feedback"] = {
+                            "level": "success",
+                            "message": f"Marked refresh run #{selected_run_id} interrupted. New refreshes are unblocked.",
+                        }
+                    else:
+                        st.session_state["refresh_recovery_feedback"] = {
+                            "level": "warning",
+                            "message": f"Refresh run #{selected_run_id} was no longer running, so nothing was changed.",
+                        }
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed to mark run interrupted: {exc}")
     st.subheader("Table row counts")
     render_dataframe("health_row_counts", counts, width="stretch")
 

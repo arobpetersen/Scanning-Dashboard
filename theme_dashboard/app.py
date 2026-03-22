@@ -4,7 +4,7 @@ import streamlit as st
 
 from src.config import DEFAULT_PROVIDER, MASSIVE_API_KEY_ENV, massive_api_key
 from src.database import get_conn, init_db
-from src.fetch_data import RefreshBlockedError, run_refresh
+from src.fetch_data import RefreshBlockedError, running_refresh_runs, run_refresh
 from src.queries import last_refresh_run, synthetic_data_active
 from src.streamlit_utils import db_cache_token, load_theme_rankings_cached, reset_perf_timings, render_dataframe, show_perf_summary, stop_for_database_error
 from src.symbol_hygiene import refresh_eligible_tickers
@@ -53,6 +53,7 @@ try:
         resolved_tickers = refresh_active_ticker_universe(conn) if scope_mode == active_scope_label else sorted(set(selected_tickers or []))
         eligible_tickers, suppressed_scope_tickers = refresh_eligible_tickers(conn, requested_tickers)
         last_run = last_refresh_run(conn)
+        running_runs = running_refresh_runs(conn)
         sugg_counts = suggestion_status_counts(conn)
         synthetic_active = synthetic_data_active(conn)
 except Exception as exc:
@@ -91,6 +92,13 @@ with rc1:
         st.caption(
             f"{len(suppressed_scope_tickers)} ticker(s) are currently refresh-suppressed and excluded from active refresh scope."
         )
+    if not running_runs.empty:
+        active_run = running_runs.iloc[0]
+        stale_note = " likely stale" if bool(active_run.get("likely_stale")) else ""
+        st.warning(
+            f"Refresh run #{int(active_run['run_id'])} is still marked `running`{stale_note}. "
+            "Concurrent refreshes stay blocked until it finishes or is manually marked interrupted from Health > Refresh history."
+        )
     if st.button("Run refresh now", type="primary"):
         pb = st.progress(0)
         status = st.empty()
@@ -116,6 +124,10 @@ with rc1:
             st.rerun()
         except RefreshBlockedError as exc:
             st.warning(f"Refresh blocked: {exc}")
+            st.caption(
+                f"If run #{int(exc.running_run_id)} is stale or interrupted, use Health > Refresh history and click "
+                "`Mark selected running run interrupted`."
+            )
         except Exception as exc:
             st.error(f"Refresh failed: {exc}")
 

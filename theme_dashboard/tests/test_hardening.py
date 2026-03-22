@@ -10,7 +10,7 @@ from unittest.mock import patch
 import duckdb
 import pandas as pd
 
-from src.fetch_data import run_refresh
+from src.fetch_data import RefreshBlockedError, mark_refresh_run_interrupted, running_refresh_runs, run_refresh
 from src.database import get_conn, get_db_connection
 from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
@@ -25,6 +25,7 @@ from src.metric_formatting import format_theme_ticker_table, human_readable_numb
 from src.momentum_engine import compute_theme_momentum
 from src.queries import (
     latest_ticker_snapshots,
+    refresh_history,
     ticker_lookup_memberships,
     ticker_lookup_summary,
     theme_health_overview,
@@ -85,7 +86,7 @@ from src.suggestions_page_state import (
     sync_suggested_theme_checkbox_state,
 )
 from src.suggestions_service import recent_applied_suggestions
-from src.theme_service import refresh_active_ticker_universe, replace_ticker_in_theme, seed_if_needed
+from src.theme_service import add_ticker, refresh_active_ticker_universe, remove_ticker, replace_ticker_in_theme, seed_if_needed
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
 from src.scanner_research import (
@@ -94,7 +95,7 @@ from src.scanner_research import (
     save_scanner_research_review,
     scanner_research_review_summary,
 )
-from src.streamlit_utils import _load_theme_inflections_cached, _load_theme_momentum_cached
+from src.streamlit_utils import _load_theme_inflections_cached, _load_theme_momentum_cached, resolve_valid_selectbox_value
 from src.eod_refresh import has_eod_run_for_date, run_scheduled_eod_refresh
 from src.rankings import _build_current_ranking_metrics, _compute_theme_metrics, compute_theme_rankings, theme_confidence_factor
 
@@ -1857,6 +1858,92 @@ class TestTickerLookup(unittest.TestCase):
 
 
 class TestTickerAssignmentEditing(unittest.TestCase):
+    def test_remove_ticker_deletes_theme_membership_and_returns_refreshed_members(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into theme_membership values (1, 'IONQ')")
+        conn.execute("insert into theme_membership values (1, 'RGTI')")
+
+        result = remove_ticker(conn, 1, " ionq ")
+        remaining = conn.execute(
+            "select ticker from theme_membership where theme_id = 1 order by ticker"
+        ).fetchall()
+
+        self.assertTrue(bool(result["removed"]))
+        self.assertEqual(int(result["removed_count"]), 1)
+        self.assertEqual(result["ticker"], "IONQ")
+        self.assertEqual(result["remaining_tickers"], ["RGTI"])
+        self.assertEqual(result["members"]["ticker"].tolist(), ["RGTI"])
+        self.assertEqual(remaining, [("RGTI",)])
+        conn.close()
+
+    def test_remove_ticker_uses_selected_value_passed_to_handler(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into theme_membership values (1, 'IONQ')")
+        conn.execute("insert into theme_membership values (1, 'QBTS')")
+
+        result = remove_ticker(conn, 1, "QBTS")
+        remaining = conn.execute(
+            "select ticker from theme_membership where theme_id = 1 order by ticker"
+        ).fetchall()
+
+        self.assertEqual(result["ticker"], "QBTS")
+        self.assertEqual(remaining, [("IONQ",)])
+        conn.close()
+
+    def test_remove_ticker_surfaces_noop_instead_of_silent_success(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into theme_membership values (1, 'IONQ')")
+
+        result = remove_ticker(conn, 1, "RGTI")
+        remaining = conn.execute(
+            "select ticker from theme_membership where theme_id = 1 order by ticker"
+        ).fetchall()
+
+        self.assertFalse(bool(result["removed"]))
+        self.assertEqual(int(result["removed_count"]), 0)
+        self.assertEqual(result["remaining_tickers"], ["IONQ"])
+        self.assertEqual(result["members"]["ticker"].tolist(), ["IONQ"])
+        self.assertEqual(remaining, [("IONQ",)])
+        conn.close()
+
+    def test_add_remove_roundtrip_still_works(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute(
+            """
+            create table governed_ticker_onboarding(
+                ticker varchar primary key,
+                added_at timestamp,
+                onboarding_source varchar,
+                history_readiness_status varchar,
+                backfill_status varchar,
+                last_backfill_attempt_at timestamp,
+                last_backfill_error varchar,
+                downstream_refresh_needed boolean,
+                history_row_count bigint,
+                history_target_days bigint,
+                history_market_data_source varchar,
+                history_latest_trading_date date,
+                updated_at timestamp
+            )
+            """
+        )
+
+        added = add_ticker(conn, 1, "IONQ", onboarding_source="test_roundtrip")
+        removed = remove_ticker(conn, 1, "IONQ")
+        remaining = conn.execute(
+            "select ticker from theme_membership where theme_id = 1 order by ticker"
+        ).fetchall()
+
+        self.assertTrue(bool(added["added_to_theme"]))
+        self.assertTrue(bool(removed["removed"]))
+        self.assertEqual(remaining, [])
+        self.assertEqual(removed["remaining_tickers"], [])
+        conn.close()
+
     def test_replace_ticker_in_theme_swaps_membership_for_selected_theme_only(self):
         conn = duckdb.connect(":memory:")
         conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
@@ -1927,6 +2014,29 @@ class TestTickerAssignmentEditing(unittest.TestCase):
         self.assertEqual(int(second["removed_count"]), 1)
         self.assertEqual(members_after, [(2, "NVDA")])
         conn.close()
+
+
+class TestThemesPageRemovalFlow(unittest.TestCase):
+    def test_resolve_valid_selectbox_value_prefers_current_then_first_valid_option(self):
+        self.assertEqual(resolve_valid_selectbox_value("QBTS", ["IONQ", "QBTS"]), "QBTS")
+        self.assertEqual(resolve_valid_selectbox_value("RGTI", ["IONQ", "QBTS"]), "IONQ")
+        self.assertIsNone(resolve_valid_selectbox_value("RGTI", []))
+
+    def test_themes_page_remove_handler_uses_pre_widget_hydration_and_safe_rerun(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("selected_id = labels[selected_label]", content)
+        self.assertIn("next_remove_value = resolve_valid_selectbox_value(st.session_state.get(remove_select_key), remove_options)", content)
+        self.assertIn("remove_result = remove_ticker(conn, selected_id, remove_tkr)", content)
+        self.assertIn('members = remove_result["members"]', content)
+        self.assertIn('remove_options = members["ticker"].tolist()', content)
+        self.assertIn('render_dataframe("manage_theme_members", members, width="stretch")', content)
+        self.assertIn("clear_current_market_view_caches()", content)
+        self.assertIn('st.session_state["manage_ticker_feedback"] = {', content)
+        self.assertIn('st.warning(f"No membership row was removed for {remove_result[\'ticker\']} in {selected[\'name\']} [{selected_id}].")', content)
+        self.assertNotIn('st.session_state[remove_select_key] = next_remove_ticker', content)
+        self.assertNotIn('st.session_state.pop(remove_select_key, None)\n                        else:', content)
 
 
 class TestRefreshUniverseSemantics(unittest.TestCase):
@@ -2710,11 +2820,69 @@ class TestDescriptionFirstResearchRefinements(unittest.TestCase):
 
         self.assertEqual(draft["recommended_action"], "consider_new_theme")
         self.assertFalse(draft["suggested_existing_themes"])
-        self.assertTrue({"Software-Defined Radio", "Autonomous Systems", "Wireless Communications Infrastructure"} & set(draft["candidate_theme_ideas"]))
-        self.assertGreaterEqual(
-            len({"Software-Defined Radio", "Autonomous Systems", "Wireless Communications Infrastructure"} & set(draft["validation_debug"]["business_descriptors"])),
-            2,
+        self.assertTrue(
+            {"Software-Defined Radio", "Autonomous Robotics / Uncrewed Systems", "Wireless Communications Infrastructure"}
+            & set(draft["candidate_theme_ideas"])
         )
+        self.assertIn("Software-Defined Radio", draft["validation_debug"]["business_descriptors"])
+        self.assertIn("Autonomous Robotics / Uncrewed Systems", draft["validation_debug"]["business_descriptors"])
+
+    def test_description_first_collapses_overlapping_autonomy_labels_into_one_primary_bucket(self):
+        profile = {
+            "company_name": "AeroMesh Robotics",
+            "description": "Builds autonomous robotics and uncrewed-systems hardware for defense and industrial operators.",
+            "sic_description": "Autonomous systems equipment",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+        descriptors = list(draft["validation_debug"]["business_descriptors"])
+
+        self.assertIn("Autonomous Robotics / Uncrewed Systems", descriptors)
+        self.assertEqual(descriptors[0], "Autonomous Robotics / Uncrewed Systems")
+        self.assertNotIn("Autonomous Systems", descriptors)
+        self.assertNotIn("Autonomous Vehicles", descriptors)
+        self.assertEqual(draft["possible_new_theme"], "Autonomous Robotics / Uncrewed Systems")
+
+    def test_description_first_demotes_autonomous_vehicles_when_description_is_really_uncrewed(self):
+        profile = {
+            "company_name": "SkyFleet",
+            "description": "Develops uncrewed-systems hardware and autonomous flight platforms for unmanned missions.",
+            "sic_description": "Autonomous vehicle systems",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["possible_new_theme"], "Autonomous Robotics / Uncrewed Systems")
+        self.assertNotIn("Autonomous Vehicles", draft["validation_debug"]["business_descriptors"])
+        self.assertNotIn("Autonomous Vehicles", draft["candidate_theme_ideas"][:3])
+
+    def test_description_first_preserves_sdr_as_distinct_secondary_pillar_beside_autonomy(self):
+        profile = {
+            "company_name": "Spectrum Autonomous",
+            "description": "Builds software-defined radio systems and autonomous robotics hardware for wireless communications equipment and unmanned platforms.",
+            "sic_description": "Wireless communications equipment",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+        descriptors = list(draft["validation_debug"]["business_descriptors"])
+
+        self.assertEqual(descriptors[0], "Autonomous Robotics / Uncrewed Systems")
+        self.assertIn("Software-Defined Radio", descriptors)
+        self.assertNotIn("Wireless Communications Infrastructure", descriptors[:1])
+
+    def test_description_first_reduces_autonomy_fragmentation_without_losing_second_pillar(self):
+        profile = {
+            "company_name": "MeshFlight",
+            "description": "Builds autonomous systems, drone platforms, robotics hardware, and software-defined radio equipment for wireless communications networks.",
+            "sic_description": "Communications equipment",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+        ideas = list(draft["candidate_theme_ideas"])
+
+        self.assertEqual(ideas[0], "Autonomous Robotics / Uncrewed Systems")
+        self.assertIn("Software-Defined Radio", ideas[:3])
+        self.assertFalse({"Autonomous Systems", "Autonomous Vehicles", "AI - Robotics"} & set(ideas[:3]))
 
     def test_description_first_generic_manufacturing_language_alone_does_not_unlock_materials(self):
         profile = {
@@ -4056,6 +4224,34 @@ class TestThemeSeedBackfill(unittest.TestCase):
         conn.close()
 
     @patch("src.theme_service.load_seed_file")
+    def test_seed_does_not_readd_manually_removed_membership_for_existing_theme(self, mock_load_seed):
+        mock_load_seed.return_value = [
+            {"name": "Quantum Computing", "category": "Tech", "tickers": ["FORM", "IONQ"]},
+        ]
+
+        conn = duckdb.connect(":memory:")
+        conn.execute("create sequence if not exists themes_id_seq")
+        conn.execute("create table themes(id bigint primary key default nextval('themes_id_seq'), name varchar unique, category varchar, is_active boolean default true, created_at timestamp default current_timestamp, updated_at timestamp default current_timestamp)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+
+        conn.execute("insert into themes(name, category, is_active) values ('Quantum Computing','Tech', true)")
+        theme_id = int(conn.execute("select id from themes where name = 'Quantum Computing'").fetchone()[0])
+        conn.execute("insert into theme_membership(theme_id, ticker) values (?, 'FORM')", [theme_id])
+        conn.execute("insert into theme_membership(theme_id, ticker) values (?, 'IONQ')", [theme_id])
+
+        remove_result = remove_ticker(conn, theme_id, "FORM")
+        changed = seed_if_needed(conn)
+        members = conn.execute(
+            "select ticker from theme_membership where theme_id = ? order by ticker",
+            [theme_id],
+        ).fetchall()
+
+        self.assertTrue(bool(remove_result["removed"]))
+        self.assertFalse(changed)
+        self.assertEqual(members, [("IONQ",)])
+        conn.close()
+
+    @patch("src.theme_service.load_seed_file")
     def test_seed_if_needed_recovers_with_bootstrap_connection_when_shared_connection_has_bad_result_state(self, mock_load_seed):
         mock_load_seed.return_value = [
             {"name": "AI", "category": "Tech", "tickers": ["NVDA"]},
@@ -4502,3 +4698,201 @@ class TestEODRefreshFramework(unittest.TestCase):
             self.assertEqual(run_id, 42)
             mock_run.assert_called_once()
         conn.close()
+
+
+class TestRefreshRunRecovery(unittest.TestCase):
+    def test_stale_running_run_can_be_marked_interrupted_and_future_refresh_unblocks(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create sequence if not exists refresh_run_id_seq start 66")
+        conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint default nextval('refresh_run_id_seq'),
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar,
+                ticker_count bigint,
+                success_count bigint,
+                failure_count bigint,
+                scope_type varchar,
+                scope_theme_name varchar,
+                error_message varchar,
+                api_call_count bigint,
+                api_endpoint_counts varchar,
+                skipped_tickers varchar,
+                failure_category_counts varchar,
+                flagged_symbol_count bigint,
+                suppressed_symbol_count bigint
+            )
+            """
+        )
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_failures(run_id bigint, ticker varchar, error_message varchar, failure_category varchar, created_at timestamp)")
+        conn.execute(
+            """
+            insert into refresh_runs(
+                run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count,
+                scope_type, scope_theme_name, error_message, api_call_count, api_endpoint_counts,
+                skipped_tickers, failure_category_counts, flagged_symbol_count, suppressed_symbol_count
+            )
+            values (64, 'live', '2026-03-10 20:00:00', null, 'running', 1, 0, 0, 'active_themes', null, null, 0, '{}', null, '{}', 0, 0)
+            """
+        )
+
+        changed = mark_refresh_run_interrupted(conn, 64, note="Operator cleared stale run.")
+        row = conn.execute("select status, finished_at, error_message from refresh_runs where run_id = 64").fetchone()
+
+        class EmptySuccessProvider:
+            name = "mock"
+
+            def fetch_ticker_data(self, _tickers):
+                return pd.DataFrame(), []
+
+            def get_call_accounting(self):
+                return {"api_call_count": 0, "endpoint_counts": {}}
+
+        with patch("src.fetch_data.get_provider", return_value=EmptySuccessProvider()), patch(
+            "src.fetch_data.refresh_eligible_tickers",
+            return_value=(["ABC"], []),
+        ), patch("src.fetch_data.persist_theme_snapshot_for_run", return_value=None):
+            new_run_id = run_refresh(conn, provider_name="mock", tickers=["ABC"])
+
+        self.assertTrue(changed)
+        self.assertEqual(row[0], "interrupted")
+        self.assertIsNotNone(row[1])
+        self.assertEqual(row[2], "Operator cleared stale run.")
+        self.assertGreater(int(new_run_id), 64)
+        conn.close()
+
+    def test_genuinely_active_run_still_blocks_concurrent_refresh(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create sequence if not exists refresh_run_id_seq start 66")
+        conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint default nextval('refresh_run_id_seq'),
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar,
+                ticker_count bigint,
+                success_count bigint,
+                failure_count bigint,
+                scope_type varchar,
+                scope_theme_name varchar,
+                error_message varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into refresh_runs(
+                run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count, scope_type, scope_theme_name, error_message
+            )
+            values (65, 'live', CURRENT_TIMESTAMP, null, 'running', 1, 0, 0, 'active_themes', null, null)
+            """
+        )
+
+        with patch("src.fetch_data.mark_stale_running_runs", return_value=0), patch(
+            "src.fetch_data._current_running_run",
+            return_value=(65, "live", datetime(2026, 3, 19, 12, 0, 0), 1, 0, 0),
+        ):
+            with self.assertRaises(RefreshBlockedError) as ctx:
+                run_refresh(conn, provider_name="live", tickers=["ABC"])
+
+        blocked = conn.execute("select status, error_message from refresh_runs order by run_id desc limit 1").fetchone()
+        self.assertEqual(int(ctx.exception.running_run_id), 65)
+        self.assertEqual(blocked[0], "blocked")
+        self.assertIn("run 65 is already running", blocked[1])
+        conn.close()
+
+    def test_refresh_history_reflects_interrupted_recovery_status(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint,
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar,
+                ticker_count bigint,
+                success_count bigint,
+                failure_count bigint,
+                scope_type varchar,
+                scope_theme_name varchar,
+                error_message varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into refresh_runs(
+                run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count, scope_type, scope_theme_name, error_message
+            )
+            values (64, 'live', '2026-03-10 20:00:00', null, 'running', 1, 0, 0, 'active_themes', null, null)
+            """
+        )
+
+        changed = mark_refresh_run_interrupted(conn, 64, note="Manual recovery from history.")
+        history = refresh_history(conn, limit=5)
+
+        self.assertTrue(changed)
+        self.assertEqual(str(history.iloc[0]["status"]), "interrupted")
+        self.assertEqual(str(history.iloc[0]["error_message"]), "Manual recovery from history.")
+        self.assertIsNotNone(history.iloc[0]["finished_at"])
+        conn.close()
+
+    def test_running_refresh_runs_marks_old_running_rows_as_likely_stale(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint,
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar,
+                ticker_count bigint,
+                success_count bigint,
+                failure_count bigint,
+                scope_type varchar,
+                scope_theme_name varchar,
+                error_message varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into refresh_runs(
+                run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count, scope_type, scope_theme_name, error_message
+            )
+            values (64, 'live', '2026-03-10 20:00:00', null, 'running', 1, 0, 0, 'active_themes', null, null)
+            """
+        )
+
+        running = running_refresh_runs(conn, stale_minutes=30)
+
+        self.assertEqual(len(running), 1)
+        self.assertTrue(bool(running.iloc[0]["likely_stale"]))
+        self.assertGreater(float(running.iloc[0]["age_minutes"]), 30.0)
+        conn.close()
+
+    def test_health_page_exposes_selected_running_run_recovery_action(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "4_Health.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('selection_mode="single-row"', content)
+        self.assertIn("mark_selected_refresh_run_interrupted", content)
+        self.assertIn("mark_refresh_run_interrupted(", content)
+        self.assertIn("Refresh history", content)
