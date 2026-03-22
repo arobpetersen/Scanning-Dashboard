@@ -10,6 +10,11 @@ import requests
 from .ai_proposals import sanitize_context
 from .config import AI_MODEL, OPENAI_API_KEY_ENV, openai_api_key
 from .provider_live import LiveProvider
+from .scanner_research_cache import (
+    _DESCRIPTION_ANALYSIS_CACHE,
+    _PROFILE_CACHE,
+    _THEME_PREPROCESS_CACHE,
+)
 from .scanner_audit import scanner_candidate_summary
 
 
@@ -1129,9 +1134,6 @@ ARCHETYPE_ALIGNMENT = {
     "aerospace_defense_space_systems": {"defense_systems_manufacturer"},
 }
 
-_PROFILE_CACHE: dict[str, dict[str, object]] = {}
-_DESCRIPTION_ANALYSIS_CACHE: dict[tuple[object, ...], dict[str, object]] = {}
-_THEME_PREPROCESS_CACHE: dict[tuple[object, ...], dict[str, object]] = {}
 VAGUE_NEW_THEME_LABEL_TOKENS = {
     "advanced",
     "business services",
@@ -1252,48 +1254,24 @@ def _normalize_optional_theme_label(value: object) -> str | None:
 
 
 def _fit_label_from_details(fit_details: dict[str, object]) -> str:
-    score = int(fit_details.get("score") or 0)
-    direct_role_fit = bool(fit_details.get("direct_role_fit"))
-    indirect_only_fit = bool(fit_details.get("indirect_only_fit"))
-    economic_role_overlap = bool(fit_details.get("economic_role_overlap"))
-    weak_generic_business_model_overlap = bool(fit_details.get("generic_business_model_only")) and not bool(fit_details.get("specific_overlap")) and set(fit_details.get("role_overlap") or []) <= WEAK_ROLE_SIGNALS and set(fit_details.get("economic_role_overlap") or []) <= WEAK_ECONOMIC_ROLE_SIGNALS
-    archetype_relation = str(fit_details.get("archetype_relation") or "")
-    specific_overlap = bool(fit_details.get("specific_overlap"))
-    market_overlap = bool(fit_details.get("market_overlap"))
-    generic_overlap = bool(fit_details.get("generic_overlap"))
-    broad_economic_only_direct = economic_role_overlap and not direct_role_fit and archetype_relation == "direct" and not specific_overlap
-    if weak_generic_business_model_overlap:
-        direct_role_fit = False
-        economic_role_overlap = False
-        broad_economic_only_direct = False
-    if direct_role_fit and (specific_overlap or economic_role_overlap or archetype_relation == "direct" or score >= 18):
-        return "direct_fit"
-    if economic_role_overlap and not broad_economic_only_direct and archetype_relation == "direct" and not indirect_only_fit and (specific_overlap or score >= 18):
-        return "direct_fit"
-    if (
-        bool(fit_details.get("indirect_only_fit"))
-        or market_overlap
-        or specific_overlap
-        or economic_role_overlap
-        or archetype_relation == "direct"
-        or archetype_relation == "adjacent"
-        or generic_overlap
-    ):
-        return "adjacent_fit"
-    return "broad_fit"
+    from .scanner_research_heuristics import fit_label_from_details
+
+    return fit_label_from_details(fit_details)
 
 
 def _annotate_suggestion_fit(
     suggestion: dict[str, object],
     fit_details: dict[str, object],
 ) -> dict[str, object]:
-    annotated = dict(suggestion)
-    annotated["fit_label"] = _fit_label_from_details(fit_details)
-    return annotated
+    from .scanner_research_heuristics import annotate_suggestion_fit
+
+    return annotate_suggestion_fit(suggestion, fit_details)
 
 
 def _truncate_existing_theme_suggestions(suggestions: list[dict[str, object]], *, limit: int = 3) -> list[dict[str, object]]:
-    return list(suggestions or [])[:limit]
+    from .scanner_research_heuristics import truncate_existing_theme_suggestions
+
+    return truncate_existing_theme_suggestions(suggestions, limit=limit)
 
 
 def _extract_openai_error_details(exc: Exception) -> dict[str, object]:
@@ -3580,76 +3558,33 @@ def _concept_strength(concepts: set[str]) -> str:
 
 
 def theme_catalog_context(conn, representative_limit: int = 5) -> list[dict[str, object]]:
-    rows = conn.execute(
-        """
-        SELECT
-            t.id AS theme_id,
-            t.name AS theme_name,
-            t.category,
-            t.is_active,
-            m.ticker
-        FROM themes t
-        LEFT JOIN theme_membership m ON m.theme_id = t.id
-        WHERE t.is_active = TRUE
-        ORDER BY t.name, m.ticker
-        """
-    ).df()
-    if rows.empty:
-        return []
+    from .scanner_research_profiles import theme_catalog_context as load_theme_catalog_context
 
-    catalog: list[dict[str, object]] = []
-    for (theme_id, theme_name, category), frame in rows.groupby(["theme_id", "theme_name", "category"], dropna=False):
-        members = [str(value).strip().upper() for value in frame["ticker"].tolist() if str(value or "").strip()]
-        catalog.append(
-            {
-                "theme_id": int(theme_id),
-                "theme_name": str(theme_name),
-                "category": str(category or "Uncategorized"),
-                "representative_tickers": members[:representative_limit],
-                "theme_description": (
-                    f"{theme_name} ({category or 'Uncategorized'}) with representative tickers "
-                    + (", ".join(members[:representative_limit]) if members else "none")
-                ),
-            }
-        )
-    return catalog
+    return load_theme_catalog_context(conn, representative_limit=representative_limit)
 
 
 def _theme_preprocess_cache_key(theme_entry: dict[str, object]) -> tuple[object, ...]:
-    return (
-        int(theme_entry["theme_id"]),
-        _normalize_text(theme_entry.get("theme_name")),
-        _normalize_text(theme_entry.get("category")),
-        _normalize_text(theme_entry.get("theme_description")),
-        tuple(str(value or "").strip().upper() for value in list(theme_entry.get("representative_tickers") or [])),
-    )
+    from .scanner_research_analysis import theme_preprocess_cache_key
+
+    return theme_preprocess_cache_key(theme_entry)
 
 
 def _build_preprocessed_theme_entry(theme_entry: dict[str, object]) -> dict[str, object]:
-    prepared = dict(theme_entry)
-    prepared["_theme_tokens"] = _tokenize(theme_entry.get("theme_name"), theme_entry.get("category"), theme_entry.get("theme_description"))
-    prepared["_theme_concepts"] = _theme_concepts(theme_entry)
-    prepared["_theme_roles"] = _theme_roles(theme_entry)
-    prepared["_theme_markets"] = _theme_end_markets(theme_entry)
-    prepared["_theme_archetypes"] = _theme_archetypes(theme_entry)
-    prepared["_theme_economic_roles"] = _theme_economic_roles(theme_entry)
-    prepared["_looks_generic_theme"] = _looks_generic_theme(theme_entry)
-    prepared["_is_generic_factor_theme"] = _is_generic_factor_theme(theme_entry)
-    return prepared
+    from .scanner_research_analysis import build_preprocessed_theme_entry
+
+    return build_preprocessed_theme_entry(theme_entry)
 
 
 def _preprocessed_theme_entry(theme_entry: dict[str, object]) -> dict[str, object]:
-    key = _theme_preprocess_cache_key(theme_entry)
-    cached = _THEME_PREPROCESS_CACHE.get(key)
-    if cached is not None:
-        return dict(cached)
-    prepared = _build_preprocessed_theme_entry(theme_entry)
-    _THEME_PREPROCESS_CACHE[key] = prepared
-    return dict(prepared)
+    from .scanner_research_analysis import preprocessed_theme_entry
+
+    return preprocessed_theme_entry(theme_entry)
 
 
 def _preprocessed_catalog(catalog: list[dict[str, object]]) -> list[dict[str, object]]:
-    return [_preprocessed_theme_entry(entry) for entry in list(catalog or [])]
+    from .scanner_research_analysis import preprocessed_catalog
+
+    return preprocessed_catalog(catalog)
 
 
 def _concise_theme_context(theme_entry: dict[str, object], representative_limit: int = 3) -> dict[str, object]:
@@ -3669,174 +3604,51 @@ def _concise_theme_context(theme_entry: dict[str, object], representative_limit:
 
 
 def _load_company_profile(ticker: str) -> dict[str, object]:
-    provider = LiveProvider(include_reference=True)
-    if not provider.is_configured:
-        return {}
-    try:
-        ref = provider._fetch_reference(str(ticker).strip().upper())
-    except Exception:
-        return {}
-    if not isinstance(ref, dict):
-        return {}
-    return {
-        "ticker": str(ticker).strip().upper(),
-        "company_name": _normalize_text(ref.get("name")),
-        "description": _normalize_text(ref.get("description")),
-        "sic_description": _normalize_text(ref.get("sic_description")),
-        "primary_exchange": _normalize_text(ref.get("primary_exchange")),
-        "market_cap": ref.get("market_cap"),
-    }
+    from .scanner_research_profiles import load_company_profile
+
+    return load_company_profile(ticker)
 
 
 def _profile_has_research_value(profile: dict[str, object] | None) -> bool:
-    if not isinstance(profile, dict):
-        return False
-    return bool(
-        _normalize_text(profile.get("company_name"))
-        or _normalize_text(profile.get("description"))
-        or _normalize_text(profile.get("sic_description"))
-    )
+    from .scanner_research_profiles import profile_has_research_value
+
+    return profile_has_research_value(profile)
 
 
 def _load_company_profile_with_cache(ticker: str) -> dict[str, object]:
-    normalized_ticker = str(ticker or "").strip().upper()
-    cached = _PROFILE_CACHE.get(normalized_ticker)
-    fresh = _load_company_profile(normalized_ticker)
-    if _profile_has_research_value(fresh):
-        profile = dict(fresh)
-        profile["_profile_source"] = "live_lookup"
-        _PROFILE_CACHE[normalized_ticker] = profile
-        return profile
-    if _profile_has_research_value(cached):
-        profile = dict(cached)
-        profile["_profile_source"] = "cached_live_lookup"
-        return profile
-    profile = dict(fresh) if isinstance(fresh, dict) else {}
-    if profile:
-        profile["_profile_source"] = "live_lookup_empty"
-    return profile
+    from .scanner_research_profiles import load_company_profile_with_cache
+
+    return load_company_profile_with_cache(ticker)
 
 
 def _candidate_context(conn, ticker: str) -> dict[str, object]:
-    candidates = scanner_candidate_summary(conn)
-    if candidates.empty:
-        raise ValueError("No Scanner Audit candidates are available.")
-    match = candidates[candidates["ticker"] == str(ticker).strip().upper()]
-    if match.empty:
-        raise ValueError(f"Scanner Audit candidate not found for {ticker}.")
-    row = match.iloc[0]
-    return {
-        "ticker": str(row["ticker"]),
-        "recommendation": str(row["recommendation"]),
-        "recommendation_reason": str(row["recommendation_reason"]),
-        "persistence_score": int(row["persistence_score"]),
-        "observed_days": int(row["observed_days"]),
-        "observations_last_5d": int(row["observations_last_5d"]),
-        "observations_last_10d": int(row["observations_last_10d"]),
-        "current_streak": int(row["current_streak"]),
-        "distinct_scanner_count": int(row["distinct_scanner_count"]),
-        "first_seen": str(row["first_seen"]),
-        "last_seen": str(row["last_seen"]),
-        "scanners": str(row["scanners"]),
-        "source_labels": str(row["source_labels"]),
-        "metadata_basis": str(row["metadata_basis"]),
-        "governed_status": str(row["governed_status"]),
-    }
+    from .scanner_research_profiles import candidate_context
+
+    return candidate_context(conn, ticker)
 
 
 def _description_analysis_cache_key(profile: dict[str, object], candidate: dict[str, object], extra_parts: tuple[object, ...]) -> tuple[object, ...]:
-    return (
-        _normalize_text(candidate.get("ticker")).upper(),
-        _normalize_text(profile.get("company_name")),
-        _normalize_text(profile.get("description")),
-        _normalize_text(profile.get("sic_description")),
-        _normalize_text(candidate.get("recommendation_reason")),
-        tuple(_normalize_text(part) for part in extra_parts),
-    )
+    from .scanner_research_analysis import description_analysis_cache_key
+
+    return description_analysis_cache_key(profile, candidate, extra_parts)
 
 
 def _build_candidate_analysis(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> dict[str, object]:
-    description_text = " ".join(
-        [
-            _normalize_text(profile.get("company_name")),
-            _normalize_text(profile.get("description")),
-            _normalize_text(profile.get("sic_description")),
-            _normalize_text(candidate.get("recommendation_reason")),
-            *[_normalize_text(part) for part in extra_parts],
-        ]
-    )
-    profile_tokens = _tokenize(
-        profile.get("company_name"),
-        profile.get("description"),
-        profile.get("sic_description"),
-        candidate.get("recommendation_reason"),
-        *extra_parts,
-    )
-    concepts = _candidate_concepts(profile, candidate)
-    roles = _candidate_roles(profile, candidate, *extra_parts)
-    markets = _candidate_end_markets(profile, candidate, *extra_parts)
-    archetypes = _candidate_archetypes(profile, candidate, *extra_parts)
-    economic_roles = _candidate_economic_roles(profile, candidate, *extra_parts)
-    dominant_economic_role = _dominant_economic_role(profile, candidate, *extra_parts)
-    description_only_concepts = _infer_concepts(
-        profile.get("description"),
-        profile.get("sic_description"),
-        candidate.get("recommendation_reason"),
-        *extra_parts,
-    )
-    specific_domain_signal = _has_specific_domain_signal(
-        profile.get("description"),
-        profile.get("sic_description"),
-        candidate.get("recommendation_reason"),
-        *extra_parts,
-    )
-    descriptor_bundle = _description_business_descriptor_bundle(description_text)
-    business_descriptors = list(descriptor_bundle.get("descriptors") or [])
-    value_chain_layers = set(descriptor_bundle.get("value_chain_layers") or set())
-    descriptor_families = set(descriptor_bundle.get("descriptor_families") or set())
-    merchant_input_evidence = _merchant_input_evidence(description_text)
-    if not merchant_input_evidence:
-        archetypes.discard("semiconductor_materials_electronics_materials")
-        economic_roles.discard("materials_supplier")
-    analysis = {
-        "profile_tokens": profile_tokens,
-        "candidate_concepts": concepts,
-        "candidate_roles": roles,
-        "candidate_markets": markets,
-        "candidate_archetypes": archetypes,
-        "candidate_economic_roles": economic_roles,
-        "dominant_economic_role": dominant_economic_role,
-        "business_descriptors": business_descriptors,
-        "value_chain_layers": value_chain_layers,
-        "descriptor_families": descriptor_families,
-        "merchant_input_evidence": merchant_input_evidence,
-        "umbrella_signals": _umbrella_signals(description_text),
-    }
-    generic_only_probe = dict(analysis)
-    generic_only_probe["candidate_concepts"] = description_only_concepts
-    analysis["generic_business_model_only"] = _analysis_is_generic_business_model_only(generic_only_probe) and not specific_domain_signal
-    analysis["strong_role_evidence"] = bool(
-        not analysis["generic_business_model_only"]
-        and (len(roles) >= 1 or len(economic_roles) >= 1 or len(business_descriptors) >= 1)
-        and (len(archetypes) >= 1 or len(concepts - GENERIC_CONCEPTS) >= 1 or len(economic_roles) >= 1 or len(descriptor_families) >= 1)
-    )
-    analysis["clear_business_descriptor"] = bool(business_descriptors)
-    return analysis
+    from .scanner_research_analysis import build_candidate_analysis
+
+    return build_candidate_analysis(profile, candidate, *extra_parts)
 
 
 def _candidate_analysis(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> dict[str, object]:
-    key = _description_analysis_cache_key(profile, candidate, tuple(extra_parts))
-    cached = _DESCRIPTION_ANALYSIS_CACHE.get(key)
-    if cached is not None:
-        return cached
-    analysis = _build_candidate_analysis(profile, candidate, *extra_parts)
-    _DESCRIPTION_ANALYSIS_CACHE[key] = analysis
-    return analysis
+    from .scanner_research_analysis import candidate_analysis
+
+    return candidate_analysis(profile, candidate, *extra_parts)
 
 
 def _theme_fit_score(theme_entry: dict[str, object], profile: dict[str, object], candidate: dict[str, object]) -> tuple[int, str]:
-    details = _theme_fit_details(theme_entry, profile, candidate)
-    return int(details["score"]), str(details["why"])
+    from .scanner_research_heuristics import theme_fit_score
+
+    return theme_fit_score(theme_entry, profile, candidate)
 
 
 def _candidate_new_theme_label(profile: dict[str, object], candidate: dict[str, object], *extra_parts: object) -> str | None:
@@ -4043,53 +3855,9 @@ def _prefilter_ai_theme_catalog(
     *,
     max_themes: int = 12,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
-    candidate_analysis = _candidate_analysis(profile, candidate)
-    ranked: list[tuple[int, int, dict[str, object]]] = []
-    adjacent: list[tuple[int, int, dict[str, object]]] = []
-    for entry in _preprocessed_catalog(catalog):
-        fit_details = _theme_fit_details(entry, profile, candidate, candidate_analysis=candidate_analysis)
-        score = int(fit_details["score"])
-        direct_bonus = 1 if fit_details.get("direct_role_fit") else 0
-        ranked.append((score, direct_bonus, entry))
-        if fit_details.get("indirect_only_fit") or fit_details.get("market_overlap") or fit_details.get("specific_overlap"):
-            adjacent.append((score, direct_bonus, entry))
-    ranked.sort(key=lambda item: (-item[0], -item[1], str(item[2].get("theme_name") or "")))
-    adjacent.sort(key=lambda item: (-item[0], -item[1], str(item[2].get("theme_name") or "")))
+    from .scanner_research_analysis import prefilter_ai_theme_catalog
 
-    selected: list[dict[str, object]] = []
-    seen_theme_ids: set[int] = set()
-    for _, _, entry in ranked[:max_themes]:
-        theme_id = int(entry["theme_id"])
-        if theme_id in seen_theme_ids:
-            continue
-        selected.append(_concise_theme_context(entry))
-        seen_theme_ids.add(theme_id)
-
-    if len(selected) < min(6, max_themes):
-        for _, _, entry in adjacent:
-            theme_id = int(entry["theme_id"])
-            if theme_id in seen_theme_ids:
-                continue
-            selected.append(_concise_theme_context(entry))
-            seen_theme_ids.add(theme_id)
-            if len(selected) >= min(6, max_themes):
-                break
-
-    if not selected:
-        for entry in catalog[:max_themes]:
-            theme_id = int(entry["theme_id"])
-            if theme_id in seen_theme_ids:
-                continue
-            selected.append(_concise_theme_context(entry))
-            seen_theme_ids.add(theme_id)
-
-    meta = {
-        "full_catalog_theme_count": len(catalog),
-        "filtered_theme_count": len(selected),
-        "catalog_was_prefiltered": len(selected) < len(catalog),
-        "max_themes": max_themes,
-    }
-    return selected[:max_themes], meta
+    return prefilter_ai_theme_catalog(candidate, catalog, profile, max_themes=max_themes)
 
 
 def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[str, object]], profile: dict[str, object]) -> dict[str, object]:
@@ -4300,259 +4068,27 @@ def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[s
 
 
 def _description_theme_generation_draft(candidate: dict[str, object], catalog: list[dict[str, object]], profile: dict[str, object]) -> dict[str, object]:
-    draft_start = _now_perf()
-    description = _normalize_text(profile.get("description")) or _normalize_text(profile.get("sic_description"))
-    candidate_analysis = _candidate_analysis(profile, candidate)
-    business_descriptors = list(candidate_analysis.get("business_descriptors") or [])
-    value_chain_layers = sorted(candidate_analysis.get("value_chain_layers") or [])
-    domain_start = _now_perf()
-    domain_anchor = _domain_anchor(profile, candidate)
-    domain_ms = _elapsed_ms(domain_start)
-    role_start = _now_perf()
-    dominant_business_role = _dominant_economic_role(profile, candidate)
-    role_ms = _elapsed_ms(role_start)
-    idea_start = _now_perf()
-    candidate_theme_ideas = _candidate_theme_ideas_from_description(profile, candidate)
-    idea_ms = _elapsed_ms(idea_start)
-    matched_theme_candidates: list[dict[str, object]] = []
-    best_by_theme_id: dict[int, dict[str, object]] = {}
-    match_start = _now_perf()
-    for idea in candidate_theme_ideas:
-        for entry in _preprocessed_catalog(catalog):
-            match = _theme_match_from_generated_idea(
-                idea,
-                entry,
-                profile,
-                candidate,
-                domain_anchor=domain_anchor,
-                dominant_business_role=dominant_business_role,
-            )
-            theme_id = int(entry["theme_id"])
-            if theme_id not in best_by_theme_id or int(match["score"]) > int(best_by_theme_id[theme_id]["score"]):
-                best_by_theme_id[theme_id] = match
-    match_ms = _elapsed_ms(match_start)
-    finalize_start = _now_perf()
-    ranked_matches = sorted(
-        best_by_theme_id.values(),
-        key=lambda item: (-int(item["score"]), str(item["theme_entry"].get("theme_name") or "")),
-    )
-    strong_role_evidence = bool(candidate_analysis.get("strong_role_evidence"))
-    validation_matches = [_description_match_debug_entry(match) for match in ranked_matches[:8]]
-    suggested_existing: list[dict[str, object]] = []
-    seen_generic_clusters: set[str] = set()
-    for match in ranked_matches:
-        entry = match["theme_entry"]
-        if strong_role_evidence and _is_generic_factor_theme(entry):
-            continue
-        if not _description_generated_match_is_actionable(match):
-            continue
-        cluster_key = _theme_cluster_key(entry)
-        if cluster_key.startswith("umbrella:") and cluster_key in seen_generic_clusters:
-            continue
-        fit_details = dict(match["fit_details"])
-        fit_label = _fit_label_from_details(fit_details)
-        fit_label = str(match.get("fit_label") or fit_label or "broad_fit")
-        why = _description_match_support_text(match)
-        suggestion = _annotate_suggestion_fit(
-            {
-                "theme_id": int(entry["theme_id"]),
-                "theme_name": str(entry["theme_name"]),
-                "category": str(entry["category"]),
-                "why_it_might_fit": why,
-                "representative_tickers": list(entry.get("representative_tickers") or []),
-            },
-            fit_details,
-        )
-        suggestion["fit_label"] = fit_label
-        suggestion["_match_score"] = int(match["score"])
-        suggested_existing.append(suggestion)
-        matched_theme_candidates.append(
-            {
-                "idea": match["idea"],
-                "theme_name": suggestion["theme_name"],
-                "score": int(match["score"]),
-                "fit_label": suggestion["fit_label"],
-            }
-        )
-        seen_generic_clusters.add(cluster_key)
-        if len(suggested_existing) >= 3:
-            break
-    suggested_existing = _prioritize_operating_role_suggestions(
-        suggested_existing,
-        strong_role_evidence=strong_role_evidence,
-    )
-    strongest_unmatched_idea = None
-    matched_ideas = {
-        item["idea"]
-        for item in matched_theme_candidates
-        if int(item["score"]) >= 15 and str(item.get("fit_label") or "") == "direct_fit"
-    }
-    for idea in candidate_theme_ideas:
-        if idea not in matched_ideas:
-            strongest_unmatched_idea = idea
-            break
-    if business_descriptors:
-        matched_descriptor_ideas = {item["idea"] for item in matched_theme_candidates if int(item["score"]) >= 12}
-        for descriptor in business_descriptors:
-            if descriptor not in matched_descriptor_ideas:
-                strongest_unmatched_idea = descriptor
-                break
-    possible_new_theme = None
-    possible_new_theme_category = None
-    recommended_action = "watch_only"
-    confidence = "low"
-    descriptor_confidence = strong_role_evidence or bool(business_descriptors)
-    top_existing_fit = suggested_existing[0] if suggested_existing else {}
-    top_existing_is_direct = str(top_existing_fit.get("fit_label") or "") == "direct_fit"
-    top_existing_is_adjacent = str(top_existing_fit.get("fit_label") or "") == "adjacent_fit"
-    if strongest_unmatched_idea and len(candidate_theme_ideas) >= 1 and descriptor_confidence and not top_existing_is_direct:
-        possible_new_theme = strongest_unmatched_idea
-        possible_new_theme_category = _proposed_new_theme_category(
-            profile,
-            candidate,
-            possible_new_theme,
-            business_descriptors=business_descriptors,
-            value_chain_layers=value_chain_layers,
-        )
-        recommended_action = "consider_new_theme"
-        confidence = "medium" if top_existing_is_adjacent or strong_role_evidence else "low"
-    elif suggested_existing:
-        recommended_action = "add_to_existing_theme_review" if top_existing_is_direct else "watch_only"
-        confidence = "medium" if top_existing_is_direct else "low"
-    caveats: list[str] = []
-    if not description:
-        caveats.append("Company description is unavailable or unverified in the current environment.")
-    if suggested_existing and not top_existing_is_direct:
-        caveats.append("Generated governed-theme matches look adjacent rather than direct fits for the company's dominant role.")
-    if not suggested_existing and not possible_new_theme:
-        caveats.append("Description-first generation did not find a strong operating-role theme cluster.")
-    if business_descriptors and not suggested_existing and possible_new_theme:
-        caveats.append("The business description supports a coherent theme bucket, but current governed coverage remains weak.")
-    rationale_parts = [
-        f"The company { _value_chain_summary(profile, candidate) }.",
-        f"Description-first generation anchored on domain `{domain_anchor}` and dominant role `{dominant_business_role or 'unclear'}`.",
-    ]
-    if business_descriptors:
-        descriptor_summary = ", ".join(business_descriptors[:3])
-        rationale_parts.append(f"Plain-language business descriptors: {descriptor_summary}.")
-    if value_chain_layers:
-        rationale_parts.append("Detected business layer: " + ", ".join(value_chain_layers[:3]).replace("_", " ") + ".")
-    if suggested_existing:
-        rationale_parts.append(
-            "Best governed-theme matches: "
-            + "; ".join(f"{item['theme_name']} [{item['fit_label']}: {item['why_it_might_fit']}]" for item in suggested_existing)
-        )
-    if possible_new_theme:
-        if suggested_existing:
-            rationale_parts.append(
-                f"The strongest unmatched role idea is {possible_new_theme}, which remains a tentative new-theme suggestion because the best governed matches are still adjacent rather than direct."
-            )
-        else:
-            rationale_parts.append(f"The strongest unmatched role idea is {possible_new_theme}, which is being preserved as a tentative new-theme suggestion.")
-    elif not suggested_existing:
-        rationale_parts.append("No strong governed-theme or reusable new-theme idea was identified from the description.")
-    draft = {
-        "ticker": candidate["ticker"],
-        "company_name": _normalize_text(profile.get("company_name")) or candidate["ticker"],
-        "short_company_description": description or "No verified company description available.",
-        "possible_similar_tickers": [],
-        "suggested_existing_themes": suggested_existing[:3],
-        "possible_new_theme": possible_new_theme,
-        "possible_new_theme_category": possible_new_theme_category,
-        "confidence": confidence,
-        "rationale": " ".join(rationale_parts),
-        "caveats": caveats,
-        "recommended_action": recommended_action,
-        "theme_generation_strategy": "description_theme_generation",
-        "domain_anchor": domain_anchor,
-        "dominant_business_role": dominant_business_role or "unclear",
-        "candidate_theme_ideas": candidate_theme_ideas,
-        "business_descriptors": business_descriptors,
-        "matched_theme_candidates": matched_theme_candidates[:5],
-    }
-    if possible_new_theme:
-        new_theme_status = "kept_tentative" if suggested_existing else "selected_no_actionable_governed_match"
-        new_theme_reason = (
-            "Best governed matches remained adjacent rather than direct."
-            if suggested_existing
-            else "No actionable governed-theme match cleared the description-first gate."
-        )
-    elif strongest_unmatched_idea and top_existing_is_direct:
-        new_theme_status = "suppressed_by_direct_governed_match"
-        new_theme_reason = "A direct governed-theme fit won, so the narrower idea stayed suppressed."
-    elif strongest_unmatched_idea:
-        new_theme_status = "suppressed_without_strong_role_evidence"
-        new_theme_reason = "An unmatched idea existed but the description did not provide enough business-layer evidence to elevate it."
-    else:
-        new_theme_status = "none_generated"
-        new_theme_reason = "No unmatched generated idea stood out after ranking."
-    draft["validation_debug"] = {
-        "strategy": "description_theme_generation",
-        "domain_anchor": domain_anchor,
-        "dominant_business_role": dominant_business_role or "unclear",
-        "strong_role_evidence": strong_role_evidence,
-        "business_descriptors": business_descriptors[:5],
-        "value_chain_layers": value_chain_layers,
-        "generated_theme_ideas": candidate_theme_ideas[:5],
-        "evaluated_matches": validation_matches,
-        "possible_new_theme_decision": {
-            "candidate": strongest_unmatched_idea,
-            "selected": possible_new_theme,
-            "selected_category": possible_new_theme_category,
-            "status": new_theme_status,
-            "reason": new_theme_reason,
-        },
-    }
-    draft["research_timing_summary"] = {
-        "strategy": "description_theme_generation",
-        "domain_anchor_ms": domain_ms,
-        "dominant_business_role_ms": role_ms,
-        "candidate_theme_ideas_ms": idea_ms,
-        "governed_theme_matching_ms": match_ms,
-        "finalize_ms": _elapsed_ms(finalize_start),
-        "strategy_total_ms": _elapsed_ms(draft_start),
-    }
-    return draft
+    from .scanner_research_analysis import description_theme_generation_draft
+
+    return description_theme_generation_draft(candidate, catalog, profile)
 
 
 def _call_openai_research(api_key: str, context: dict[str, object], *, max_output_tokens: int = 550) -> dict[str, object]:
-    payload = {
-        "model": AI_MODEL,
-        "max_output_tokens": max_output_tokens,
-        "input": [
-            {"role": "system", "content": RESEARCH_DRAFT_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "Generate one concise advisory research draft using the provided context only. "
-                    "Populate every required field. If existing themes are weak, say so explicitly, provide a useful rationale, "
-                    "and suggest a concise possible_new_theme when justified. Compare the best existing governed-theme fit against the best narrow business-role label and choose the more precise answer. "
-                    f"Context JSON: {json.dumps(sanitize_context(context))[:16000]}"
-                ),
-            },
-        ],
-    }
-    response = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers={"Authorization": f"Bearer {api_key}"},
-        json=payload,
-        timeout=45,
-    )
-    response.raise_for_status()
-    data = response.json()
-    text = data.get("output_text", "")
-    parsed = json.loads(text) if text else {}
-    return parsed if isinstance(parsed, dict) else {}
+    from .scanner_research_merge import call_openai_research
+
+    return call_openai_research(api_key, context, max_output_tokens=max_output_tokens)
 
 
 def _estimate_context_size_chars(context: dict[str, object]) -> int:
-    return len(json.dumps(sanitize_context(context)))
+    from .scanner_research_merge import estimate_context_size_chars
+
+    return estimate_context_size_chars(context)
 
 
 def _normalize_action(value: object, fallback: str = "watch_only") -> str:
-    normalized = _normalize_text(value) or fallback
-    allowed = {"add_to_existing_theme_review", "consider_new_theme", "watch_only", "reject_for_now"}
-    return normalized if normalized in allowed else fallback
+    from .scanner_research_merge import normalize_action
+
+    return normalize_action(value, fallback)
 
 
 def _best_suggested_theme_fit_details(
@@ -4561,21 +4097,9 @@ def _best_suggested_theme_fit_details(
     profile: dict[str, object],
     candidate: dict[str, object],
 ) -> dict[str, object]:
-    candidate_analysis = _candidate_analysis(profile, candidate)
-    by_id = {int(item["theme_id"]): item for item in _preprocessed_catalog(catalog)}
-    best: dict[str, object] = {"score": 0, "direct_role_fit": False, "indirect_only_fit": False}
-    for suggestion in suggested_existing:
-        try:
-            theme_id = int(suggestion.get("theme_id"))
-        except Exception:
-            continue
-        entry = by_id.get(theme_id)
-        if entry is None:
-            continue
-        fit_details = _theme_fit_details(entry, profile, candidate, candidate_analysis=candidate_analysis)
-        if int(fit_details.get("score") or 0) > int(best.get("score") or 0):
-            best = fit_details
-    return best
+    from .scanner_research_merge import best_suggested_theme_fit_details
+
+    return best_suggested_theme_fit_details(suggested_existing, catalog, profile, candidate)
 
 
 def _annotate_existing_theme_suggestions(
@@ -4629,48 +4153,15 @@ def _precision_override_reason(
     possible_new_theme: str,
     suggested_existing: list[dict[str, object]],
 ) -> str:
-    if suggested_existing:
-        theme_names = ", ".join(item["theme_name"] for item in suggested_existing[:2])
-        return (
-            f"{possible_new_theme} is a more precise description of the company's direct role than adjacent governed themes such as {theme_names}."
-        )
-    return f"{possible_new_theme} is a more precise description of the company's direct role than the current governed taxonomy."
+    from .scanner_research_merge import precision_override_reason
+
+    return precision_override_reason(possible_new_theme, suggested_existing)
 
 
 def _rationale_signals_precision_gap(rationale: str) -> bool:
-    normalized = _normalize_text(rationale).lower()
-    if not normalized:
-        return False
-    precision_markers = [
-        "more precise",
-        "more specific",
-        "narrow business-role",
-        "current governed taxonomy",
-        "direct role",
-        "actual role in the stack",
-        "actual role",
-        "role in the stack",
-        "value-chain position",
-        "what the company actually provides",
-        "what the company provides",
-    ]
-    adjacency_markers = [
-        "adjacent",
-        "indirect",
-        "end-market adjacency",
-        "end market adjacency",
-        "adjacency fit",
-        "adjacency fits",
-        "end-market based",
-        "end market based",
-        "weaker",
-        "broad alternatives",
-        "secondary",
-        "broader adjacency fit",
-        "broader adjacency fits",
-        "broader fit",
-    ]
-    return any(marker in normalized for marker in precision_markers) and any(marker in normalized for marker in adjacency_markers)
+    from .scanner_research_merge import rationale_signals_precision_gap
+
+    return rationale_signals_precision_gap(rationale)
 
 
 def _existing_theme_fit_is_adjacent_only(best_fit: dict[str, object]) -> bool:
@@ -4690,286 +4181,33 @@ def _merge_ai_with_heuristic_draft(
     profile: dict[str, object],
     candidate: dict[str, object],
 ) -> dict[str, object]:
-    merged = dict(heuristic_draft)
-    merged.update({k: v for k, v in ai_draft.items() if v not in (None, "", [], {})})
+    from .scanner_research_merge import merge_ai_with_heuristic_draft
 
-    merged["company_name"] = _normalize_text(ai_draft.get("company_name")) or heuristic_draft.get("company_name")
-    merged["short_company_description"] = _normalize_text(ai_draft.get("short_company_description")) or heuristic_draft.get("short_company_description")
-
-    ai_similar = [str(value).strip().upper() for value in ai_draft.get("possible_similar_tickers") or [] if str(value).strip()]
-    merged["possible_similar_tickers"] = ai_similar[:5] if ai_similar else list(heuristic_draft.get("possible_similar_tickers") or [])
-
-    ai_suggested = list(ai_draft.get("suggested_existing_themes") or [])
-    merged["suggested_existing_themes"] = ai_suggested if ai_suggested else list(heuristic_draft.get("suggested_existing_themes") or [])
-
-    merged["possible_new_theme"] = _normalize_optional_theme_label(ai_draft.get("possible_new_theme")) or _normalize_optional_theme_label(heuristic_draft.get("possible_new_theme"))
-    merged["possible_new_theme_category"] = _normalize_text(ai_draft.get("possible_new_theme_category")) or _normalize_text(heuristic_draft.get("possible_new_theme_category"))
-    merged["confidence"] = _normalize_text(ai_draft.get("confidence")) or heuristic_draft.get("confidence") or "low"
-    merged["recommended_action"] = _normalize_action(ai_draft.get("recommended_action"), heuristic_draft.get("recommended_action") or "watch_only")
-
-    ai_rationale = _normalize_text(ai_draft.get("rationale"))
-    heuristic_rationale = _normalize_text(heuristic_draft.get("rationale"))
-    merged["rationale"] = ai_rationale or heuristic_rationale or "No grounded rationale was available."
-
-    ai_caveats = [str(value).strip() for value in ai_draft.get("caveats") or [] if str(value).strip()]
-    heuristic_caveats = [str(value).strip() for value in heuristic_draft.get("caveats") or [] if str(value).strip()]
-    merged["caveats"] = ai_caveats or heuristic_caveats
-
-    if not merged["possible_new_theme"] and merged["recommended_action"] == "consider_new_theme":
-        merged["possible_new_theme"] = _normalize_optional_theme_label(heuristic_draft.get("possible_new_theme"))
-    if merged.get("possible_new_theme") and not merged.get("possible_new_theme_category"):
-        merged["possible_new_theme_category"] = _proposed_new_theme_category(
-            profile,
-            candidate,
-            merged.get("possible_new_theme"),
-        )
-
-    ai_role_context = [
-        ai_draft.get("short_company_description"),
-        ai_draft.get("rationale"),
-    ]
-    heuristic_prefers_new_theme = (
-        _normalize_action(heuristic_draft.get("recommended_action")) == "consider_new_theme"
-        and _normalize_text(heuristic_draft.get("possible_new_theme"))
-    )
-    strong_role_evidence = _has_strong_role_evidence(profile, candidate, *ai_role_context)
-    candidate_new_theme = _candidate_new_theme_label(profile, candidate, *ai_role_context)
-    supports_distinct_new_theme = _supports_distinct_new_theme_label(profile, candidate, *ai_role_context)
-    ai_rationale_signals_gap = _rationale_signals_precision_gap(ai_rationale)
-    merged_rationale_signals_gap = _rationale_signals_precision_gap(str(merged.get("rationale") or ""))
-    best_ai_existing_fit = _best_suggested_theme_fit_details(
-        list(merged.get("suggested_existing_themes") or []),
-        catalog,
-        profile,
-        candidate,
-    )
-    adjacency_only_existing_fit = _existing_theme_fit_is_adjacent_only(best_ai_existing_fit)
-    inferred_candidate_roles = _candidate_roles(profile, candidate, *ai_role_context)
-    role_specific_context_supports_new_theme = bool(inferred_candidate_roles) and (
-        _profile_has_research_value(profile) or any(_normalize_text(part) for part in ai_role_context)
-    )
-    should_promote_new_theme = (
-        bool(candidate_new_theme)
-        and supports_distinct_new_theme
-        and (
-            heuristic_prefers_new_theme
-            or ai_rationale_signals_gap
-            or merged_rationale_signals_gap
-            or (
-                role_specific_context_supports_new_theme
-                and list(merged.get("suggested_existing_themes") or [])
-                and adjacency_only_existing_fit
-            )
-        )
-        and (
-            not merged.get("suggested_existing_themes")
-            or adjacency_only_existing_fit
-        )
-    )
-    top_existing_is_generic_factor = False
-    existing_suggestions = list(merged.get("suggested_existing_themes") or [])
-    if existing_suggestions:
-        top_existing = existing_suggestions[0]
-        top_existing_is_generic_factor = _is_generic_factor_theme(
-            {
-                "theme_name": top_existing.get("theme_name"),
-                "category": top_existing.get("category"),
-                "theme_description": top_existing.get("why_it_might_fit"),
-            }
-        )
-    if (
-        bool(candidate_new_theme)
-        and strong_role_evidence
-        and top_existing_is_generic_factor
-    ):
-        should_promote_new_theme = True
-    merged["research_decision_trace"] = {
-        "candidate_new_theme": candidate_new_theme,
-        "candidate_roles_detected": sorted(inferred_candidate_roles),
-        "supports_distinct_new_theme": supports_distinct_new_theme,
-        "ai_rationale_signals_gap": ai_rationale_signals_gap,
-        "merged_rationale_signals_gap": merged_rationale_signals_gap,
-        "best_existing_fit_score": int(best_ai_existing_fit.get("score") or 0),
-        "best_existing_fit_direct_role": bool(best_ai_existing_fit.get("direct_role_fit")),
-        "best_existing_fit_indirect_only": bool(best_ai_existing_fit.get("indirect_only_fit")),
-        "adjacency_only_existing_fit": adjacency_only_existing_fit,
-        "heuristic_prefers_new_theme": heuristic_prefers_new_theme,
-        "strong_role_evidence": strong_role_evidence,
-        "top_existing_is_generic_factor": top_existing_is_generic_factor,
-        "should_promote_new_theme": should_promote_new_theme,
-    }
-    if should_promote_new_theme:
-        merged["possible_new_theme"] = (
-            _normalize_optional_theme_label(ai_draft.get("possible_new_theme"))
-            or candidate_new_theme
-            or _normalize_optional_theme_label(heuristic_draft.get("possible_new_theme"))
-        )
-        merged["possible_new_theme_category"] = _normalize_text(ai_draft.get("possible_new_theme_category")) or _proposed_new_theme_category(
-            profile,
-            candidate,
-            merged["possible_new_theme"],
-        )
-        merged["recommended_action"] = "consider_new_theme"
-        if _normalize_text(merged.get("confidence")) in {"high", ""}:
-            merged["confidence"] = "medium"
-        precision_sentence = _precision_override_reason(
-            str(merged["possible_new_theme"]),
-            list(merged.get("suggested_existing_themes") or []),
-        )
-        if precision_sentence not in merged["rationale"]:
-            merged["rationale"] = f"{merged['rationale']} {precision_sentence}".strip()
-        caveats = [str(value).strip() for value in merged.get("caveats") or [] if str(value).strip()]
-        adjacency_caveat = "Existing governed themes look adjacent rather than direct fits for the company's narrow business role."
-        if list(merged.get("suggested_existing_themes") or []) and adjacency_caveat not in caveats:
-            caveats.append(adjacency_caveat)
-        merged["caveats"] = caveats
-    elif not supports_distinct_new_theme and _normalize_action(ai_draft.get("recommended_action"), "watch_only") == "watch_only":
-        merged["possible_new_theme"] = None
-        merged["possible_new_theme_category"] = None
-
-    if not _normalize_text(merged.get("rationale")):
-        merged["rationale"] = heuristic_rationale or "No strong governed-theme fit was identified; review the business role manually."
-
-    merged["suggested_existing_themes"] = _annotate_existing_theme_suggestions(
-        list(merged.get("suggested_existing_themes") or []),
-        catalog,
-        profile,
-        candidate,
-    )
-    merged["suggested_existing_themes"] = _prioritize_operating_role_suggestions(
-        list(merged.get("suggested_existing_themes") or []),
-        strong_role_evidence=strong_role_evidence,
-    )
-
-    return merged
+    return merge_ai_with_heuristic_draft(ai_draft, heuristic_draft, catalog, profile, candidate)
 
 
 def _normalize_ai_theme_suggestions(raw_items: object, catalog: list[dict[str, object]]) -> list[dict[str, object]]:
-    if not isinstance(raw_items, list):
-        return []
-    by_id = {int(item["theme_id"]): item for item in catalog}
-    by_name = {str(item["theme_name"]).strip().lower(): item for item in catalog}
-    normalized: list[dict[str, object]] = []
-    for item in raw_items:
-        if not isinstance(item, dict):
-            continue
-        catalog_entry = None
-        theme_id = item.get("theme_id")
-        if theme_id not in (None, ""):
-            try:
-                catalog_entry = by_id.get(int(theme_id))
-            except Exception:
-                catalog_entry = None
-        if catalog_entry is None:
-            theme_name = str(item.get("theme_name") or "").strip().lower()
-            catalog_entry = by_name.get(theme_name)
-        if catalog_entry is None:
-            continue
-        normalized.append(
-            {
-                "theme_id": int(catalog_entry["theme_id"]),
-                "theme_name": str(catalog_entry["theme_name"]),
-                "category": str(catalog_entry["category"]),
-                "why_it_might_fit": _normalize_text(item.get("why_it_might_fit")) or "AI suggested this as a possible governed-theme fit.",
-                "representative_tickers": list(catalog_entry.get("representative_tickers") or []),
-                "fit_label": _normalize_text(item.get("fit_label")),
-            }
-        )
-    return _truncate_existing_theme_suggestions(normalized)
+    from .scanner_research_merge import normalize_ai_theme_suggestions
+
+    return normalize_ai_theme_suggestions(raw_items, catalog)
 
 
 def _ensure_scanner_research_review_table(conn) -> None:
-    conn.execute("CREATE SEQUENCE IF NOT EXISTS scanner_research_review_id_seq")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS scanner_research_reviews (
-            review_id BIGINT PRIMARY KEY DEFAULT nextval('scanner_research_review_id_seq'),
-            ticker VARCHAR NOT NULL,
-            generated_at TIMESTAMP NOT NULL,
-            theme_generation_strategy VARCHAR NOT NULL,
-            research_mode VARCHAR,
-            outcome_class VARCHAR NOT NULL,
-            reviewer_notes VARCHAR,
-            recommended_action VARCHAR,
-            confidence VARCHAR,
-            possible_new_theme VARCHAR,
-            draft_context_json VARCHAR,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE (ticker, generated_at, theme_generation_strategy),
-            CHECK (length(trim(ticker)) > 0),
-            CHECK (outcome_class IN (
-                'direct_fit_correct',
-                'adjacent_fit_acceptable',
-                'should_have_been_tentative',
-                'false_positive',
-                'missed_obvious_theme'
-            ))
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_scanner_research_reviews_outcome ON scanner_research_reviews(outcome_class)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_scanner_research_reviews_generated_at ON scanner_research_reviews(generated_at)")
+    from .scanner_research_persistence import ensure_scanner_research_review_table
+
+    ensure_scanner_research_review_table(conn)
 
 
 def _scanner_research_review_context(draft: dict[str, object]) -> dict[str, object]:
-    suggested_existing = []
-    for item in list(draft.get("suggested_existing_themes") or [])[:5]:
-        suggested_existing.append(
-            {
-                "theme_id": item.get("theme_id"),
-                "theme_name": item.get("theme_name"),
-                "fit_label": item.get("fit_label"),
-            }
-        )
-    return {
-        "recommended_action": _normalize_text(draft.get("recommended_action")) or "watch_only",
-        "confidence": _normalize_text(draft.get("confidence")) or "low",
-        "possible_new_theme": _normalize_text(draft.get("possible_new_theme")),
-        "possible_new_theme_category": _normalize_text(draft.get("possible_new_theme_category")),
-        "domain_anchor": _normalize_text(draft.get("domain_anchor")) or "unclear",
-        "dominant_business_role": _normalize_text(draft.get("dominant_business_role")) or "unclear",
-        "generated_theme_ideas": list(draft.get("candidate_theme_ideas") or [])[:5],
-        "suggested_existing_themes": suggested_existing,
-    }
+    from .scanner_research_persistence import scanner_research_review_context
+
+    return scanner_research_review_context(draft)
 
 
 def get_scanner_research_review(conn, ticker: str, draft: dict[str, object] | None) -> dict[str, object] | None:
-    draft = draft if isinstance(draft, dict) else {}
-    generated_at = _normalize_text(draft.get("generated_at"))
-    strategy = _normalize_research_strategy(draft.get("theme_generation_strategy"))
-    normalized_ticker = _normalize_text(ticker).upper()
-    if not normalized_ticker or not generated_at:
-        return None
-    _ensure_scanner_research_review_table(conn)
-    row = conn.execute(
-        """
-        SELECT review_id, ticker, generated_at, theme_generation_strategy, research_mode,
-               outcome_class, reviewer_notes, recommended_action, confidence,
-               possible_new_theme, draft_context_json, created_at, updated_at
-        FROM scanner_research_reviews
-        WHERE ticker = ? AND generated_at = ? AND theme_generation_strategy = ?
-        LIMIT 1
-        """,
-        [normalized_ticker, generated_at, strategy],
-    ).fetchone()
-    if not row:
-        return None
-    return {
-        "review_id": int(row[0]),
-        "ticker": str(row[1]),
-        "generated_at": str(row[2]),
-        "theme_generation_strategy": str(row[3]),
-        "research_mode": _normalize_text(row[4]),
-        "outcome_class": str(row[5]),
-        "reviewer_notes": _normalize_text(row[6]),
-        "recommended_action": _normalize_text(row[7]),
-        "confidence": _normalize_text(row[8]),
-        "possible_new_theme": _normalize_text(row[9]),
-        "draft_context_json": _normalize_text(row[10]),
-        "created_at": str(row[11]),
-        "updated_at": str(row[12]),
-    }
+    from .scanner_research_persistence import get_scanner_research_review as load_research_review
+
+    return load_research_review(conn, ticker, draft)
 
 
 def save_scanner_research_review(
@@ -4980,104 +4218,21 @@ def save_scanner_research_review(
     outcome_class: object,
     reviewer_notes: object = "",
 ) -> dict[str, object]:
-    draft = draft if isinstance(draft, dict) else {}
-    normalized_ticker = _normalize_text(ticker).upper()
-    generated_at = _normalize_text(draft.get("generated_at"))
-    strategy = _normalize_research_strategy(draft.get("theme_generation_strategy"))
-    outcome = _normalize_research_review_outcome(outcome_class)
-    if not normalized_ticker or not generated_at:
-        raise ValueError("Research review requires ticker and generated_at draft context.")
-    if not outcome:
-        raise ValueError("Research review outcome must be one of the supported outcome classes.")
-    _ensure_scanner_research_review_table(conn)
-    note = _sanitize_error_text(reviewer_notes, limit=500)
-    context_json = json.dumps(_scanner_research_review_context(draft), sort_keys=True)
-    existing = get_scanner_research_review(conn, normalized_ticker, draft)
-    if existing:
-        conn.execute(
-            """
-            UPDATE scanner_research_reviews
-            SET research_mode = ?,
-                outcome_class = ?,
-                reviewer_notes = ?,
-                recommended_action = ?,
-                confidence = ?,
-                possible_new_theme = ?,
-                draft_context_json = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE review_id = ?
-            """,
-            [
-                _normalize_text(draft.get("research_mode")),
-                outcome,
-                note,
-                _normalize_text(draft.get("recommended_action")) or "watch_only",
-                _normalize_text(draft.get("confidence")) or "low",
-                _normalize_text(draft.get("possible_new_theme")),
-                context_json,
-                int(existing["review_id"]),
-            ],
-        )
-    else:
-        conn.execute(
-            """
-            INSERT INTO scanner_research_reviews(
-                ticker, generated_at, theme_generation_strategy, research_mode,
-                outcome_class, reviewer_notes, recommended_action, confidence,
-                possible_new_theme, draft_context_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                normalized_ticker,
-                generated_at,
-                strategy,
-                _normalize_text(draft.get("research_mode")),
-                outcome,
-                note,
-                _normalize_text(draft.get("recommended_action")) or "watch_only",
-                _normalize_text(draft.get("confidence")) or "low",
-                _normalize_text(draft.get("possible_new_theme")),
-                context_json,
-            ],
-        )
-    saved = get_scanner_research_review(conn, normalized_ticker, draft)
-    return saved or {}
+    from .scanner_research_persistence import save_scanner_research_review as persist_research_review
+
+    return persist_research_review(
+        conn,
+        ticker,
+        draft,
+        outcome_class=outcome_class,
+        reviewer_notes=reviewer_notes,
+    )
 
 
 def scanner_research_review_summary(conn, *, limit: int = 8) -> dict[str, object]:
-    _ensure_scanner_research_review_table(conn)
-    outcome_rows = conn.execute(
-        """
-        SELECT outcome_class, COUNT(*) AS review_count
-        FROM scanner_research_reviews
-        GROUP BY outcome_class
-        ORDER BY review_count DESC, outcome_class
-        """
-    ).fetchall()
-    recent_rows = conn.execute(
-        """
-        SELECT ticker, outcome_class, reviewer_notes, theme_generation_strategy, generated_at, updated_at
-        FROM scanner_research_reviews
-        ORDER BY updated_at DESC, review_id DESC
-        LIMIT ?
-        """,
-        [int(limit)],
-    ).fetchall()
-    return {
-        "counts_by_outcome": {str(row[0]): int(row[1]) for row in outcome_rows},
-        "recent_reviews": [
-            {
-                "ticker": str(row[0]),
-                "outcome_class": str(row[1]),
-                "reviewer_notes": _normalize_text(row[2]),
-                "theme_generation_strategy": str(row[3]),
-                "generated_at": str(row[4]),
-                "updated_at": str(row[5]),
-            }
-            for row in recent_rows
-        ],
-    }
+    from .scanner_research_persistence import scanner_research_review_summary as load_review_summary
+
+    return load_review_summary(conn, limit=limit)
 
 
 def _baseline_research_draft(
@@ -5085,12 +4240,9 @@ def _baseline_research_draft(
     catalog: list[dict[str, object]],
     profile: dict[str, object],
 ) -> dict[str, object]:
-    baseline_start = _now_perf()
-    draft = _description_theme_generation_draft(candidate, catalog, profile)
-    timing = dict(draft.get("research_timing_summary") or {})
-    timing["baseline_total_ms"] = _elapsed_ms(baseline_start)
-    draft["research_timing_summary"] = timing
-    return draft
+    from .scanner_research_merge import baseline_research_draft
+
+    return baseline_research_draft(candidate, catalog, profile)
 
 
 def _ai_research_draft_for_strategy(
@@ -5100,90 +4252,9 @@ def _ai_research_draft_for_strategy(
     *,
     strategy: str,
 ) -> dict[str, object]:
-    ai_total_start = _now_perf()
-    normalized_strategy = _normalize_research_strategy(strategy)
-    api_key = openai_api_key()
-    if not api_key:
-        raise ValueError(f"{OPENAI_API_KEY_ENV} is not set.")
-    baseline_start = _now_perf()
-    heuristic_baseline = _baseline_research_draft(candidate, catalog, profile)
-    baseline_ms = _elapsed_ms(baseline_start)
-    prefilter_start = _now_perf()
-    filtered_catalog, context_meta = _prefilter_ai_theme_catalog(
-        candidate,
-        catalog,
-        profile,
-        max_themes=8,
-    )
-    prefilter_ms = _elapsed_ms(prefilter_start)
-    context = {
-        "candidate": candidate,
-        "company_profile": profile,
-        "governed_theme_catalog": filtered_catalog,
-        "heuristic_baseline": {
-            "suggested_existing_themes": heuristic_baseline.get("suggested_existing_themes") or [],
-            "possible_new_theme": heuristic_baseline.get("possible_new_theme"),
-            "possible_new_theme_category": heuristic_baseline.get("possible_new_theme_category"),
-            "recommended_action": heuristic_baseline.get("recommended_action"),
-            "rationale_summary": heuristic_baseline.get("rationale"),
-            "domain_anchor": heuristic_baseline.get("domain_anchor"),
-            "dominant_business_role": heuristic_baseline.get("dominant_business_role"),
-            "candidate_theme_ideas": list(heuristic_baseline.get("candidate_theme_ideas") or [])[:5],
-            "matched_theme_candidates": list(heuristic_baseline.get("matched_theme_candidates") or [])[:5],
-        },
-    }
-    context_meta["estimated_context_chars"] = _estimate_context_size_chars(context)
-    request_start = _now_perf()
-    raw = _call_openai_research(
-        api_key,
-        context,
-        max_output_tokens=400,
-    )
-    ai_request_ms = _elapsed_ms(request_start)
-    normalize_start = _now_perf()
-    suggested_existing = _normalize_ai_theme_suggestions(raw.get("suggested_existing_themes"), catalog)
-    ai_normalize_ms = _elapsed_ms(normalize_start)
-    ai_draft = {
-        "ticker": candidate["ticker"],
-        "company_name": _normalize_text(raw.get("company_name")) or _normalize_text(profile.get("company_name")) or candidate["ticker"],
-        "short_company_description": _normalize_text(raw.get("short_company_description")) or _normalize_text(profile.get("description")) or "No verified company description available.",
-        "possible_similar_tickers": [str(value).strip().upper() for value in raw.get("possible_similar_tickers") or [] if str(value).strip()][:5],
-        "suggested_existing_themes": suggested_existing,
-        "possible_new_theme": _normalize_optional_theme_label(raw.get("possible_new_theme")),
-        "possible_new_theme_category": _normalize_text(raw.get("possible_new_theme_category")),
-        "confidence": _normalize_text(raw.get("confidence")) or "low",
-        "rationale": _normalize_text(raw.get("rationale")),
-        "caveats": [str(value).strip() for value in raw.get("caveats") or [] if str(value).strip()],
-        "recommended_action": _normalize_action(raw.get("recommended_action"), "watch_only"),
-        "research_context_meta": context_meta,
-    }
-    merge_start = _now_perf()
-    draft = _merge_ai_with_heuristic_draft(ai_draft, heuristic_baseline, catalog, profile, candidate)
-    merge_ms = _elapsed_ms(merge_start)
-    draft["research_context_meta"] = context_meta
-    draft["theme_generation_strategy"] = normalized_strategy
-    draft["domain_anchor"] = heuristic_baseline.get("domain_anchor") or _domain_anchor(profile, candidate)
-    draft["dominant_business_role"] = heuristic_baseline.get("dominant_business_role") or (_dominant_economic_role(profile, candidate) or "unclear")
-    draft["candidate_theme_ideas"] = list(heuristic_baseline.get("candidate_theme_ideas") or [])
-    draft["matched_theme_candidates"] = list(heuristic_baseline.get("matched_theme_candidates") or [])
-    draft["validation_debug"] = dict(heuristic_baseline.get("validation_debug") or {})
-    timing = dict(heuristic_baseline.get("research_timing_summary") or {})
-    timing.update(
-        {
-            "baseline_total_ms": baseline_ms,
-            "catalog_prefilter_ms": prefilter_ms,
-            "ai_request_ms": ai_request_ms,
-            "ai_normalize_ms": ai_normalize_ms,
-            "merge_ms": merge_ms,
-            "model_attempts": 1,
-            "strategy_total_ms": _elapsed_ms(ai_total_start),
-        }
-    )
-    draft["research_timing_summary"] = timing
-    if not draft["suggested_existing_themes"] and not draft["possible_new_theme"]:
-        draft["caveats"] = list(draft.get("caveats") or [])
-        draft["caveats"].append("AI did not find a strong grounded theme fit in the current governed catalog.")
-    return draft
+    from .scanner_research_merge import ai_research_draft_for_strategy
+
+    return ai_research_draft_for_strategy(candidate, catalog, profile, strategy=strategy)
 
 
 def generate_scanner_research_draft(conn, ticker: str, *, strategy: str = "description_theme_generation") -> dict[str, object]:

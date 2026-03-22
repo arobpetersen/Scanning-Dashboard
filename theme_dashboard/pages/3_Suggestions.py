@@ -23,11 +23,11 @@ from src.scanner_audit import (
     send_preserved_applied_scanner_audit_theme_to_review,
     set_scanner_candidate_review_state,
 )
-from src.scanner_research import (
-    get_or_create_scanner_research_draft,
-    get_scanner_research_review,
-    save_scanner_research_review,
-    scanner_research_review_summary,
+from src.scanner_research_service import (
+    get_or_create_research_draft,
+    load_research_review,
+    load_research_review_summary,
+    persist_research_review,
 )
 from src.suggestions_page_state import (
     apply_generated_theme_idea_checkbox_selection,
@@ -845,33 +845,24 @@ if active_suggestions_tab == "Scanner Audit":
             if generate_clicked or regenerate_clicked:
                 try:
                     with get_conn() as conn:
-                        draft, reused = get_or_create_scanner_research_draft(
+                        draft_result = get_or_create_research_draft(
                             conn,
                             selected_audit_ticker,
                             existing_draft=existing_draft,
                             force_refresh=regenerate_clicked,
                             strategy=selected_strategy,
                         )
-                    draft_source = "reused_session_draft" if reused else ("forced_regeneration" if regenerate_clicked else "fresh_generation")
-                    draft["draft_source"] = draft_source
+                    draft = draft_result.draft.to_dict()
                     draft_store[selected_audit_ticker] = draft
                     debug_store[selected_audit_ticker] = build_scanner_research_debug_entry(
                         selected_audit_ticker,
                         draft,
                         prior_debug=debug_store.get(selected_audit_ticker),
-                        draft_source=draft_source,
+                        draft_source=draft_result.draft_source,
                     )
                     st.session_state["scanner_research_feedback"] = {
                         "level": "success",
-                        "message": (
-                            f"Reused existing advisory research draft for {selected_audit_ticker}."
-                            if reused
-                            else (
-                                f"Regenerated advisory research draft for {selected_audit_ticker}."
-                                if regenerate_clicked
-                                else f"Generated advisory research draft for {selected_audit_ticker}."
-                            )
-                        ),
+                        "message": draft_result.feedback_message,
                     }
                     st.rerun()
                 except Exception as exc:
@@ -1071,14 +1062,14 @@ if active_suggestions_tab == "Scanner Audit":
                         str(existing_draft.get("theme_generation_strategy") or selected_strategy),
                     ]
                 )
-                saved_review = get_scanner_research_review(conn, selected_audit_ticker, existing_draft)
+                saved_review = load_research_review(conn, selected_audit_ticker, existing_draft)
                 if st.session_state.get(review_stamp_key) != draft_review_stamp:
                     st.session_state[review_key] = str((saved_review or {}).get("outcome_class") or "")
                     st.session_state[review_notes_key] = str((saved_review or {}).get("reviewer_notes") or "")
                     st.session_state[review_stamp_key] = draft_review_stamp
                 with side_review_col:
                     st.caption("Supporting Context")
-                    review_summary = scanner_research_review_summary(conn, limit=6)
+                    review_summary = load_research_review_summary(conn, limit=6)
                     counts_by_outcome = review_summary.get("counts_by_outcome") or {}
                     if counts_by_outcome:
                         st.caption(
@@ -1222,7 +1213,7 @@ if active_suggestions_tab == "Scanner Audit":
                             st.warning("Select a reviewer outcome before saving.")
                         else:
                             try:
-                                saved_review = save_scanner_research_review(
+                                saved_review = persist_research_review(
                                     conn,
                                     selected_audit_ticker,
                                     existing_draft,
