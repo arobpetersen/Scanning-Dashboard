@@ -3,7 +3,9 @@ from __future__ import annotations
 """Merge and normalization helpers for scanner research outputs.
 
 This module keeps AI/heuristic merge behavior together without owning the
-workflow orchestration that decides when each stage runs.
+workflow orchestration that decides when each stage runs. Some helper calls
+still route through legacy wrappers intentionally so existing patch points keep
+working during the staged cleanup.
 """
 
 import json

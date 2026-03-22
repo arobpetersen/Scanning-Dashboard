@@ -3,8 +3,9 @@ from __future__ import annotations
 """Shared heuristic primitives for scanner research.
 
 This module owns the reusable side-effect-light reasoning helpers used by the
-analysis and merge stages. It intentionally keeps the legacy module available as
-the compatibility surface while centralizing the shared heuristic family here.
+analysis and merge stages. Some primitives now live here directly, while others
+still delegate to the legacy module so compatibility patch points stay intact
+during the staged cleanup.
 """
 
 

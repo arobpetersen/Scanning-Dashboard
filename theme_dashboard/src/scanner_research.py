@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+"""Legacy scanner research compatibility surface.
+
+The stable workflow now lives in the dedicated scanner_research_* modules.
+This module intentionally remains as:
+- a compatibility facade for existing callers and patch points
+- the home of the deepest primitive inference engine that has not been moved yet
+
+Cleanup here should prefer removing clearly dead residue while keeping
+compatibility helpers stable.
+"""
+
 import json
 import re
 import time

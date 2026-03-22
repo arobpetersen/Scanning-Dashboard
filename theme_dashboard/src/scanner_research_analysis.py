@@ -4,7 +4,8 @@ from __future__ import annotations
 
 This module owns the description-first preprocessing and heuristic analysis
 stages. It stays side-effect free except for explicit use of the lightweight
-in-memory caches defined in scanner_research_cache.py.
+in-memory caches defined in scanner_research_cache.py. Cache misses still route
+through selected legacy wrappers where tests intentionally patch those names.
 """
 
 from .scanner_research_cache import _DESCRIPTION_ANALYSIS_CACHE, _THEME_PREPROCESS_CACHE
@@ -71,6 +72,8 @@ def preprocessed_theme_entry(theme_entry: dict[str, object]) -> dict[str, object
     cached = _THEME_PREPROCESS_CACHE.get(key)
     if cached is not None:
         return dict(cached)
+    # Preserve the legacy patch point on cache misses while the compatibility
+    # facade remains part of the supported test surface.
     prepared = legacy._build_preprocessed_theme_entry(theme_entry)
     _THEME_PREPROCESS_CACHE[key] = prepared
     return dict(prepared)
@@ -198,6 +201,8 @@ def candidate_analysis(profile: dict[str, object], candidate: dict[str, object],
     cached = _DESCRIPTION_ANALYSIS_CACHE.get(key)
     if cached is not None:
         return cached
+    # Preserve the legacy patch point on cache misses while the compatibility
+    # facade remains part of the supported test surface.
     analysis = legacy._build_candidate_analysis(profile, candidate, *extra_parts)
     _DESCRIPTION_ANALYSIS_CACHE[key] = analysis
     return analysis

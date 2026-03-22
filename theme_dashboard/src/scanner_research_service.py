@@ -94,10 +94,6 @@ def generate_research_draft(conn, ticker: str, *, strategy: str = DEFAULT_RESEAR
         }
     )
     draft.research_timing_summary = timing
-    if fallback_reason:
-        draft.fallback_reason = fallback_reason
-    if research_error:
-        draft.research_error = research_error
     return draft
 
 
