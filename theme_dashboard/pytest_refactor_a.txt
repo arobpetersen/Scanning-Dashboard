@@ -1,0 +1,1268 @@
+.........F..F....F..F.............................FFF..F....F.F......... [ 61%]
+..F..FFFFF....................................                           [100%]
+================================== FAILURES ===================================
+_ TestScannerAudit.test_description_first_strategy_prefers_payments_lending_over_cloud_devops _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_description_first_strategy_prefers_payments_lending_over_cloud_devops>
+_mock_profile = <MagicMock name='_load_company_profile' id='2325095723568'>
+_mock_key = <MagicMock name='openai_api_key' id='2325095723904'>
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "SEZLY",
+            "company_name": "Payments Example",
+            "description": "Provides installment payments, merchant checkout, and consumer lending services for digital commerce platforms.",
+            "sic_description": "Financial Services",
+        },
+    )
+    def test_description_first_strategy_prefers_payments_lending_over_cloud_devops(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Fintech - Payments", "Fintech", "AFRM"),
+            (2, "Fintech - Lending", "Fintech", "SOFI"),
+            (3, "Cloud DevOps", "Software", "DDOG"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'SEZLY', 'SEZLY', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'sezly-1')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "SEZLY", strategy="description_theme_generation")
+    
+>       self.assertIn(draft["candidate_theme_ideas"][0], {"Fintech Payments", "Digital Payments"})
+E       AssertionError: 'Consumer Lending' not found in {'Digital Payments', 'Fintech Payments'}
+
+tests\test_scanner_audit.py:3039: AssertionError
+_ TestScannerAudit.test_description_first_strategy_suppresses_healthcare_themes_for_storage_description _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_description_first_strategy_suppresses_healthcare_themes_for_storage_description>
+_mock_profile = <MagicMock name='_load_company_profile' id='2325095721888'>
+_mock_key = <MagicMock name='openai_api_key' id='2325095721552'>
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "SNDKX",
+            "company_name": "Sandisk Example",
+            "description": "Designs and supplies NAND flash, storage controllers, and semiconductor memory products for data storage devices and enterprise systems.",
+            "sic_description": "Semiconductor Memory",
+        },
+    )
+    def test_description_first_strategy_suppresses_healthcare_themes_for_storage_description(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Semiconductor Memory", "Semiconductors", "MU"),
+            (2, "Dental", "Healthcare", "XRAY"),
+            (3, "Animal Health", "Healthcare", "ZTS"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'SNDKX', 'SNDKX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'sndkx-2')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "SNDKX", strategy="description_theme_generation")
+        suggested_names = [item["theme_name"] for item in draft["suggested_existing_themes"]]
+    
+>       self.assertIn("Semiconductor Memory", suggested_names)
+E       AssertionError: 'Semiconductor Memory' not found in []
+
+tests\test_scanner_audit.py:2969: AssertionError
+_ TestScannerAudit.test_fallback_can_propose_optics_new_theme_even_with_indirect_existing_matches _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_fallback_can_propose_optics_new_theme_even_with_indirect_existing_matches>
+_mock_profile = <MagicMock name='_load_company_profile' id='2325095720208'>
+_mock_key = <MagicMock name='openai_api_key' id='2325095719872'>
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AAOI",
+            "company_name": "Applied Optoelectronics",
+            "description": "Designs optical transceivers, fiber interconnect modules, and related networking products for data-center and telecom deployments.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    def test_fallback_can_propose_optics_new_theme_even_with_indirect_existing_matches(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'Data Center Infrastructure', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'VRT')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOI', 'AAOI', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoi-4')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "AAOI")
+    
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'Data Center Optics', 'Optical Interconnects', 'Optical Networking'}
+
+tests\test_scanner_audit.py:2381: AssertionError
+_ TestScannerAudit.test_fallback_can_suggest_new_theme_for_narrow_uncovered_role _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_fallback_can_suggest_new_theme_for_narrow_uncovered_role>
+_mock_profile = <MagicMock name='_load_company_profile' id='2325095720880'>
+_mock_key = <MagicMock name='openai_api_key' id='2325095721216'>
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AAOI",
+            "company_name": "Applied Optoelectronics",
+            "description": "Designs optical transceivers and fiber-optic interconnect products for data-center and telecom networks.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    def test_fallback_can_suggest_new_theme_for_narrow_uncovered_role(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI Power', 'Energy', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'Cloud Software', 'Software', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'VRT')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'NOW')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOI', 'AAOI', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoi-2')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "AAOI")
+    
+>       self.assertEqual(draft["suggested_existing_themes"], [])
+E       AssertionError: Lists differ: [{'theme_id': 1, 'theme_name': 'AI Power',[156 chars]it'}] != []
+E       
+E       First list contains 1 additional elements.
+E       First extra element 0:
+E       {'theme_id': 1, 'theme_name': 'AI Power', 'category': 'Energy', 'why_it_might_fit': 'Compatible economic-role fit on component supplier', 'representative_tickers': ['VRT'], 'fit_label': 'adjacent_fit'}
+E       
+E       + []
+E       - [{'category': 'Energy',
+E       -   'fit_label': 'adjacent_fit',
+E       -   'representative_tickers': ['VRT'],
+E       -   'theme_id': 1,
+E       -   'theme_name': 'AI Power',
+E       -   'why_it_might_fit': 'Compatible economic-role fit on component supplier'}]
+
+tests\test_scanner_audit.py:2348: AssertionError
+_ TestScannerAudit.test_openai_adjacent_existing_themes_do_not_block_consider_new_theme_when_role_is_clear _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_openai_adjacent_existing_themes_do_not_block_consider_new_theme_when_role_is_clear>
+_mock_key = <MagicMock name='openai_api_key' id='2325185146768'>
+_mock_call = <MagicMock name='_call_openai_research' id='2325185147104'>
+_mock_profile = <MagicMock name='_load_company_profile' id='2325185147440'>
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "ROLEAA",
+            "company_name": "Role Actual",
+            "description": "Designs optical transceivers, fiber interconnect modules, and related networking products for data-center and telecom deployments.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Role Actual",
+            "short_company_description": "Communications hardware supplier.",
+            "possible_similar_tickers": ["LITE", "CIEN"],
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Broader data-center adjacency."},
+                {"theme_id": 2, "theme_name": "AI - Edge Computing", "why_it_might_fit": "Communications adjacency."},
+            ],
+            "possible_new_theme": "",
+            "confidence": "low",
+            "rationale": "The company provides optical networking and interconnect products into data-center and telecom markets. AI - Infrastructure and AI - Edge Computing are broader adjacency fits tied to end markets rather than what the company actually provides in the stack.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_adjacent_existing_themes_do_not_block_consider_new_theme_when_role_is_clear(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'AI - Edge Computing', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'SMCI')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'ROLEAA', 'ROLEAA', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'roleaa-openai-1')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "ROLEAA")
+    
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'AI Fiber Optics', 'Optical Interconnects', 'Data Center Optics', 'Optical Networking'}
+
+tests\test_scanner_audit.py:1333: AssertionError
+_ TestScannerAudit.test_openai_can_promote_narrow_new_theme_from_ai_role_context_even_when_profile_text_is_generic _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_openai_can_promote_narrow_new_theme_from_ai_role_context_even_when_profile_text_is_generic>
+_mock_key = <MagicMock name='openai_api_key' id='2325095023680'>
+_mock_call = <MagicMock name='_call_openai_research' id='2325095024688'>
+_mock_profile = <MagicMock name='_load_company_profile' id='2325095025696'>
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AAOIX",
+            "company_name": "Applied Optoelectronics",
+            "description": "Provides communication equipment products for network operators and data-center customers.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Applied Optoelectronics",
+            "short_company_description": "Supplier of optical networking transceivers and fiber interconnect products for data-center and telecom deployments.",
+            "possible_similar_tickers": ["LITE", "CIEN"],
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Broader data-center adjacency."},
+                {"theme_id": 2, "theme_name": "AI - Edge Computing", "why_it_might_fit": "Communications adjacency."},
+            ],
+            "possible_new_theme": "",
+            "confidence": "low",
+            "rationale": "The company provides optical networking and interconnect products into data-center and telecom markets. AI - Infrastructure and AI - Edge Computing are broader adjacency fits tied to end markets rather than what the company actually provides in the stack.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_can_promote_narrow_new_theme_from_ai_role_context_even_when_profile_text_is_generic(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'AI - Edge Computing', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'SMCI')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOIX', 'AAOIX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoix-openai-1')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "AAOIX")
+    
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'AI Fiber Optics', 'Optical Interconnects', 'Data Center Optics', 'Optical Networking'}
+
+tests\test_scanner_audit.py:1384: AssertionError
+_ TestScannerAudit.test_openai_decision_surface_keeps_proposed_new_theme_and_adjacent_existing_themes _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_openai_decision_surface_keeps_proposed_new_theme_and_adjacent_existing_themes>
+_mock_key = <MagicMock name='openai_api_key' id='2325095027040'>
+_mock_call = <MagicMock name='_call_openai_research' id='2325095026704'>
+_mock_profile = <MagicMock name='_load_company_profile' id='2325095027712'>
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AAOIZ",
+            "company_name": "Applied Optoelectronics",
+            "description": "Provides communication equipment products for network operators and data-center customers.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Applied Optoelectronics",
+            "short_company_description": "Supplier of optical networking transceivers and fiber interconnect products for data-center and telecom deployments.",
+            "possible_similar_tickers": ["LITE", "CIEN"],
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Broader data-center adjacency."},
+                {"theme_id": 2, "theme_name": "AI - Edge Computing", "why_it_might_fit": "Communications adjacency."},
+            ],
+            "possible_new_theme": "",
+            "confidence": "low",
+            "rationale": "The company provides optical networking and interconnect products into data-center and telecom markets. AI - Infrastructure and AI - Edge Computing are broader adjacency fits tied to end markets rather than what the company actually provides in the stack.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_decision_surface_keeps_proposed_new_theme_and_adjacent_existing_themes(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'AI - Edge Computing', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'SMCI')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOIZ', 'AAOIZ', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoiz-openai-1')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "AAOIZ")
+    
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'AI Fiber Optics', 'Optical Interconnects', 'Data Center Optics', 'Optical Networking'}
+
+tests\test_scanner_audit.py:1436: AssertionError
+_ TestScannerAudit.test_openai_merge_promotes_narrow_new_theme_when_rationale_identifies_precision_gap _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_openai_merge_promotes_narrow_new_theme_when_rationale_identifies_precision_gap>
+_mock_key = <MagicMock name='openai_api_key' id='2325095025360'>
+_mock_call = <MagicMock name='_call_openai_research' id='2325095025024'>
+_mock_profile = <MagicMock name='_load_company_profile' id='2325095024352'>
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "ROLELINK",
+            "company_name": "Role Link",
+            "description": "Supplies optical transceivers and interconnect modules for data-center communications infrastructure.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Role Link",
+            "short_company_description": "Communications hardware supplier.",
+            "possible_similar_tickers": ["NVDA"],
+            "suggested_existing_themes": [
+                {"theme_id": 4, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Data-center adjacency."}
+            ],
+            "possible_new_theme": "",
+            "confidence": "low",
+            "rationale": "The company provides optical networking and interconnect products. AI - Infrastructure is a weaker end-market adjacency fit, while the direct business role is more precise than the current governed taxonomy.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_merge_promotes_narrow_new_theme_when_rationale_identifies_precision_gap(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (4, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (4, 'NVDA')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'ROLELINK', 'ROLELINK', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'rolelink-openai-1')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "ROLELINK")
+    
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'AI Fiber Optics', 'Optical Interconnects', 'Data Center Optics', 'Optical Networking'}
+
+tests\test_scanner_audit.py:1714: AssertionError
+_ TestScannerAudit.test_openai_path_prefers_narrow_optics_new_theme_over_adjacent_ai_themes _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_openai_path_prefers_narrow_optics_new_theme_over_adjacent_ai_themes>
+_mock_key = <MagicMock name='openai_api_key' id='2325095722224'>
+_mock_call = <MagicMock name='_call_openai_research' id='2325095720544'>
+_mock_profile = <MagicMock name='_load_company_profile' id='2325185146432'>
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "ROLENET",
+            "company_name": "Role Network",
+            "description": "Designs optical transceivers and fiber interconnect products for data-center communications infrastructure.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Role Network",
+            "short_company_description": "Optical networking component supplier.",
+            "possible_similar_tickers": ["NVDA", "VRT"],
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "AI Infrastructure", "why_it_might_fit": "Data center adjacency."},
+                {"theme_id": 2, "theme_name": "Edge Computing", "why_it_might_fit": "Networking adjacency."},
+            ],
+            "possible_new_theme": "",
+            "confidence": "high",
+            "rationale": "The company serves AI and data-center infrastructure markets.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "add_to_existing_theme_review",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_path_prefers_narrow_optics_new_theme_over_adjacent_ai_themes(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'Edge Computing', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'VRT')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'ROLENET', 'ROLENET', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'rolenet-openai-1')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "ROLENET")
+    
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'AI Fiber Optics', 'Optical Interconnects', 'Data Center Optics', 'Optical Networking'}
+
+tests\test_scanner_audit.py:1613: AssertionError
+_ TestScannerAudit.test_openai_placeholder_none_suggested_does_not_block_narrow_new_theme_override _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_openai_placeholder_none_suggested_does_not_block_narrow_new_theme_override>
+_mock_key = <MagicMock name='openai_api_key' id='2325185145088'>
+_mock_call = <MagicMock name='_call_openai_research' id='2325185144416'>
+_mock_profile = <MagicMock name='_load_company_profile' id='2325185144752'>
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AAOI",
+            "company_name": "Applied Optoelectronics",
+            "description": "Designs optical transceivers, fiber interconnect modules, and related networking products for data-center and telecom deployments.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Applied Optoelectronics",
+            "short_company_description": "Optical transceiver and fiber interconnect supplier for data-center and telecom networks.",
+            "possible_similar_tickers": ["LITE", "CIEN"],
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Adjacent data-center demand exposure."},
+                {"theme_id": 2, "theme_name": "AI - Edge Computing", "why_it_might_fit": "Broad communications infrastructure adjacency."},
+            ],
+            "possible_new_theme": "None suggested",
+            "confidence": "low",
+            "rationale": "The company appears to serve data-center and telecom end markets through optical networking and interconnect products. AI - Infrastructure and AI - Edge Computing are weaker adjacent fits because they describe end-market exposure rather than the company's actual role in the stack, and a narrower direct role would be more precise than the current governed taxonomy.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_placeholder_none_suggested_does_not_block_narrow_new_theme_override(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'AI - Edge Computing', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'SMCI')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOI', 'AAOI', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoi-openai-none-suggested')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "AAOI")
+    
+        self.assertEqual(draft["research_mode"], "openai")
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'AI Fiber Optics', 'Optical Interconnects', 'Data Center Optics', 'Optical Networking'}
+
+tests\test_scanner_audit.py:1280: AssertionError
+_ TestScannerAudit.test_promote_generated_research_draft_creates_and_updates_review_candidate _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_promote_generated_research_draft_creates_and_updates_review_candidate>
+_mock_profile = <MagicMock name='_load_company_profile' id='2325185136352'>
+_mock_api_key = <MagicMock name='openai_api_key' id='2325185136016'>
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "NVDA",
+            "company_name": "NVIDIA Corporation",
+            "description": "Designs graphics processors and AI computing platforms for data center and accelerated computing workloads.",
+            "sic_description": "Semiconductor Devices",
+        },
+    )
+    def test_promote_generated_research_draft_creates_and_updates_review_candidate(self, _mock_profile, _mock_api_key):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI Infrastructure', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AMD')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'NVDA', 'NVDA', '2026-03-10', '2026-03-10 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'nvda-r1'),
+            (1, 'tc2000', 'NVDA', 'NVDA', '2026-03-11', '2026-03-11 08:00:00', 'f2.csv', 'tc2000', 'Breakout', 'nvda-r2'),
+            (1, 'tc2000', 'NVDA', 'NVDA', '2026-03-12', '2026-03-12 08:00:00', 'f3.csv', 'tc2000', 'Breakout', 'nvda-r3')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "NVDA")
+>       first = promote_scanner_candidate_to_theme_review(conn, "NVDA", "Looks like AI infra", research_draft=draft)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_scanner_audit.py:697: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x0000021D59D0DDF0>
+ticker = 'NVDA', promotion_note = 'Looks like AI infra'
+research_draft = {'candidate_theme_ideas': [], 'caveats': ["Existing governed themes look adjacent rather than direct fits for the company's narrow business role."], 'company_name': 'NVIDIA Corporation', 'confidence': 'medium', ...}
+selected_suggested_theme_ids = None, custom_existing_theme_ids = None
+custom_new_themes = None, proposed_new_theme_category = None
+follow_up_source_suggestion_id = None
+
+    def promote_scanner_candidate_to_theme_review(
+        conn,
+        ticker: str,
+        promotion_note: str = "",
+        research_draft: dict[str, object] | None = None,
+        selected_suggested_theme_ids: list[object] | None = None,
+        custom_existing_theme_ids: list[object] | None = None,
+        custom_new_themes: list[str] | None = None,
+        proposed_new_theme_category: str | None = None,
+        follow_up_source_suggestion_id: int | None = None,
+    ) -> dict[str, object]:
+        normalized = normalize_ticker(ticker)
+        if not normalized:
+            raise ValueError("Ticker cannot be blank.")
+    
+        candidates = scanner_candidate_summary(conn)
+        if candidates.empty:
+            raise ValueError("No Scanner Audit candidates are available.")
+    
+        matches = candidates[candidates["ticker"] == normalized]
+        if matches.empty:
+            raise ValueError(f"Scanner Audit candidate not found for {normalized}.")
+    
+        row = matches.iloc[0]
+        promoted_at = datetime.now(UTC).replace(tzinfo=None)
+        next_priority = _scanner_audit_priority(str(row["recommendation"]))
+        existing = conn.execute(
+            """
+            SELECT suggestion_id, source, status, rationale, reviewer_notes, priority, source_context_json
+            FROM theme_suggestions
+            WHERE suggestion_type = 'review_theme'
+              AND upper(COALESCE(proposed_ticker, '')) = ?
+              AND status = 'pending'
+            ORDER BY suggestion_id DESC
+            LIMIT 1
+            """,
+            [normalized],
+        ).fetchone()
+    
+        existing_context = parse_json_object(existing[6]) if existing else {}
+        previous_note = str(existing_context.get("promotion_note") or "").strip()
+        note_text = promotion_note.strip() or previous_note
+        evidence = {
+            "ticker": normalized,
+            "candidate_source": "scanner_audit",
+            "source_labels": str(row["source_labels"] or ""),
+            "recommendation": str(row["recommendation"] or ""),
+            "recommendation_reason": str(row["recommendation_reason"] or ""),
+            "persistence_score": int(row["persistence_score"]),
+            "observed_days": int(row["observed_days"]),
+            "observations_last_5d": int(row["observations_last_5d"]),
+            "observations_last_10d": int(row["observations_last_10d"]),
+            "current_streak": int(row["current_streak"]),
+            "distinct_scanner_count": int(row["distinct_scanner_count"]),
+            "first_seen": str(pd.to_datetime(row["first_seen"]).date()),
+            "last_seen": str(pd.to_datetime(row["last_seen"]).date()),
+            "scanners": str(row["scanners"] or ""),
+            "scanner_summary": str(row["scanners"] or ""),
+            "metadata_basis": str(row["metadata_basis"] or ""),
+            "promoted_at": promoted_at.isoformat(sep=" "),
+        }
+        suggested_ids = _normalize_theme_selection_ids(selected_suggested_theme_ids)
+        custom_existing_ids = _normalize_theme_selection_ids(custom_existing_theme_ids)
+        suggested_theme_entries: list[dict[str, object]] = []
+        if research_draft:
+            for item in research_draft.get("suggested_existing_themes") or []:
+                try:
+                    theme_id = int(item.get("theme_id"))
+                except Exception:
+                    continue
+                if theme_id in suggested_ids:
+                    suggested_theme_entries.append(
+                        {
+                            "theme_id": theme_id,
+                            "theme_name": str(item.get("theme_name") or ""),
+                            "category": str(item.get("category") or ""),
+                            "why_it_might_fit": str(item.get("why_it_might_fit") or ""),
+                        }
+                    )
+        custom_existing_entries = _resolve_theme_entries(conn, custom_existing_ids)
+        custom_new_theme_labels = _normalize_new_theme_labels(custom_new_themes)
+        proposed_new_theme_text = _joined_new_theme_labels(custom_new_theme_labels)
+        proposed_new_theme_category_value = _normalize_new_theme_category(proposed_new_theme_category)
+        if not suggested_theme_entries and not custom_existing_entries and not custom_new_theme_labels:
+>           raise ValueError("Select at least one existing theme or enter a proposed new theme to send to Theme Review.")
+E           ValueError: Select at least one existing theme or enter a proposed new theme to send to Theme Review.
+
+src\scanner_audit.py:1056: ValueError
+_ TestScannerAudit.test_promote_scanner_candidate_carries_forward_scanner_evidence_fields _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_promote_scanner_candidate_carries_forward_scanner_evidence_fields>
+
+    def test_promote_scanner_candidate_carries_forward_scanner_evidence_fields(self):
+        conn = self._conn()
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, scanner_name_inferred, scanner_name_basis,
+                observed_date_inferred, observed_date_basis, row_hash
+            ) values
+            (1, 'tc2000', 'RKLB', 'RKLB', '2026-03-10', '2026-03-10 08:00:00', 'f1.csv', 'tc2000_export', 'tc2000_export', true, 'default_source_label_fallback', true, 'filename_parse', 'rklb-1'),
+            (1, 'tc2000', 'RKLB', 'RKLB', '2026-03-11', '2026-03-11 08:00:00', 'f2.csv', 'tc2000_export', 'tc2000_export', true, 'default_source_label_fallback', true, 'filename_parse', 'rklb-2'),
+            (1, 'tc2000', 'RKLB', 'RKLB', '2026-03-12', '2026-03-12 08:00:00', 'f3.csv', 'tc2000_export', 'tc2000_export', true, 'default_source_label_fallback', true, 'filename_parse', 'rklb-3')
+            """
+        )
+    
+>       result = promote_scanner_candidate_to_theme_review(conn, "RKLB", "Space infra watch")
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_scanner_audit.py:543: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x0000021D5A8434F0>
+ticker = 'RKLB', promotion_note = 'Space infra watch', research_draft = None
+selected_suggested_theme_ids = None, custom_existing_theme_ids = None
+custom_new_themes = None, proposed_new_theme_category = None
+follow_up_source_suggestion_id = None
+
+    def promote_scanner_candidate_to_theme_review(
+        conn,
+        ticker: str,
+        promotion_note: str = "",
+        research_draft: dict[str, object] | None = None,
+        selected_suggested_theme_ids: list[object] | None = None,
+        custom_existing_theme_ids: list[object] | None = None,
+        custom_new_themes: list[str] | None = None,
+        proposed_new_theme_category: str | None = None,
+        follow_up_source_suggestion_id: int | None = None,
+    ) -> dict[str, object]:
+        normalized = normalize_ticker(ticker)
+        if not normalized:
+            raise ValueError("Ticker cannot be blank.")
+    
+        candidates = scanner_candidate_summary(conn)
+        if candidates.empty:
+            raise ValueError("No Scanner Audit candidates are available.")
+    
+        matches = candidates[candidates["ticker"] == normalized]
+        if matches.empty:
+            raise ValueError(f"Scanner Audit candidate not found for {normalized}.")
+    
+        row = matches.iloc[0]
+        promoted_at = datetime.now(UTC).replace(tzinfo=None)
+        next_priority = _scanner_audit_priority(str(row["recommendation"]))
+        existing = conn.execute(
+            """
+            SELECT suggestion_id, source, status, rationale, reviewer_notes, priority, source_context_json
+            FROM theme_suggestions
+            WHERE suggestion_type = 'review_theme'
+              AND upper(COALESCE(proposed_ticker, '')) = ?
+              AND status = 'pending'
+            ORDER BY suggestion_id DESC
+            LIMIT 1
+            """,
+            [normalized],
+        ).fetchone()
+    
+        existing_context = parse_json_object(existing[6]) if existing else {}
+        previous_note = str(existing_context.get("promotion_note") or "").strip()
+        note_text = promotion_note.strip() or previous_note
+        evidence = {
+            "ticker": normalized,
+            "candidate_source": "scanner_audit",
+            "source_labels": str(row["source_labels"] or ""),
+            "recommendation": str(row["recommendation"] or ""),
+            "recommendation_reason": str(row["recommendation_reason"] or ""),
+            "persistence_score": int(row["persistence_score"]),
+            "observed_days": int(row["observed_days"]),
+            "observations_last_5d": int(row["observations_last_5d"]),
+            "observations_last_10d": int(row["observations_last_10d"]),
+            "current_streak": int(row["current_streak"]),
+            "distinct_scanner_count": int(row["distinct_scanner_count"]),
+            "first_seen": str(pd.to_datetime(row["first_seen"]).date()),
+            "last_seen": str(pd.to_datetime(row["last_seen"]).date()),
+            "scanners": str(row["scanners"] or ""),
+            "scanner_summary": str(row["scanners"] or ""),
+            "metadata_basis": str(row["metadata_basis"] or ""),
+            "promoted_at": promoted_at.isoformat(sep=" "),
+        }
+        suggested_ids = _normalize_theme_selection_ids(selected_suggested_theme_ids)
+        custom_existing_ids = _normalize_theme_selection_ids(custom_existing_theme_ids)
+        suggested_theme_entries: list[dict[str, object]] = []
+        if research_draft:
+            for item in research_draft.get("suggested_existing_themes") or []:
+                try:
+                    theme_id = int(item.get("theme_id"))
+                except Exception:
+                    continue
+                if theme_id in suggested_ids:
+                    suggested_theme_entries.append(
+                        {
+                            "theme_id": theme_id,
+                            "theme_name": str(item.get("theme_name") or ""),
+                            "category": str(item.get("category") or ""),
+                            "why_it_might_fit": str(item.get("why_it_might_fit") or ""),
+                        }
+                    )
+        custom_existing_entries = _resolve_theme_entries(conn, custom_existing_ids)
+        custom_new_theme_labels = _normalize_new_theme_labels(custom_new_themes)
+        proposed_new_theme_text = _joined_new_theme_labels(custom_new_theme_labels)
+        proposed_new_theme_category_value = _normalize_new_theme_category(proposed_new_theme_category)
+        if not suggested_theme_entries and not custom_existing_entries and not custom_new_theme_labels:
+>           raise ValueError("Select at least one existing theme or enter a proposed new theme to send to Theme Review.")
+E           ValueError: Select at least one existing theme or enter a proposed new theme to send to Theme Review.
+
+src\scanner_audit.py:1056: ValueError
+_ TestScannerAudit.test_promote_scanner_candidate_creates_new_pending_row_after_rejected_history _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_promote_scanner_candidate_creates_new_pending_row_after_rejected_history>
+
+    def test_promote_scanner_candidate_creates_new_pending_row_after_rejected_history(self):
+        conn = self._conn()
+        conn.execute(
+            """
+            insert into theme_suggestions(
+                suggestion_type, status, source, rationale, priority, proposed_ticker
+            ) values
+            ('review_theme', 'rejected', 'manual', 'old review', 'medium', 'ASTS')
+            """
+        )
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'ASTS', 'ASTS', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'asts-1')
+            """
+        )
+    
+>       result = promote_scanner_candidate_to_theme_review(conn, "ASTS", "Retry after fresh scanner activity")
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_scanner_audit.py:584: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x0000021D5A740030>
+ticker = 'ASTS', promotion_note = 'Retry after fresh scanner activity'
+research_draft = None, selected_suggested_theme_ids = None
+custom_existing_theme_ids = None, custom_new_themes = None
+proposed_new_theme_category = None, follow_up_source_suggestion_id = None
+
+    def promote_scanner_candidate_to_theme_review(
+        conn,
+        ticker: str,
+        promotion_note: str = "",
+        research_draft: dict[str, object] | None = None,
+        selected_suggested_theme_ids: list[object] | None = None,
+        custom_existing_theme_ids: list[object] | None = None,
+        custom_new_themes: list[str] | None = None,
+        proposed_new_theme_category: str | None = None,
+        follow_up_source_suggestion_id: int | None = None,
+    ) -> dict[str, object]:
+        normalized = normalize_ticker(ticker)
+        if not normalized:
+            raise ValueError("Ticker cannot be blank.")
+    
+        candidates = scanner_candidate_summary(conn)
+        if candidates.empty:
+            raise ValueError("No Scanner Audit candidates are available.")
+    
+        matches = candidates[candidates["ticker"] == normalized]
+        if matches.empty:
+            raise ValueError(f"Scanner Audit candidate not found for {normalized}.")
+    
+        row = matches.iloc[0]
+        promoted_at = datetime.now(UTC).replace(tzinfo=None)
+        next_priority = _scanner_audit_priority(str(row["recommendation"]))
+        existing = conn.execute(
+            """
+            SELECT suggestion_id, source, status, rationale, reviewer_notes, priority, source_context_json
+            FROM theme_suggestions
+            WHERE suggestion_type = 'review_theme'
+              AND upper(COALESCE(proposed_ticker, '')) = ?
+              AND status = 'pending'
+            ORDER BY suggestion_id DESC
+            LIMIT 1
+            """,
+            [normalized],
+        ).fetchone()
+    
+        existing_context = parse_json_object(existing[6]) if existing else {}
+        previous_note = str(existing_context.get("promotion_note") or "").strip()
+        note_text = promotion_note.strip() or previous_note
+        evidence = {
+            "ticker": normalized,
+            "candidate_source": "scanner_audit",
+            "source_labels": str(row["source_labels"] or ""),
+            "recommendation": str(row["recommendation"] or ""),
+            "recommendation_reason": str(row["recommendation_reason"] or ""),
+            "persistence_score": int(row["persistence_score"]),
+            "observed_days": int(row["observed_days"]),
+            "observations_last_5d": int(row["observations_last_5d"]),
+            "observations_last_10d": int(row["observations_last_10d"]),
+            "current_streak": int(row["current_streak"]),
+            "distinct_scanner_count": int(row["distinct_scanner_count"]),
+            "first_seen": str(pd.to_datetime(row["first_seen"]).date()),
+            "last_seen": str(pd.to_datetime(row["last_seen"]).date()),
+            "scanners": str(row["scanners"] or ""),
+            "scanner_summary": str(row["scanners"] or ""),
+            "metadata_basis": str(row["metadata_basis"] or ""),
+            "promoted_at": promoted_at.isoformat(sep=" "),
+        }
+        suggested_ids = _normalize_theme_selection_ids(selected_suggested_theme_ids)
+        custom_existing_ids = _normalize_theme_selection_ids(custom_existing_theme_ids)
+        suggested_theme_entries: list[dict[str, object]] = []
+        if research_draft:
+            for item in research_draft.get("suggested_existing_themes") or []:
+                try:
+                    theme_id = int(item.get("theme_id"))
+                except Exception:
+                    continue
+                if theme_id in suggested_ids:
+                    suggested_theme_entries.append(
+                        {
+                            "theme_id": theme_id,
+                            "theme_name": str(item.get("theme_name") or ""),
+                            "category": str(item.get("category") or ""),
+                            "why_it_might_fit": str(item.get("why_it_might_fit") or ""),
+                        }
+                    )
+        custom_existing_entries = _resolve_theme_entries(conn, custom_existing_ids)
+        custom_new_theme_labels = _normalize_new_theme_labels(custom_new_themes)
+        proposed_new_theme_text = _joined_new_theme_labels(custom_new_theme_labels)
+        proposed_new_theme_category_value = _normalize_new_theme_category(proposed_new_theme_category)
+        if not suggested_theme_entries and not custom_existing_entries and not custom_new_theme_labels:
+>           raise ValueError("Select at least one existing theme or enter a proposed new theme to send to Theme Review.")
+E           ValueError: Select at least one existing theme or enter a proposed new theme to send to Theme Review.
+
+src\scanner_audit.py:1056: ValueError
+_ TestScannerAudit.test_promote_scanner_candidate_creates_new_review_candidate_without_touching_membership _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_promote_scanner_candidate_creates_new_review_candidate_without_touching_membership>
+
+    def test_promote_scanner_candidate_creates_new_review_candidate_without_touching_membership(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAPL')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'PLTR', 'PLTR', '2026-03-10', '2026-03-10 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'pltr-1'),
+            (1, 'tc2000', 'PLTR', 'PLTR', '2026-03-11', '2026-03-11 08:00:00', 'f2.csv', 'tc2000', 'Momentum', 'pltr-2'),
+            (1, 'tc2000', 'PLTR', 'PLTR', '2026-03-12', '2026-03-12 08:00:00', 'f3.csv', 'tc2000', 'Breakout', 'pltr-3')
+            """
+        )
+    
+>       result = promote_scanner_candidate_to_theme_review(conn, "PLTR", "Possible AI infrastructure fit")
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_scanner_audit.py:462: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x0000021D5A7DD1F0>
+ticker = 'PLTR', promotion_note = 'Possible AI infrastructure fit'
+research_draft = None, selected_suggested_theme_ids = None
+custom_existing_theme_ids = None, custom_new_themes = None
+proposed_new_theme_category = None, follow_up_source_suggestion_id = None
+
+    def promote_scanner_candidate_to_theme_review(
+        conn,
+        ticker: str,
+        promotion_note: str = "",
+        research_draft: dict[str, object] | None = None,
+        selected_suggested_theme_ids: list[object] | None = None,
+        custom_existing_theme_ids: list[object] | None = None,
+        custom_new_themes: list[str] | None = None,
+        proposed_new_theme_category: str | None = None,
+        follow_up_source_suggestion_id: int | None = None,
+    ) -> dict[str, object]:
+        normalized = normalize_ticker(ticker)
+        if not normalized:
+            raise ValueError("Ticker cannot be blank.")
+    
+        candidates = scanner_candidate_summary(conn)
+        if candidates.empty:
+            raise ValueError("No Scanner Audit candidates are available.")
+    
+        matches = candidates[candidates["ticker"] == normalized]
+        if matches.empty:
+            raise ValueError(f"Scanner Audit candidate not found for {normalized}.")
+    
+        row = matches.iloc[0]
+        promoted_at = datetime.now(UTC).replace(tzinfo=None)
+        next_priority = _scanner_audit_priority(str(row["recommendation"]))
+        existing = conn.execute(
+            """
+            SELECT suggestion_id, source, status, rationale, reviewer_notes, priority, source_context_json
+            FROM theme_suggestions
+            WHERE suggestion_type = 'review_theme'
+              AND upper(COALESCE(proposed_ticker, '')) = ?
+              AND status = 'pending'
+            ORDER BY suggestion_id DESC
+            LIMIT 1
+            """,
+            [normalized],
+        ).fetchone()
+    
+        existing_context = parse_json_object(existing[6]) if existing else {}
+        previous_note = str(existing_context.get("promotion_note") or "").strip()
+        note_text = promotion_note.strip() or previous_note
+        evidence = {
+            "ticker": normalized,
+            "candidate_source": "scanner_audit",
+            "source_labels": str(row["source_labels"] or ""),
+            "recommendation": str(row["recommendation"] or ""),
+            "recommendation_reason": str(row["recommendation_reason"] or ""),
+            "persistence_score": int(row["persistence_score"]),
+            "observed_days": int(row["observed_days"]),
+            "observations_last_5d": int(row["observations_last_5d"]),
+            "observations_last_10d": int(row["observations_last_10d"]),
+            "current_streak": int(row["current_streak"]),
+            "distinct_scanner_count": int(row["distinct_scanner_count"]),
+            "first_seen": str(pd.to_datetime(row["first_seen"]).date()),
+            "last_seen": str(pd.to_datetime(row["last_seen"]).date()),
+            "scanners": str(row["scanners"] or ""),
+            "scanner_summary": str(row["scanners"] or ""),
+            "metadata_basis": str(row["metadata_basis"] or ""),
+            "promoted_at": promoted_at.isoformat(sep=" "),
+        }
+        suggested_ids = _normalize_theme_selection_ids(selected_suggested_theme_ids)
+        custom_existing_ids = _normalize_theme_selection_ids(custom_existing_theme_ids)
+        suggested_theme_entries: list[dict[str, object]] = []
+        if research_draft:
+            for item in research_draft.get("suggested_existing_themes") or []:
+                try:
+                    theme_id = int(item.get("theme_id"))
+                except Exception:
+                    continue
+                if theme_id in suggested_ids:
+                    suggested_theme_entries.append(
+                        {
+                            "theme_id": theme_id,
+                            "theme_name": str(item.get("theme_name") or ""),
+                            "category": str(item.get("category") or ""),
+                            "why_it_might_fit": str(item.get("why_it_might_fit") or ""),
+                        }
+                    )
+        custom_existing_entries = _resolve_theme_entries(conn, custom_existing_ids)
+        custom_new_theme_labels = _normalize_new_theme_labels(custom_new_themes)
+        proposed_new_theme_text = _joined_new_theme_labels(custom_new_theme_labels)
+        proposed_new_theme_category_value = _normalize_new_theme_category(proposed_new_theme_category)
+        if not suggested_theme_entries and not custom_existing_entries and not custom_new_theme_labels:
+>           raise ValueError("Select at least one existing theme or enter a proposed new theme to send to Theme Review.")
+E           ValueError: Select at least one existing theme or enter a proposed new theme to send to Theme Review.
+
+src\scanner_audit.py:1056: ValueError
+_ TestScannerAudit.test_promote_scanner_candidate_updates_existing_pending_review_instead_of_duplicating _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_promote_scanner_candidate_updates_existing_pending_review_instead_of_duplicating>
+
+    def test_promote_scanner_candidate_updates_existing_pending_review_instead_of_duplicating(self):
+        conn = self._conn()
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'IONQ', 'IONQ', '2026-03-10', '2026-03-10 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'ionq-1'),
+            (1, 'tc2000', 'IONQ', 'IONQ', '2026-03-11', '2026-03-11 08:00:00', 'f2.csv', 'tc2000', 'Breakout', 'ionq-2')
+            """
+        )
+>       first = promote_scanner_candidate_to_theme_review(conn, "IONQ", "First note")
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_scanner_audit.py:496: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x0000021D5FEFE770>
+ticker = 'IONQ', promotion_note = 'First note', research_draft = None
+selected_suggested_theme_ids = None, custom_existing_theme_ids = None
+custom_new_themes = None, proposed_new_theme_category = None
+follow_up_source_suggestion_id = None
+
+    def promote_scanner_candidate_to_theme_review(
+        conn,
+        ticker: str,
+        promotion_note: str = "",
+        research_draft: dict[str, object] | None = None,
+        selected_suggested_theme_ids: list[object] | None = None,
+        custom_existing_theme_ids: list[object] | None = None,
+        custom_new_themes: list[str] | None = None,
+        proposed_new_theme_category: str | None = None,
+        follow_up_source_suggestion_id: int | None = None,
+    ) -> dict[str, object]:
+        normalized = normalize_ticker(ticker)
+        if not normalized:
+            raise ValueError("Ticker cannot be blank.")
+    
+        candidates = scanner_candidate_summary(conn)
+        if candidates.empty:
+            raise ValueError("No Scanner Audit candidates are available.")
+    
+        matches = candidates[candidates["ticker"] == normalized]
+        if matches.empty:
+            raise ValueError(f"Scanner Audit candidate not found for {normalized}.")
+    
+        row = matches.iloc[0]
+        promoted_at = datetime.now(UTC).replace(tzinfo=None)
+        next_priority = _scanner_audit_priority(str(row["recommendation"]))
+        existing = conn.execute(
+            """
+            SELECT suggestion_id, source, status, rationale, reviewer_notes, priority, source_context_json
+            FROM theme_suggestions
+            WHERE suggestion_type = 'review_theme'
+              AND upper(COALESCE(proposed_ticker, '')) = ?
+              AND status = 'pending'
+            ORDER BY suggestion_id DESC
+            LIMIT 1
+            """,
+            [normalized],
+        ).fetchone()
+    
+        existing_context = parse_json_object(existing[6]) if existing else {}
+        previous_note = str(existing_context.get("promotion_note") or "").strip()
+        note_text = promotion_note.strip() or previous_note
+        evidence = {
+            "ticker": normalized,
+            "candidate_source": "scanner_audit",
+            "source_labels": str(row["source_labels"] or ""),
+            "recommendation": str(row["recommendation"] or ""),
+            "recommendation_reason": str(row["recommendation_reason"] or ""),
+            "persistence_score": int(row["persistence_score"]),
+            "observed_days": int(row["observed_days"]),
+            "observations_last_5d": int(row["observations_last_5d"]),
+            "observations_last_10d": int(row["observations_last_10d"]),
+            "current_streak": int(row["current_streak"]),
+            "distinct_scanner_count": int(row["distinct_scanner_count"]),
+            "first_seen": str(pd.to_datetime(row["first_seen"]).date()),
+            "last_seen": str(pd.to_datetime(row["last_seen"]).date()),
+            "scanners": str(row["scanners"] or ""),
+            "scanner_summary": str(row["scanners"] or ""),
+            "metadata_basis": str(row["metadata_basis"] or ""),
+            "promoted_at": promoted_at.isoformat(sep=" "),
+        }
+        suggested_ids = _normalize_theme_selection_ids(selected_suggested_theme_ids)
+        custom_existing_ids = _normalize_theme_selection_ids(custom_existing_theme_ids)
+        suggested_theme_entries: list[dict[str, object]] = []
+        if research_draft:
+            for item in research_draft.get("suggested_existing_themes") or []:
+                try:
+                    theme_id = int(item.get("theme_id"))
+                except Exception:
+                    continue
+                if theme_id in suggested_ids:
+                    suggested_theme_entries.append(
+                        {
+                            "theme_id": theme_id,
+                            "theme_name": str(item.get("theme_name") or ""),
+                            "category": str(item.get("category") or ""),
+                            "why_it_might_fit": str(item.get("why_it_might_fit") or ""),
+                        }
+                    )
+        custom_existing_entries = _resolve_theme_entries(conn, custom_existing_ids)
+        custom_new_theme_labels = _normalize_new_theme_labels(custom_new_themes)
+        proposed_new_theme_text = _joined_new_theme_labels(custom_new_theme_labels)
+        proposed_new_theme_category_value = _normalize_new_theme_category(proposed_new_theme_category)
+        if not suggested_theme_entries and not custom_existing_entries and not custom_new_theme_labels:
+>           raise ValueError("Select at least one existing theme or enter a proposed new theme to send to Theme Review.")
+E           ValueError: Select at least one existing theme or enter a proposed new theme to send to Theme Review.
+
+src\scanner_audit.py:1056: ValueError
+_ TestScannerAudit.test_queue_listing_exposes_structured_scanner_audit_theme_selections _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_queue_listing_exposes_structured_scanner_audit_theme_selections>
+_mock_profile = <MagicMock name='_load_company_profile' id='2325095722224'>
+_mock_key = <MagicMock name='openai_api_key' id='2325095720544'>
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "SEZL",
+            "company_name": "Sezzle",
+            "description": "Provides installment payments and digital checkout financing products.",
+            "sic_description": "Financial Services",
+        },
+    )
+    def test_queue_listing_exposes_structured_scanner_audit_theme_selections(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'Fintech - Payments', 'Fintech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'Fintech - Lending', 'Fintech', true)")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'SEZL', 'SEZL', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'sezl-queue-1')
+            """
+        )
+    
+        promote_scanner_candidate_to_theme_review(
+            conn,
+            "SEZL",
+            "Interesting BNPL name",
+            custom_existing_theme_ids=[1, 2],
+        )
+>       queue = list_suggestions(conn, status="pending")
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_scanner_audit.py:811: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x0000021D5A71E3F0>
+status = 'pending', suggestion_type = None, source = None, search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+============================== warnings summary ===============================
+tests/test_scanner_audit.py: 3 warnings
+tests/test_historical_backfill.py: 8 warnings
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:35: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    stale_before = datetime.utcnow() - timedelta(minutes=stale_minutes)
+
+tests/test_scanner_audit.py: 3 warnings
+tests/test_historical_backfill.py: 8 warnings
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:141: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    [provider.name, datetime.utcnow(), len(clean_tickers), scope_type, scope_theme_name],
+
+tests/test_scanner_audit.py: 3 warnings
+tests/test_historical_backfill.py: 8 warnings
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:149: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started = datetime.utcnow()
+
+tests/test_historical_backfill.py::TestHistoricalBackfill::test_onboarding_theme_reconstruction_clears_downstream_refresh_flag
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\historical_backfill.py:251: FutureWarning: The behavior of array concatenation with empty entries is deprecated. In a future version, this will no longer exclude empty items when determining the result dtype. To retain the old behavior, exclude the empty entries before the concat operation.
+    membership_base["calculation_eligible"] = membership_base["calculation_eligible"].combine_first(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_description_first_strategy_prefers_payments_lending_over_cloud_devops
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_description_first_strategy_suppresses_healthcare_themes_for_storage_description
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_fallback_can_propose_optics_new_theme_even_with_indirect_existing_matches
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_fallback_can_suggest_new_theme_for_narrow_uncovered_role
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_openai_adjacent_existing_themes_do_not_block_consider_new_theme_when_role_is_clear
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_openai_can_promote_narrow_new_theme_from_ai_role_context_even_when_profile_text_is_generic
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_openai_decision_surface_keeps_proposed_new_theme_and_adjacent_existing_themes
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_openai_merge_promotes_narrow_new_theme_when_rationale_identifies_precision_gap
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_openai_path_prefers_narrow_optics_new_theme_over_adjacent_ai_themes
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_openai_placeholder_none_suggested_does_not_block_narrow_new_theme_override
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_promote_generated_research_draft_creates_and_updates_review_candidate
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_promote_scanner_candidate_carries_forward_scanner_evidence_fields
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_promote_scanner_candidate_creates_new_pending_row_after_rejected_history
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_promote_scanner_candidate_creates_new_review_candidate_without_touching_membership
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_promote_scanner_candidate_updates_existing_pending_review_instead_of_duplicating
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_queue_listing_exposes_structured_scanner_audit_theme_selections
+16 failed, 102 passed, 34 warnings in 17.05s

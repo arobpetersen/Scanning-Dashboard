@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from .json_utils import parse_json_object
 from .theme_service import add_ticker, remove_ticker, update_theme
 
 VALID_TYPES = {
@@ -248,16 +249,6 @@ def _build_filter_clauses(
     return clauses, params
 
 
-def _parse_source_context(raw_value: object) -> dict[str, object]:
-    if raw_value in (None, ""):
-        return {}
-    try:
-        parsed = json.loads(str(raw_value))
-    except Exception:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
 def _structured_review_theme_summary(context: dict[str, object]) -> dict[str, object]:
     selected_suggested = list(context.get("selected_suggested_themes") or [])
     custom_existing = list(context.get("custom_existing_themes") or [])
@@ -461,7 +452,7 @@ def list_suggestions(
     df = df.copy()
     if "source_context_json" not in df.columns:
         df["source_context_json"] = None
-    df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+    df["source_context"] = df["source_context_json"].apply(parse_json_object)
     structured = df["source_context"].apply(_structured_review_theme_summary).apply(pd.Series)
     df = pd.concat([df, structured], axis=1)
     df = _apply_review_theme_display_fallbacks(df)
@@ -645,7 +636,7 @@ def apply_suggestion(conn, suggestion_id: int, reviewer_notes: str = "") -> None
         remove_ticker(conn, int(existing_theme_id), proposed_ticker)
         add_ticker(conn, int(target_theme_id), proposed_ticker, onboarding_source=f"suggestion:{source}")
     elif suggestion_type == "review_theme":
-        context = _parse_source_context(source_context_json)
+        context = parse_json_object(source_context_json)
         selected_existing = list(context.get("selected_suggested_themes") or []) + list(context.get("custom_existing_themes") or [])
         applied_theme_ids: list[int] = []
         for item in selected_existing:
@@ -695,7 +686,7 @@ def fast_path_create_governed_theme_and_assign_ticker(conn, suggestion_id: int, 
     if str(suggestion_type or "").strip().lower() != "review_theme":
         raise ValueError("Fast path only supports approved review_theme suggestions.")
 
-    context = _parse_source_context(source_context_json)
+    context = parse_json_object(source_context_json)
     proposed_theme_names = _split_structured_theme_names(context.get("custom_new_theme_names") or proposed_theme_name)
     ticker = str(proposed_ticker or "").strip().upper()
     if not proposed_theme_names:
@@ -780,7 +771,7 @@ def recent_applied_suggestions(conn, limit: int = 10) -> pd.DataFrame:
     if df.empty:
         return df
     df = df.copy()
-    df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+    df["source_context"] = df["source_context_json"].apply(parse_json_object)
     structured = df["source_context"].apply(_structured_review_theme_summary).apply(pd.Series)
     df = pd.concat([df, structured], axis=1)
     df = _apply_review_theme_display_fallbacks(df)

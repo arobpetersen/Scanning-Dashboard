@@ -2,9 +2,9 @@ import json
 
 import streamlit as st
 
-from src.config import DEFAULT_PROVIDER, MASSIVE_API_KEY_ENV, massive_api_key
+from src.config import MASSIVE_API_KEY_ENV, massive_api_key
 from src.database import get_conn, init_db
-from src.fetch_data import RefreshBlockedError, running_refresh_runs, run_refresh
+from src.fetch_data import LiveProviderNotConfiguredError, RefreshBlockedError, running_refresh_runs, run_refresh
 from src.queries import last_refresh_run, synthetic_data_active
 from src.streamlit_utils import db_cache_token, load_theme_rankings_cached, reset_perf_timings, render_dataframe, show_perf_summary, stop_for_database_error
 from src.symbol_hygiene import refresh_eligible_tickers
@@ -28,8 +28,8 @@ db_token = db_cache_token()
 if seeded:
     st.success("Theme registry imported from themes_seed_structured.json. DuckDB is source of truth.")
 
-provider_name = st.sidebar.selectbox("Provider", ["live", "mock"], index=0 if DEFAULT_PROVIDER == "live" else 1)
-active_scope_label = "Live Active Themes" if provider_name == "live" else "Active Themes"
+provider_name = "live"
+active_scope_label = "Live Active Themes"
 scope_mode = st.sidebar.radio("Refresh scope", [active_scope_label, "Selected theme", "Custom ticker list"], index=0)
 
 selected_theme_name: str | None = None
@@ -60,8 +60,9 @@ except Exception as exc:
     stop_for_database_error(exc)
 rankings = load_theme_rankings_cached(db_token)
 
-if provider_name == "live" and not massive_api_key():
-    st.warning(f"Live selected but {MASSIVE_API_KEY_ENV} is missing. Refresh will fall back to mock provider behavior, which is intended mainly for development/testing.")
+live_configured = bool(massive_api_key())
+if not live_configured:
+    st.error(f"Live refresh is unavailable until `{MASSIVE_API_KEY_ENV}` is configured.")
 
 if synthetic_active:
     st.info("Synthetic historical data active")
@@ -99,7 +100,7 @@ with rc1:
             f"Refresh run #{int(active_run['run_id'])} is still marked `running`{stale_note}. "
             "Concurrent refreshes stay blocked until it finishes or is manually marked interrupted from Health > Refresh history."
         )
-    if st.button("Run refresh now", type="primary"):
+    if st.button("Run refresh now", type="primary", disabled=not live_configured):
         pb = st.progress(0)
         status = st.empty()
 
@@ -128,6 +129,8 @@ with rc1:
                 f"If run #{int(exc.running_run_id)} is stale or interrupted, use Health > Refresh history and click "
                 "`Mark selected running run interrupted`."
             )
+        except LiveProviderNotConfiguredError as exc:
+            st.error(str(exc))
         except Exception as exc:
             st.error(f"Refresh failed: {exc}")
 

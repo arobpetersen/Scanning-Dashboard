@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 
 from .config import DEFAULT_PROVIDER
+from .db_introspection import table_exists
 
 ONBOARDING_HISTORY_TARGET_DAYS = 30
 ONBOARDING_BACKFILL_WINDOW_DAYS = 90
@@ -14,16 +15,8 @@ def _normalize_ticker(ticker: str) -> str:
     return str(ticker or "").strip().upper()
 
 
-def _table_exists(conn, table_name: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM duckdb_tables() WHERE table_name = ? LIMIT 1",
-        [str(table_name or "").strip()],
-    ).fetchone()
-    return bool(row)
-
-
 def _preferred_history_source(conn) -> str | None:
-    if not _table_exists(conn, "ticker_daily_history"):
+    if not table_exists(conn, "ticker_daily_history"):
         return None
     row = conn.execute(
         """
@@ -100,7 +93,7 @@ def record_new_governed_ticker_onboarding(
         provider_name=DEFAULT_PROVIDER,
     )
     now = datetime.now(UTC).replace(tzinfo=None)
-    if not _table_exists(conn, "governed_ticker_onboarding"):
+    if not table_exists(conn, "governed_ticker_onboarding"):
         return readiness
     updated = conn.execute(
         """
@@ -157,18 +150,18 @@ def record_new_governed_ticker_onboarding(
 
 
 def list_governed_ticker_onboarding(conn, limit: int = 100) -> pd.DataFrame:
-    if not _table_exists(conn, "governed_ticker_onboarding"):
+    if not table_exists(conn, "governed_ticker_onboarding"):
         return pd.DataFrame()
     return conn.execute(
         """
         WITH membership AS (
             SELECT
-                m.ticker,
+                upper(trim(m.ticker)) AS ticker,
                 COUNT(*) AS governed_assignment_count,
                 STRING_AGG(t.name, ', ' ORDER BY t.name) AS governed_themes
             FROM theme_membership m
             JOIN themes t ON t.id = m.theme_id
-            GROUP BY m.ticker
+            GROUP BY upper(trim(m.ticker))
         )
         SELECT
             o.ticker,
@@ -187,7 +180,7 @@ def list_governed_ticker_onboarding(conn, limit: int = 100) -> pd.DataFrame:
             m.governed_themes,
             o.updated_at
         FROM governed_ticker_onboarding o
-        LEFT JOIN membership m ON m.ticker = o.ticker
+        LEFT JOIN membership m ON m.ticker = upper(trim(o.ticker))
         ORDER BY o.added_at DESC, o.ticker
         LIMIT ?
         """,
@@ -196,7 +189,7 @@ def list_governed_ticker_onboarding(conn, limit: int = 100) -> pd.DataFrame:
 
 
 def governed_ticker_onboarding_counts(conn) -> pd.DataFrame:
-    if not _table_exists(conn, "governed_ticker_onboarding"):
+    if not table_exists(conn, "governed_ticker_onboarding"):
         return pd.DataFrame()
     return conn.execute(
         """
@@ -222,7 +215,7 @@ def run_governed_ticker_onboarding_backfill(
     normalized_tickers = sorted({_normalize_ticker(ticker) for ticker in tickers if _normalize_ticker(ticker)})
     if not normalized_tickers:
         return {"status": "no_scope", "tickers": [], "backfill_result": None}
-    if not _table_exists(conn, "governed_ticker_onboarding"):
+    if not table_exists(conn, "governed_ticker_onboarding"):
         return {"status": "no_tracking_table", "tickers": normalized_tickers, "backfill_result": None, "updated_rows": []}
 
     now = datetime.now(UTC).replace(tzinfo=None)
@@ -348,7 +341,7 @@ def run_governed_ticker_onboarding_theme_reconstruction(
     normalized_tickers = sorted({_normalize_ticker(ticker) for ticker in tickers if _normalize_ticker(ticker)})
     if not normalized_tickers:
         return {"status": "no_scope", "tickers": [], "reconstruction_result": None}
-    if not _table_exists(conn, "governed_ticker_onboarding"):
+    if not table_exists(conn, "governed_ticker_onboarding"):
         return {"status": "no_tracking_table", "tickers": normalized_tickers, "reconstruction_result": None, "updated_rows": []}
 
     from .historical_backfill import reconstruct_theme_history_range

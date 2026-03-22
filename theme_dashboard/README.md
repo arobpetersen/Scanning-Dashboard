@@ -5,7 +5,7 @@ A local-first Streamlit app for **objective, formula-based theme ranking** and t
 ## What this app does
 - Imports themes from `themes_seed_structured.json` on first run only.
 - Stores and manages themes in local DuckDB afterward (DuckDB is source of truth).
-- Refreshes ticker snapshots from a provider (`mock` and `live` via Massive).
+- Refreshes ticker snapshots from the live Massive provider.
 - Calculates deterministic rankings from numeric ticker metrics only.
 - Stores historical ticker snapshots and historical theme snapshots on every successful/partial refresh.
 - Shows trend deltas between latest and prior theme snapshots.
@@ -99,13 +99,13 @@ If you want to run the existing tests, use the same environment after installing
 export MASSIVE_API_KEY="your_api_key_here"
 ```
 
-3. In app sidebar, choose `live` provider.
+3. Launch the app after setting `MASSIVE_API_KEY`.
 
-If `MASSIVE_API_KEY` is not set and you choose `live`, the app shows a warning and gracefully falls back to `mock` for refresh so the app remains usable.
+If `MASSIVE_API_KEY` is not set, live refresh is blocked. The app no longer falls back to `mock` during normal dashboard workflows.
 
 Operational default:
-- `live` is the intended day-to-day operating mode in the 2.1 branch.
-- `mock` remains available for explicit development/testing and recovery scenarios.
+- `live` is the only supported app/runtime data mode.
+- `mock` may still exist in code for isolated tests and development utilities, but it is no longer part of the operator workflow.
 
 > Keep secrets local: do **not** hardcode API keys in source files and do **not** commit `.env` or shell files containing secrets.
 

@@ -1,9 +1,50 @@
 import os
+import shutil
+import tempfile
+import uuid
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "theme_dashboard.duckdb"
 SEED_PATH = BASE_DIR / "themes_seed_structured.json"
+
+
+if os.name == "nt":
+    app_tmp_dir = Path(os.getenv("SCANNING_DASH_TMPDIR", str(BASE_DIR / ".tmp"))).expanduser()
+    app_tmp_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("TMP", str(app_tmp_dir))
+    os.environ.setdefault("TEMP", str(app_tmp_dir))
+    tempfile.tempdir = str(app_tmp_dir)
+
+    def _workspace_mkdtemp(suffix: str | None = None, prefix: str | None = None, dir: str | None = None):
+        base_dir = Path(dir or tempfile.tempdir or app_tmp_dir)
+        base_dir.mkdir(parents=True, exist_ok=True)
+        name_prefix = prefix or "tmp"
+        name_suffix = suffix or ""
+        while True:
+            candidate = base_dir / f"{name_prefix}{uuid.uuid4().hex[:8]}{name_suffix}"
+            try:
+                candidate.mkdir()
+                return str(candidate)
+            except FileExistsError:
+                continue
+
+    class _WorkspaceTemporaryDirectory:
+        def __init__(self, suffix: str | None = None, prefix: str | None = None, dir: str | None = None, ignore_cleanup_errors: bool = False):
+            self.name = _workspace_mkdtemp(suffix=suffix, prefix=prefix, dir=dir)
+            self._ignore_cleanup_errors = ignore_cleanup_errors
+
+        def __enter__(self):
+            return self.name
+
+        def __exit__(self, exc_type, exc, tb):
+            self.cleanup()
+
+        def cleanup(self):
+            shutil.rmtree(self.name, ignore_errors=True)
+
+    tempfile.mkdtemp = _workspace_mkdtemp
+    tempfile.TemporaryDirectory = _WorkspaceTemporaryDirectory
 
 DEFAULT_PROVIDER = "live"
 STALE_DATA_HOURS = 24

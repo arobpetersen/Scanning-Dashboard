@@ -1,0 +1,1278 @@
+........................................................................ [ 33%]
+...............F..F............................FF............F.......F.. [ 67%]
+...FF..F.F.......F.F.FFF.FF.......F...................................   [100%]
+================================== FAILURES ===================================
+_ TestDescriptionFirstResearchRefinements.test_description_first_additive_manufacturing_surfaces_coherent_missing_category _
+
+self = <test_hardening.TestDescriptionFirstResearchRefinements testMethod=test_description_first_additive_manufacturing_surfaces_coherent_missing_category>
+
+    def test_description_first_additive_manufacturing_surfaces_coherent_missing_category(self):
+        profile = {
+            "company_name": "LayerForge",
+            "description": "Builds additive manufacturing systems and industrial 3D printers for production-scale metal part fabrication.",
+            "sic_description": "Industrial printer systems",
+        }
+    
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+    
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Additive Manufacturing")
+        self.assertEqual(draft["possible_new_theme_category"], "Additive Manufacturing / Industrial 3D Printing")
+>       self.assertIn("Industrial 3D Printing", draft["validation_debug"]["business_descriptors"])
+E       AssertionError: 'Industrial 3D Printing' not found in ['Additive Manufacturing', 'Printer Systems', 'Additive Systems']
+
+tests\test_hardening.py:3103: AssertionError
+_ TestDescriptionFirstResearchRefinements.test_description_first_clear_mining_descriptor_beats_domain_unclear_when_governed_coverage_is_weak _
+
+self = <test_hardening.TestDescriptionFirstResearchRefinements testMethod=test_description_first_clear_mining_descriptor_beats_domain_unclear_when_governed_coverage_is_weak>
+
+    def test_description_first_clear_mining_descriptor_beats_domain_unclear_when_governed_coverage_is_weak(self):
+        profile = {
+            "company_name": "Frontier Tungsten",
+            "description": "Operates mine projects, mineral processing, and concentrate shipping tied to tungsten ore production.",
+            "sic_description": "Metals mining",
+        }
+    
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+    
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+>       self.assertIn(draft["possible_new_theme"], {"Tungsten Mining", "Critical Minerals Mining", "Metals & Mining"})
+E       AssertionError: 'Tungsten Mineral Processing' not found in {'Critical Minerals Mining', 'Tungsten Mining', 'Metals & Mining'}
+
+tests\test_hardening.py:3076: AssertionError
+_ TestDescriptionFirstResearchRefinements.test_description_first_named_printer_system_does_not_stay_product_name_only _
+
+self = <test_hardening.TestDescriptionFirstResearchRefinements testMethod=test_description_first_named_printer_system_does_not_stay_product_name_only>
+
+    def test_description_first_named_printer_system_does_not_stay_product_name_only(self):
+        profile = {
+            "company_name": "Forge Systems",
+            "description": "Markets the Falcon production system and Atlas printer systems for additive manufacturing and industrial 3D printing customers.",
+            "sic_description": "Manufacturing systems",
+        }
+    
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+    
+        self.assertEqual(draft["possible_new_theme"], "Additive Manufacturing")
+        self.assertFalse(str(draft["possible_new_theme"]).startswith("Falcon"))
+        self.assertFalse(str(draft["possible_new_theme"]).startswith("Atlas"))
+>       self.assertIn("Industrial Manufacturing Systems", draft["validation_debug"]["business_descriptors"])
+E       AssertionError: 'Industrial Manufacturing Systems' not found in ['Additive Manufacturing', 'Atlas Printer Systems', 'Forge Systems']
+
+tests\test_hardening.py:3117: AssertionError
+_ TestDescriptionFirstResearchRefinements.test_description_first_natural_gas_can_be_secondary_without_replacing_broader_upstream_ep _
+
+self = <test_hardening.TestDescriptionFirstResearchRefinements testMethod=test_description_first_natural_gas_can_be_secondary_without_replacing_broader_upstream_ep>
+
+    def test_description_first_natural_gas_can_be_secondary_without_replacing_broader_upstream_ep(self):
+        profile = {
+            "company_name": "Heritage Upstream",
+            "description": "Acquires and develops oil and natural gas assets and produces from operated wells, reserves, and working interests across onshore properties.",
+            "sic_description": "Oil and gas production",
+        }
+        catalog = [
+            self._theme(1, "Natural Gas", "Energy", "Natural gas production and gas-focused upstream operators.", ["EQT"]),
+        ]
+    
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+    
+>       self.assertEqual(draft["possible_new_theme"], "Oil & Gas Exploration & Production")
+E       AssertionError: 'Upstream Oil & Gas' != 'Oil & Gas Exploration & Production'
+E       - Upstream Oil & Gas
+E       + Oil & Gas Exploration & Production
+
+tests\test_hardening.py:2818: AssertionError
+_ TestDescriptionFirstResearchRefinements.test_description_first_unsupported_regional_buckets_do_not_survive_without_explicit_support _
+
+self = <test_hardening.TestDescriptionFirstResearchRefinements testMethod=test_description_first_unsupported_regional_buckets_do_not_survive_without_explicit_support>
+
+    def test_description_first_unsupported_regional_buckets_do_not_survive_without_explicit_support(self):
+        profile = {
+            "company_name": "General Upstream Energy",
+            "description": "Explores, develops, and produces oil and natural gas reserves from onshore acreage, operated wells, and producing properties.",
+            "sic_description": "Upstream oil and gas",
+        }
+        catalog = [
+            self._theme(1, "Permian Basin", "Energy", "Permian Basin producers and acreage operators.", ["FANG"]),
+            self._theme(2, "Appalachia Gas", "Energy", "Appalachia basin natural gas producers and gathering assets.", ["EQT"]),
+        ]
+    
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+    
+        self.assertFalse(draft["suggested_existing_themes"])
+>       self.assertEqual(draft["possible_new_theme"], "Oil & Gas Exploration & Production")
+E       AssertionError: 'Upstream Oil & Gas' != 'Oil & Gas Exploration & Production'
+E       - Upstream Oil & Gas
+E       + Oil & Gas Exploration & Production
+
+tests\test_hardening.py:2804: AssertionError
+_ TestSuggestionsWorkflow.test_list_suggestions_includes_ticker_membership_context _
+
+self = <test_hardening.TestSuggestionsWorkflow testMethod=test_list_suggestions_includes_ticker_membership_context>
+
+    def test_list_suggestions_includes_ticker_membership_context(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table theme_suggestions(
+                suggestion_id bigint primary key,
+                suggestion_type varchar,
+                status varchar,
+                source varchar,
+                rationale varchar,
+                priority varchar,
+                proposed_theme_name varchar,
+                proposed_ticker varchar,
+                existing_theme_id bigint,
+                proposed_target_theme_id bigint,
+                reviewed_at timestamp,
+                reviewer_notes varchar,
+                created_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Edge Computing', 'Emerging Tech', true)")
+        conn.execute("insert into themes values (2, 'Cloud Security', 'Technology - Software', true)")
+        conn.execute("insert into theme_membership values (1, 'CRWD')")
+        conn.execute("insert into theme_membership values (2, 'CRWD')")
+        conn.execute(
+            """
+            insert into theme_suggestions(
+                suggestion_id, suggestion_type, status, source, rationale, priority, proposed_ticker, created_at
+            ) values (1, 'review_theme', 'pending', 'manual', '', 'medium', 'CRWD', '2026-03-12 12:00:00')
+            """
+        )
+    
+>       out = list_suggestions(conn, status="pending")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:3338: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x000001D359904170>
+status = 'pending', suggestion_type = None, source = None, search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+_ TestScannerAuditProposedNewThemePersistence.test_approved_governed_review_row_still_allows_apply_approved _
+
+self = <test_hardening.TestScannerAuditProposedNewThemePersistence testMethod=test_approved_governed_review_row_still_allows_apply_approved>
+
+    def test_approved_governed_review_row_still_allows_apply_approved(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+    
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+            )
+        review_suggestion(conn, int(result["suggestion_id"]), "approved", "approve governed review")
+>       approved_queue = list_suggestions(conn, status="approved", suggestion_type="review_theme", source="scanner_audit")
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:3724: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x000001D3598751B0>
+status = 'approved', suggestion_type = 'review_theme', source = 'scanner_audit'
+search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+_ TestScannerAuditProposedNewThemePersistence.test_approved_new_theme_only_row_does_not_allow_apply_approved _
+
+self = <test_hardening.TestScannerAuditProposedNewThemePersistence testMethod=test_approved_new_theme_only_row_does_not_allow_apply_approved>
+
+    def test_approved_new_theme_only_row_does_not_allow_apply_approved(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+    
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+        review_suggestion(conn, int(result["suggestion_id"]), "approved", "approve new theme only")
+>       approved_queue = list_suggestions(conn, status="approved", suggestion_type="review_theme", source="scanner_audit")
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:3702: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x000001D354646230>
+status = 'approved', suggestion_type = 'review_theme', source = 'scanner_audit'
+search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+_ TestScannerAuditProposedNewThemePersistence.test_direct_apply_preserves_proposed_new_theme_context_while_only_applying_existing_themes _
+
+self = <test_hardening.TestScannerAuditProposedNewThemePersistence testMethod=test_direct_apply_preserves_proposed_new_theme_context_while_only_applying_existing_themes>
+
+    def test_direct_apply_preserves_proposed_new_theme_context_while_only_applying_existing_themes(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+    
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")), patch(
+            "src.fetch_data.run_targeted_current_snapshot_hydration",
+            return_value={"refreshed": ["AAOI"]},
+        ):
+            result = apply_scanner_candidate_selected_themes(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+    
+        membership = conn.execute("select theme_id, ticker from theme_membership").fetchall()
+        applied_row = conn.execute(
+            "select status, proposed_theme_name, proposed_theme_category, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+>       applied_queue = list_suggestions(conn, status="applied")
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:4043: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x000001D35479E030>
+status = 'applied', suggestion_type = None, source = None, search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+_ TestScannerAuditProposedNewThemePersistence.test_direct_apply_with_multiple_existing_themes_preserves_existing_governed_theme_persistence _
+
+self = <test_hardening.TestScannerAuditProposedNewThemePersistence testMethod=test_direct_apply_with_multiple_existing_themes_preserves_existing_governed_theme_persistence>
+
+    def test_direct_apply_with_multiple_existing_themes_preserves_existing_governed_theme_persistence(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+        conn.execute("insert into themes values (2, 'Optical Components', 'Technology', true)")
+    
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")), patch(
+            "src.fetch_data.run_targeted_current_snapshot_hydration",
+            return_value={"refreshed": ["AAOI"]},
+        ):
+            result = apply_scanner_candidate_selected_themes(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1, 2],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+    
+        membership = conn.execute(
+            "select theme_id, ticker from theme_membership where ticker = 'AAOI' order by theme_id"
+        ).fetchall()
+>       applied_queue = list_suggestions(conn, status="applied")
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:4214: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x000001D359AAAAF0>
+status = 'applied', suggestion_type = None, source = None, search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+_ TestScannerAuditProposedNewThemePersistence.test_manual_proposed_new_theme_persists_through_send_to_theme_review _
+
+self = <test_hardening.TestScannerAuditProposedNewThemePersistence testMethod=test_manual_proposed_new_theme_persists_through_send_to_theme_review>
+
+    def test_manual_proposed_new_theme_persists_through_send_to_theme_review(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+    
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+    
+        row = conn.execute(
+            "select proposed_theme_name, proposed_theme_category, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+>       queue = list_suggestions(conn, status="pending")
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:3581: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x000001D359989930>
+status = 'pending', suggestion_type = None, source = None, search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+_ TestScannerAuditProposedNewThemePersistence.test_promotion_succeeds_with_both_existing_theme_and_proposed_new_theme _
+
+self = <test_hardening.TestScannerAuditProposedNewThemePersistence testMethod=test_promotion_succeeds_with_both_existing_theme_and_proposed_new_theme>
+
+    def test_promotion_succeeds_with_both_existing_theme_and_proposed_new_theme(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+    
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+            )
+    
+>       queue = list_suggestions(conn, status="pending")
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:3920: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x000001D359B2A9B0>
+status = 'pending', suggestion_type = None, source = None, search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+_ TestScannerAuditProposedNewThemePersistence.test_promotion_succeeds_with_proposed_new_theme_and_category_without_existing_theme _
+
+self = <test_hardening.TestScannerAuditProposedNewThemePersistence testMethod=test_promotion_succeeds_with_proposed_new_theme_and_category_without_existing_theme>
+
+    def test_promotion_succeeds_with_proposed_new_theme_and_category_without_existing_theme(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+    
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+    
+>       queue = list_suggestions(conn, status="pending")
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:3623: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x000001D3547688B0>
+status = 'pending', suggestion_type = None, source = None, search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+_ TestScannerAuditProposedNewThemePersistence.test_queue_interaction_path_does_not_regress_filtered_queue_or_bulk_actions _
+
+self = <test_hardening.TestScannerAuditProposedNewThemePersistence testMethod=test_queue_interaction_path_does_not_regress_filtered_queue_or_bulk_actions>
+
+    def test_queue_interaction_path_does_not_regress_filtered_queue_or_bulk_actions(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+    
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            first = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics"},
+                custom_new_themes=["Data Center Optics"],
+            )
+        second_df = self._candidate_summary_df("LITE")
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=second_df):
+            second = promote_scanner_candidate_to_theme_review(
+                conn,
+                "LITE",
+                research_draft={"ticker": "LITE", "possible_new_theme": "Optical Interconnects"},
+                custom_new_themes=["Optical Interconnects"],
+            )
+    
+>       scanner_queue = list_suggestions(conn, status="pending", suggestion_type="review_theme", source="scanner_audit")
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:4174: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x000001D3547328F0>
+status = 'pending', suggestion_type = 'review_theme', source = 'scanner_audit'
+search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+_ TestScannerAuditProposedNewThemePersistence.test_review_and_recent_views_fall_back_to_saved_row_values_when_structured_context_is_missing _
+
+self = <test_hardening.TestScannerAuditProposedNewThemePersistence testMethod=test_review_and_recent_views_fall_back_to_saved_row_values_when_structured_context_is_missing>
+
+    def test_review_and_recent_views_fall_back_to_saved_row_values_when_structured_context_is_missing(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+    
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")), patch(
+            "src.fetch_data.run_targeted_current_snapshot_hydration",
+            return_value={"refreshed": ["AAOI"]},
+        ):
+            result = apply_scanner_candidate_selected_themes(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+    
+        conn.execute(
+            "update theme_suggestions set source_context_json = null where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        )
+>       applied_queue = list_suggestions(conn, status="applied")
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:4248: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x000001D359A83830>
+status = 'applied', suggestion_type = None, source = None, search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+_ TestScannerAuditProposedNewThemePersistence.test_selected_queue_row_details_surface_saved_proposed_theme_fields _
+
+self = <test_hardening.TestScannerAuditProposedNewThemePersistence testMethod=test_selected_queue_row_details_surface_saved_proposed_theme_fields>
+
+    def test_selected_queue_row_details_surface_saved_proposed_theme_fields(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+    
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+    
+>       queue = list_suggestions(conn, status="pending", suggestion_type="review_theme", source="scanner_audit")
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:3678: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x000001D35A00C730>
+status = 'pending', suggestion_type = 'review_theme', source = 'scanner_audit'
+search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+_ TestScannerAuditProposedNewThemePersistence.test_send_to_theme_review_with_proposed_additions_surfaces_same_saved_values_in_pending_and_approved_views _
+
+self = <test_hardening.TestScannerAuditProposedNewThemePersistence testMethod=test_send_to_theme_review_with_proposed_additions_surfaces_same_saved_values_in_pending_and_approved_views>
+
+    def test_send_to_theme_review_with_proposed_additions_surfaces_same_saved_values_in_pending_and_approved_views(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+    
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+    
+        saved_row = conn.execute(
+            "select proposed_theme_name, proposed_theme_category from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+>       pending = list_suggestions(conn, status="pending")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:3649: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <_duckdb.DuckDBPyConnection object at 0x000001D3546BE7B0>
+status = 'pending', suggestion_type = None, source = None, search_text = None
+
+    def list_suggestions(
+        conn,
+        status: str | None = None,
+        suggestion_type: str | None = None,
+        source: str | None = None,
+        search_text: str | None = None,
+    ) -> pd.DataFrame:
+        clauses, params = _build_filter_clauses(status, suggestion_type, source, search_text)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    
+        df = conn.execute(
+            f"""
+            WITH ticker_membership_context AS (
+                SELECT
+                    m.ticker,
+                    STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                    STRING_AGG(DISTINCT t.category, ', ' ORDER BY t.category) AS current_categories,
+                    STRING_AGG(
+                        t.name || ' (' || COALESCE(NULLIF(t.category, ''), 'Uncategorized') || ')',
+                        ', '
+                        ORDER BY t.name
+                    ) AS current_membership_context
+                FROM theme_membership m
+                JOIN themes t ON t.id = m.theme_id
+                GROUP BY m.ticker
+            )
+            SELECT
+                s.*,
+                t.name AS existing_theme_name,
+                tt.name AS target_theme_name,
+                tmc.current_theme_names,
+                tmc.current_categories,
+                tmc.current_membership_context
+            FROM theme_suggestions s
+            LEFT JOIN themes t ON t.id = s.existing_theme_id
+            LEFT JOIN themes tt ON tt.id = s.proposed_target_theme_id
+            LEFT JOIN ticker_membership_context tmc ON tmc.ticker = s.proposed_ticker
+            {where}
+            ORDER BY s.suggestion_id DESC
+            """,
+            params,
+        ).df()
+    
+        if df.empty:
+            return df
+    
+        df = df.copy()
+        if "source_context_json" not in df.columns:
+            df["source_context_json"] = None
+>       df["source_context"] = df["source_context_json"].apply(_parse_source_context)
+                                                               ^^^^^^^^^^^^^^^^^^^^^
+E       NameError: name '_parse_source_context' is not defined
+
+src\suggestions_service.py:455: NameError
+_ TestBootstrapAndHistoryFramework.test_init_db_bootstrap_after_file_delete_and_seed_idempotent _
+
+self = <test_hardening.TestBootstrapAndHistoryFramework testMethod=test_init_db_bootstrap_after_file_delete_and_seed_idempotent>
+
+    def test_init_db_bootstrap_after_file_delete_and_seed_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test_theme_dashboard.duckdb"
+            with patch("src.database.DB_PATH", db_path), patch("src.config.DB_PATH", db_path):
+                from src.database import get_conn, init_db
+    
+>               init_db()
+
+tests\test_hardening.py:4542: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src\database.py:542: in init_db
+    with get_bootstrap_conn() as conn:
+         ^^^^^^^^^^^^^^^^^^^^
+C:\Python314\Lib\contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+src\database.py:118: in get_bootstrap_conn
+    conn = _connect_with_retry(database_path_str())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+db_path = 'C:\\Users\\arobp\\AppData\\Local\\Temp\\tmplcy4abul\\test_theme_dashboard.duckdb'
+
+    def _connect_with_retry(db_path: str):
+        conn = None
+        last_exc: Exception | None = None
+        for attempt in range(DB_CONNECT_RETRY_ATTEMPTS):
+            try:
+>               conn = duckdb.connect(db_path)
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+E               _duckdb.IOException: IO Error: Cannot open file "c:\users\arobp\appdata\local\temp\tmplcy4abul\test_theme_dashboard.duckdb": Access is denied.
+
+src\database.py:73: IOException
+
+During handling of the above exception, another exception occurred:
+
+top = 'C:\\Users\\arobp\\AppData\\Local\\Temp\\tmplcy4abul', topdown = False
+onerror = <function _rmtree_unsafe.<locals>.onerror at 0x000001D359834040>
+followlinks = <object object at 0x000001D31BF80210>
+
+>   ???
+E   PermissionError: [WinError 5] Access is denied: 'C:\\Users\\arobp\\AppData\\Local\\Temp\\tmplcy4abul'
+
+<frozen os>:377: PermissionError
+
+During handling of the above exception, another exception occurred:
+
+self = <test_hardening.TestBootstrapAndHistoryFramework testMethod=test_init_db_bootstrap_after_file_delete_and_seed_idempotent>
+
+    def test_init_db_bootstrap_after_file_delete_and_seed_idempotent(self):
+>       with tempfile.TemporaryDirectory() as tmpdir:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:4537: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+C:\Python314\Lib\tempfile.py:971: in __exit__
+    self.cleanup()
+C:\Python314\Lib\tempfile.py:975: in cleanup
+    self._rmtree(self.name, ignore_errors=self._ignore_cleanup_errors)
+C:\Python314\Lib\tempfile.py:955: in _rmtree
+    _shutil.rmtree(name, onexc=onexc)
+C:\Python314\Lib\shutil.py:852: in rmtree
+    _rmtree_impl(path, dir_fd, onexc)
+C:\Python314\Lib\shutil.py:689: in _rmtree_unsafe
+    for dirpath, dirnames, filenames in results:
+                                        ^^^^^^^
+<frozen os>:413: in walk
+    ???
+C:\Python314\Lib\shutil.py:687: in onerror
+    onexc(os.scandir, err.filename, err)
+C:\Python314\Lib\tempfile.py:927: in onexc
+    _resetperms(path)
+C:\Python314\Lib\tempfile.py:287: in _resetperms
+    _dont_follow_symlinks(_os.chmod, path, 0o700)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+func = <built-in function chmod>
+path = 'C:\\Users\\arobp\\AppData\\Local\\Temp\\tmplcy4abul', args = (448,)
+
+    def _dont_follow_symlinks(func, path, *args):
+        # Pass follow_symlinks=False, unless not supported on this platform.
+        if func in _os.supports_follow_symlinks:
+>           func(path, *args, follow_symlinks=False)
+E           PermissionError: [WinError 5] Access is denied: 'C:\\Users\\arobp\\AppData\\Local\\Temp\\tmplcy4abul'
+
+C:\Python314\Lib\tempfile.py:276: PermissionError
+============================== warnings summary ===============================
+tests/test_hardening.py::TestBootstrapAndHistoryFramework::test_run_refresh_backfills_market_cap_from_latest_nonnull_snapshot
+tests/test_hardening.py::TestRefreshRunRecovery::test_stale_running_run_can_be_marked_interrupted_and_future_refresh_unblocks
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:35: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    stale_before = datetime.utcnow() - timedelta(minutes=stale_minutes)
+
+tests/test_hardening.py::TestBootstrapAndHistoryFramework::test_run_refresh_backfills_market_cap_from_latest_nonnull_snapshot
+tests/test_hardening.py::TestRefreshRunRecovery::test_stale_running_run_can_be_marked_interrupted_and_future_refresh_unblocks
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:141: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    [provider.name, datetime.utcnow(), len(clean_tickers), scope_type, scope_theme_name],
+
+tests/test_hardening.py::TestBootstrapAndHistoryFramework::test_run_refresh_backfills_market_cap_from_latest_nonnull_snapshot
+tests/test_hardening.py::TestRefreshRunRecovery::test_stale_running_run_can_be_marked_interrupted_and_future_refresh_unblocks
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:149: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started = datetime.utcnow()
+
+tests/test_hardening.py::TestBootstrapAndHistoryFramework::test_run_refresh_backfills_market_cap_from_latest_nonnull_snapshot
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:207: FutureWarning: The behavior of array concatenation with empty entries is deprecated. In a future version, this will no longer exclude empty items when determining the result dtype. To retain the old behavior, exclude the empty entries before the concat operation.
+    payload["market_cap"] = payload["market_cap"].combine_first(payload["market_cap_prev"])
+
+tests/test_hardening.py::TestRefreshRunRecovery::test_genuinely_active_run_still_blocks_concurrent_refresh
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:126: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    [provider_name, datetime.utcnow(), scope_type, scope_theme_name, f"Refresh blocked: run {run_id} is already running."],
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_hardening.py::TestDescriptionFirstResearchRefinements::test_description_first_additive_manufacturing_surfaces_coherent_missing_category
+FAILED tests/test_hardening.py::TestDescriptionFirstResearchRefinements::test_description_first_clear_mining_descriptor_beats_domain_unclear_when_governed_coverage_is_weak
+FAILED tests/test_hardening.py::TestDescriptionFirstResearchRefinements::test_description_first_named_printer_system_does_not_stay_product_name_only
+FAILED tests/test_hardening.py::TestDescriptionFirstResearchRefinements::test_description_first_natural_gas_can_be_secondary_without_replacing_broader_upstream_ep
+FAILED tests/test_hardening.py::TestDescriptionFirstResearchRefinements::test_description_first_unsupported_regional_buckets_do_not_survive_without_explicit_support
+FAILED tests/test_hardening.py::TestSuggestionsWorkflow::test_list_suggestions_includes_ticker_membership_context
+FAILED tests/test_hardening.py::TestScannerAuditProposedNewThemePersistence::test_approved_governed_review_row_still_allows_apply_approved
+FAILED tests/test_hardening.py::TestScannerAuditProposedNewThemePersistence::test_approved_new_theme_only_row_does_not_allow_apply_approved
+FAILED tests/test_hardening.py::TestScannerAuditProposedNewThemePersistence::test_direct_apply_preserves_proposed_new_theme_context_while_only_applying_existing_themes
+FAILED tests/test_hardening.py::TestScannerAuditProposedNewThemePersistence::test_direct_apply_with_multiple_existing_themes_preserves_existing_governed_theme_persistence
+FAILED tests/test_hardening.py::TestScannerAuditProposedNewThemePersistence::test_manual_proposed_new_theme_persists_through_send_to_theme_review
+FAILED tests/test_hardening.py::TestScannerAuditProposedNewThemePersistence::test_promotion_succeeds_with_both_existing_theme_and_proposed_new_theme
+FAILED tests/test_hardening.py::TestScannerAuditProposedNewThemePersistence::test_promotion_succeeds_with_proposed_new_theme_and_category_without_existing_theme
+FAILED tests/test_hardening.py::TestScannerAuditProposedNewThemePersistence::test_queue_interaction_path_does_not_regress_filtered_queue_or_bulk_actions
+FAILED tests/test_hardening.py::TestScannerAuditProposedNewThemePersistence::test_review_and_recent_views_fall_back_to_saved_row_values_when_structured_context_is_missing
+FAILED tests/test_hardening.py::TestScannerAuditProposedNewThemePersistence::test_selected_queue_row_details_surface_saved_proposed_theme_fields
+FAILED tests/test_hardening.py::TestScannerAuditProposedNewThemePersistence::test_send_to_theme_review_with_proposed_additions_surfaces_same_saved_values_in_pending_and_approved_views
+FAILED tests/test_hardening.py::TestBootstrapAndHistoryFramework::test_init_db_bootstrap_after_file_delete_and_seed_idempotent
+18 failed, 196 passed, 8 warnings in 65.06s (0:01:05)

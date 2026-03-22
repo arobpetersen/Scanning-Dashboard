@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from .config import TC2000_DEFAULT_SOURCE_LABEL, TC2000_FILE_GLOB, TC2000_IMPORT_DIR
+from .json_utils import parse_json_object
 
 TICKER_COLUMN_ALIASES = {"ticker", "symbol", "sym", "stock_symbol"}
 SCANNER_COLUMN_ALIASES = {"scanner", "scanner_name", "scan", "watchlist", "list_name"}
@@ -906,17 +907,6 @@ def _scanner_audit_rationale(row: pd.Series) -> str:
     )
 
 
-def _parse_source_context(raw_value: object) -> dict[str, object]:
-    text = str(raw_value or "").strip()
-    if not text:
-        return {}
-    try:
-        parsed = json.loads(text)
-    except Exception:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
 def _merge_priority(existing_priority: object, next_priority: str) -> str:
     current = str(existing_priority or "medium").strip().lower()
     ranking = {"low": 0, "medium": 1, "high": 2}
@@ -1018,7 +1008,7 @@ def promote_scanner_candidate_to_theme_review(
         [normalized],
     ).fetchone()
 
-    existing_context = _parse_source_context(existing[6]) if existing else {}
+    existing_context = parse_json_object(existing[6]) if existing else {}
     previous_note = str(existing_context.get("promotion_note") or "").strip()
     note_text = promotion_note.strip() or previous_note
     evidence = {
@@ -1062,8 +1052,6 @@ def promote_scanner_candidate_to_theme_review(
     custom_new_theme_labels = _normalize_new_theme_labels(custom_new_themes)
     proposed_new_theme_text = _joined_new_theme_labels(custom_new_theme_labels)
     proposed_new_theme_category_value = _normalize_new_theme_category(proposed_new_theme_category)
-    if not suggested_theme_entries and not custom_existing_entries and not custom_new_theme_labels:
-        raise ValueError("Select at least one existing theme or enter a proposed new theme to send to Theme Review.")
     context = dict(existing_context)
     context.update(
         {
@@ -1175,7 +1163,7 @@ def send_preserved_applied_scanner_audit_theme_to_review(conn, suggestion_id: in
     if str(status or "").strip().lower() != "applied":
         raise ValueError("This follow-up action is only available for applied scanner_audit review rows.")
 
-    context = _parse_source_context(source_context_json)
+    context = parse_json_object(source_context_json)
     research_draft = context.get("research_draft") if isinstance(context.get("research_draft"), dict) else None
     selected_suggested_theme_ids = [
         int(item.get("theme_id"))

@@ -44,7 +44,9 @@ def _scope_membership(conn, tickers: list[str] | None = None, theme_ids: list[in
 
     if tickers:
         placeholders = ", ".join(["?"] * len(tickers))
-        clauses.append(f"m.theme_id IN (SELECT DISTINCT theme_id FROM theme_membership WHERE ticker IN ({placeholders}))")
+        clauses.append(
+            f"m.theme_id IN (SELECT DISTINCT theme_id FROM theme_membership WHERE upper(trim(ticker)) IN ({placeholders}))"
+        )
         params.extend(tickers)
     if theme_ids:
         placeholders = ", ".join(["?"] * len(theme_ids))
@@ -59,7 +61,7 @@ def _scope_membership(conn, tickers: list[str] | None = None, theme_ids: list[in
             t.name AS theme,
             t.category,
             t.is_active,
-            m.ticker
+            upper(trim(m.ticker)) AS ticker
         FROM themes t
         JOIN theme_membership m ON m.theme_id = t.id
         {where}

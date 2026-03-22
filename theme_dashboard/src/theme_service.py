@@ -176,9 +176,15 @@ def delete_theme(conn, theme_id: int) -> None:
 
 def add_ticker(conn, theme_id: int, ticker: str, *, onboarding_source: str = "governed_add") -> dict[str, object]:
     normalized_ticker = _normalize_ticker(ticker)
-    existing_any = int(conn.execute("SELECT COUNT(*) FROM theme_membership WHERE ticker = ?", [normalized_ticker]).fetchone()[0] or 0)
+    existing_any = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM theme_membership WHERE upper(trim(ticker)) = ?",
+            [normalized_ticker],
+        ).fetchone()[0]
+        or 0
+    )
     existed_in_theme = conn.execute(
-        "SELECT 1 FROM theme_membership WHERE theme_id = ? AND ticker = ? LIMIT 1",
+        "SELECT 1 FROM theme_membership WHERE theme_id = ? AND upper(trim(ticker)) = ? LIMIT 1",
         [theme_id, normalized_ticker],
     ).fetchone()
     conn.execute(
@@ -208,7 +214,7 @@ def add_ticker(conn, theme_id: int, ticker: str, *, onboarding_source: str = "go
 def remove_ticker(conn, theme_id: int, ticker: str) -> dict[str, object]:
     normalized_ticker = _normalize_ticker(ticker)
     removed_row = conn.execute(
-        "DELETE FROM theme_membership WHERE theme_id = ? AND ticker = ? RETURNING ticker",
+        "DELETE FROM theme_membership WHERE theme_id = ? AND upper(trim(ticker)) = ? RETURNING ticker",
         [theme_id, normalized_ticker],
     ).fetchone()
     members = get_theme_members(conn, theme_id)
@@ -230,14 +236,14 @@ def replace_ticker_in_theme(conn, theme_id: int, current_ticker: str, replacemen
         raise ValueError("Replacement ticker must be different from the current ticker.")
 
     current_row = conn.execute(
-        "SELECT 1 FROM theme_membership WHERE theme_id = ? AND ticker = ? LIMIT 1",
+        "SELECT 1 FROM theme_membership WHERE theme_id = ? AND upper(trim(ticker)) = ? LIMIT 1",
         [theme_id, current],
     ).fetchone()
     if current_row is None:
         raise ValueError(f"{current} is not currently assigned to this theme.")
 
     replacement_row = conn.execute(
-        "SELECT 1 FROM theme_membership WHERE theme_id = ? AND ticker = ? LIMIT 1",
+        "SELECT 1 FROM theme_membership WHERE theme_id = ? AND upper(trim(ticker)) = ? LIMIT 1",
         [theme_id, replacement],
     ).fetchone()
     if replacement_row is not None:
@@ -291,7 +297,7 @@ def set_ticker_theme_assignments(conn, ticker: str, theme_ids: list[int]) -> dic
     current_theme_ids = {
         int(row[0])
         for row in conn.execute(
-            "SELECT theme_id FROM theme_membership WHERE ticker = ?",
+            "SELECT theme_id FROM theme_membership WHERE upper(trim(ticker)) = ?",
             [normalized_ticker],
         ).fetchall()
     }
@@ -308,7 +314,7 @@ def set_ticker_theme_assignments(conn, ticker: str, theme_ids: list[int]) -> dic
             )
         for theme_id in to_remove:
             conn.execute(
-                "DELETE FROM theme_membership WHERE theme_id = ? AND ticker = ?",
+                "DELETE FROM theme_membership WHERE theme_id = ? AND upper(trim(ticker)) = ?",
                 [theme_id, normalized_ticker],
             )
         if was_ungoverned and to_add:

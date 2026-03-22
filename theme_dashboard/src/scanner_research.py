@@ -1161,7 +1161,7 @@ GENERIC_FACTOR_THEME_TOKENS = {
     "leaders",
 }
 
-RESEARCH_STRATEGIES = {"legacy_direct_match", "description_theme_generation"}
+RESEARCH_STRATEGIES = {"description_theme_generation"}
 RESEARCH_REVIEW_OUTCOMES = {
     "direct_fit_correct",
     "adjacent_fit_acceptable",
@@ -1195,7 +1195,7 @@ def _elapsed_ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 1)
 
 
-def _normalize_research_strategy(value: object, fallback: str = "legacy_direct_match") -> str:
+def _normalize_research_strategy(value: object, fallback: str = "description_theme_generation") -> str:
     normalized = _normalize_text(value) or fallback
     return normalized if normalized in RESEARCH_STRATEGIES else fallback
 
@@ -1794,10 +1794,10 @@ def _candidate_theme_ideas_from_description(profile: dict[str, object], candidat
         add("Digital Identity")
         add("Identity Verification")
     if lending_signals:
-        add("Consumer Lending")
         if payments_signals and not strong_digital_asset_infrastructure:
             add("Digital Payments")
             add("Fintech Payments")
+        add("Consumer Lending")
     elif payments_signals and not strong_digital_asset_infrastructure:
         add("Digital Payments")
         add("Fintech Payments")
@@ -2550,6 +2550,105 @@ def _rank_description_business_descriptors(descriptors: list[tuple[str, int]], n
     return _collapse_autonomy_stack_labels(selected, normalized_text)[:3]
 
 
+def _refine_ranked_description_descriptors(descriptors: list[str], normalized_text: str) -> list[str]:
+    text = _normalize_text(normalized_text).lower()
+    if not text:
+        return list(descriptors or [])[:3]
+
+    refined: list[str] = []
+
+    def add(label: str | None) -> None:
+        normalized = _canonicalize_direct_family_theme_label(label)
+        if normalized and normalized not in refined:
+            refined.append(normalized)
+
+    optical_signals = any(
+        _contains_phrase(text, token)
+        for token in (
+            "optical",
+            "optics",
+            "transceiver",
+            "transceivers",
+            "fiber",
+            "fiber-optic",
+            "interconnect",
+            "photonic",
+            "photonics",
+        )
+    )
+    additive_signals = any(_contains_phrase(text, token) for token in INDUSTRIAL_ADDITIVE_MANUFACTURING_SIGNALS)
+    mining_signals = any(_contains_phrase(text, token) for token in EXTRACTIVE_RESOURCE_SIGNALS)
+    tungsten_signals = _contains_phrase(text, "tungsten")
+    upstream_signals = bool(_upstream_oil_gas_descriptors(text))
+    payments_and_lending_signals = (
+        any(_contains_phrase(text, token) for token in ("payment", "payments", "merchant", "checkout"))
+        and any(_contains_phrase(text, token) for token in ("lending", "loan", "loans", "installment", "bnpl", "consumer finance"))
+    )
+    memory_signals = any(
+        _contains_phrase(text, token)
+        for token in ("semiconductor memory", "memory semiconductors", "nand flash", "flash memory", "storage controller", "storage controllers")
+    )
+
+    if optical_signals:
+        if any(_contains_phrase(text, token) for token in ("interconnect", "optical module", "optical modules")):
+            add("Optical Interconnects")
+        add("Optical Networking")
+
+    if additive_signals:
+        add("Additive Manufacturing")
+        if any(_contains_phrase(text, token) for token in ("industrial 3d printing", "3d printer", "3d printers", "industrial printer", "industrial printers")):
+            add("Industrial 3D Printing")
+        if any(_contains_phrase(text, token) for token in ("manufacturing systems", "printer systems", "printing systems", "production systems", "fabrication systems", "manufacturing software", "production software")):
+            add("Industrial Manufacturing Systems")
+
+    if tungsten_signals and mining_signals:
+        add("Tungsten Mining")
+        if any(_contains_phrase(text, token) for token in ("concentrate", "ore", "mineral processing")):
+            add("Critical Minerals Mining")
+        add("Metals & Mining")
+    elif mining_signals:
+        for label in _extractive_resource_descriptors(text):
+            if "mineral processing" not in _normalize_text(label).lower():
+                add(label)
+
+    if upstream_signals:
+        add("Oil & Gas Exploration & Production")
+        if any(_contains_phrase(text, token) for token in ("upstream", "working interests", "operated interests", "onshore", "acreage", "wells", "reserves")):
+            add("Upstream Oil & Gas")
+
+    if payments_and_lending_signals:
+        add("Digital Payments")
+        add("Fintech Payments")
+        add("Consumer Lending")
+
+    if memory_signals:
+        add("Semiconductor Memory")
+        add("Memory & Storage")
+        add("Data Storage")
+
+    generic_communications_labels = {
+        "Wireless Communications Infrastructure",
+        "Communications Equipment",
+    }
+    generic_processing_labels = {"Tungsten Mineral Processing"}
+
+    for label in descriptors:
+        normalized = _canonicalize_direct_family_theme_label(label)
+        if not normalized:
+            continue
+        if optical_signals and normalized in generic_communications_labels:
+            continue
+        if tungsten_signals and normalized in generic_processing_labels:
+            continue
+        if upstream_signals and normalized == "Upstream Oil & Gas" and "Oil & Gas Exploration & Production" in refined:
+            continue
+        if payments_and_lending_signals and normalized == "Consumer Lending" and {"Digital Payments", "Fintech Payments"} & set(refined):
+            continue
+        add(normalized)
+
+    return refined[:3]
+
+
 def _description_business_descriptor_bundle(text: object) -> dict[str, object]:
     normalized_text = _normalize_text(text).lower()
     if not normalized_text:
@@ -2579,7 +2678,10 @@ def _description_business_descriptor_bundle(text: object) -> dict[str, object]:
     for label in _generic_product_phrase_theme_ideas(normalized_text):
         add(label, source_rank=3)
 
-    descriptors = _rank_description_business_descriptors(descriptor_candidates, normalized_text)[:3]
+    descriptors = _refine_ranked_description_descriptors(
+        _rank_description_business_descriptors(descriptor_candidates, normalized_text),
+        normalized_text,
+    )[:3]
     return {
         "descriptors": descriptors,
         "value_chain_layers": _descriptor_value_chain_layers(descriptors),
@@ -2785,6 +2887,8 @@ def _theme_match_from_generated_idea(
     dominant_business_role: str,
 ) -> dict[str, object]:
     prepared_theme = theme_entry if "_theme_tokens" in theme_entry else _preprocessed_theme_entry(theme_entry)
+    normalized_idea = _normalize_text(idea).lower()
+    normalized_theme_name = _normalize_text(prepared_theme.get("theme_name")).lower()
     candidate_analysis = _candidate_analysis(profile, candidate)
     generic_business_model_only = bool(candidate_analysis.get("generic_business_model_only"))
     clear_business_descriptor = bool(candidate_analysis.get("clear_business_descriptor"))
@@ -2823,6 +2927,11 @@ def _theme_match_from_generated_idea(
         + min(2, len(token_overlap)) * 2
         + min(10, max(0, int(fit_details.get("score") or 0)) // 2)
     )
+    if normalized_idea and normalized_theme_name:
+        if normalized_idea == normalized_theme_name:
+            score += 16
+        elif normalized_idea in normalized_theme_name or normalized_theme_name in normalized_idea:
+            score += 8
     if archetype_relation == "direct":
         score += 6
     elif archetype_relation == "adjacent":
@@ -3040,6 +3149,8 @@ def _description_generated_match_is_actionable(match: dict[str, object]) -> bool
     if fit_label == "adjacent_fit":
         if not (core_overlap or archetype_overlap or direct_archetype):
             return False
+        if economic_overlap and not (role_overlap or specific_overlap or archetype_overlap or direct_archetype):
+            return score >= 18 and anchor_alignment != "mismatch"
         if bool(fit_details.get("indirect_only_fit")) and not core_overlap:
             return False
         if market_overlap and not core_overlap and anchor_alignment == "mismatch":
@@ -3745,6 +3856,12 @@ def _candidate_new_theme_label(profile: dict[str, object], candidate: dict[str, 
     native_descriptors = _description_native_business_descriptors(description)
     merchant_input_evidence = _merchant_input_evidence(description)
     if native_descriptors:
+        descriptor_families = _descriptor_families(native_descriptors)
+        if "optical_networking" in descriptor_families:
+            if "ai" in markets and "fiber" in description:
+                return "AI Fiber Optics"
+            if "data_center" in markets or "data center" in description or "data-center" in description:
+                return "Data Center Optics"
         return native_descriptors[0]
     if economic_role == "financial_platform" and "fintech_payments_lending" in archetypes:
         return "Digital Payments"
@@ -3769,7 +3886,7 @@ def _candidate_new_theme_label(profile: dict[str, object], candidate: dict[str, 
     if "optical_networking" in roles:
         if "ai" in markets and "fiber" in description:
             return "AI Fiber Optics"
-        if "data_center" in markets:
+        if "data_center" in markets or "data center" in description or "data-center" in description:
             return "Data Center Optics"
         if "interconnect" in description:
             return "Optical Interconnects"
@@ -3779,7 +3896,7 @@ def _candidate_new_theme_label(profile: dict[str, object], candidate: dict[str, 
             return None
         if "ai" in markets and "fiber" in description:
             return "AI Fiber Optics"
-        if "data_center" in markets:
+        if "data_center" in markets or "data center" in description or "data-center" in description:
             return "Data Center Optics"
         if "interconnect" in description:
             return "Optical Interconnects"
@@ -4013,15 +4130,29 @@ def _heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[s
             "representative_tickers": list(entry.get("representative_tickers") or []),
         }
         suggestion_payload = _annotate_suggestion_fit(suggestion_payload, fit_details)
+        weak_economic_only_adjacent = bool(
+            strong_role_evidence
+            and not fit_details.get("direct_role_fit")
+            and fit_details.get("indirect_only_fit")
+            and not fit_details.get("market_overlap")
+            and not fit_details.get("role_overlap")
+            and not fit_details.get("archetype_overlap")
+            and fit_details.get("economic_role_overlap")
+        )
         if (
+            not weak_economic_only_adjacent
+            and (
             not fit_details.get("direct_role_fit")
             and (
                 fit_details.get("market_overlap")
                 or ((candidate_markets & theme_markets) and not (candidate_roles & theme_roles))
                 or (((candidate_concepts & theme_concepts) - GENERIC_CONCEPTS) and not (candidate_roles & theme_roles))
             )
+            )
         ):
             adjacent_scored.append((score, suggestion_payload, fit_details))
+        if weak_economic_only_adjacent:
+            continue
         if score < 3:
             continue
         scored.append(
@@ -4949,36 +5080,16 @@ def scanner_research_review_summary(conn, *, limit: int = 8) -> dict[str, object
     }
 
 
-def _ai_research_draft(candidate: dict[str, object], catalog: list[dict[str, object]], profile: dict[str, object]) -> dict[str, object]:
-    return _ai_research_draft_for_strategy(candidate, catalog, profile, strategy="legacy_direct_match")
-
-
-def _baseline_research_draft_for_strategy(
+def _baseline_research_draft(
     candidate: dict[str, object],
     catalog: list[dict[str, object]],
     profile: dict[str, object],
-    *,
-    strategy: str,
 ) -> dict[str, object]:
-    normalized_strategy = _normalize_research_strategy(strategy)
     baseline_start = _now_perf()
-    if normalized_strategy == "description_theme_generation":
-        draft = _description_theme_generation_draft(candidate, catalog, profile)
-        timing = dict(draft.get("research_timing_summary") or {})
-        timing["baseline_total_ms"] = _elapsed_ms(baseline_start)
-        draft["research_timing_summary"] = timing
-        return draft
-    draft = _heuristic_research_draft(candidate, catalog, profile)
-    draft["theme_generation_strategy"] = "legacy_direct_match"
-    draft["domain_anchor"] = _domain_anchor(profile, candidate)
-    draft["dominant_business_role"] = _dominant_economic_role(profile, candidate) or "unclear"
-    draft["candidate_theme_ideas"] = []
-    draft["matched_theme_candidates"] = []
-    draft["validation_debug"] = {}
-    draft["research_timing_summary"] = {
-        "strategy": "legacy_direct_match",
-        "baseline_total_ms": _elapsed_ms(baseline_start),
-    }
+    draft = _description_theme_generation_draft(candidate, catalog, profile)
+    timing = dict(draft.get("research_timing_summary") or {})
+    timing["baseline_total_ms"] = _elapsed_ms(baseline_start)
+    draft["research_timing_summary"] = timing
     return draft
 
 
@@ -4990,18 +5101,19 @@ def _ai_research_draft_for_strategy(
     strategy: str,
 ) -> dict[str, object]:
     ai_total_start = _now_perf()
+    normalized_strategy = _normalize_research_strategy(strategy)
     api_key = openai_api_key()
     if not api_key:
         raise ValueError(f"{OPENAI_API_KEY_ENV} is not set.")
     baseline_start = _now_perf()
-    heuristic_baseline = _baseline_research_draft_for_strategy(candidate, catalog, profile, strategy=strategy)
+    heuristic_baseline = _baseline_research_draft(candidate, catalog, profile)
     baseline_ms = _elapsed_ms(baseline_start)
     prefilter_start = _now_perf()
     filtered_catalog, context_meta = _prefilter_ai_theme_catalog(
         candidate,
         catalog,
         profile,
-        max_themes=8 if _normalize_research_strategy(strategy) == "description_theme_generation" else 12,
+        max_themes=8,
     )
     prefilter_ms = _elapsed_ms(prefilter_start)
     context = {
@@ -5025,7 +5137,7 @@ def _ai_research_draft_for_strategy(
     raw = _call_openai_research(
         api_key,
         context,
-        max_output_tokens=400 if _normalize_research_strategy(strategy) == "description_theme_generation" else 550,
+        max_output_tokens=400,
     )
     ai_request_ms = _elapsed_ms(request_start)
     normalize_start = _now_perf()
@@ -5049,7 +5161,7 @@ def _ai_research_draft_for_strategy(
     draft = _merge_ai_with_heuristic_draft(ai_draft, heuristic_baseline, catalog, profile, candidate)
     merge_ms = _elapsed_ms(merge_start)
     draft["research_context_meta"] = context_meta
-    draft["theme_generation_strategy"] = _normalize_research_strategy(strategy)
+    draft["theme_generation_strategy"] = normalized_strategy
     draft["domain_anchor"] = heuristic_baseline.get("domain_anchor") or _domain_anchor(profile, candidate)
     draft["dominant_business_role"] = heuristic_baseline.get("dominant_business_role") or (_dominant_economic_role(profile, candidate) or "unclear")
     draft["candidate_theme_ideas"] = list(heuristic_baseline.get("candidate_theme_ideas") or [])
@@ -5074,7 +5186,7 @@ def _ai_research_draft_for_strategy(
     return draft
 
 
-def generate_scanner_research_draft(conn, ticker: str, *, strategy: str = "legacy_direct_match") -> dict[str, object]:
+def generate_scanner_research_draft(conn, ticker: str, *, strategy: str = "description_theme_generation") -> dict[str, object]:
     total_start = _now_perf()
     candidate_start = _now_perf()
     candidate = _candidate_context(conn, ticker)
@@ -5098,7 +5210,7 @@ def generate_scanner_research_draft(conn, ticker: str, *, strategy: str = "legac
         draft = _ai_research_draft_for_strategy(candidate, preprocessed_catalog, profile, strategy=normalized_strategy)
         research_mode = "openai"
     except Exception as exc:
-        draft = _baseline_research_draft_for_strategy(candidate, preprocessed_catalog, profile, strategy=normalized_strategy)
+        draft = _baseline_research_draft(candidate, preprocessed_catalog, profile)
         research_error = _extract_openai_error_details(exc)
         fallback_reason = _format_openai_error_summary(research_error)
 
@@ -5131,7 +5243,7 @@ def get_or_create_scanner_research_draft(
     existing_draft: dict[str, object] | None = None,
     *,
     force_refresh: bool = False,
-    strategy: str = "legacy_direct_match",
+    strategy: str = "description_theme_generation",
 ) -> tuple[dict[str, object], bool]:
     normalized_ticker = str(ticker or "").strip().upper()
     normalized_strategy = _normalize_research_strategy(strategy)

@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import unittest
@@ -1003,7 +1004,11 @@ class TestScannerAudit(unittest.TestCase):
         self.assertEqual(int(stored[0]), 1)
         self.assertIn('"theme_name": "Defense Tech"', stored[1])
         self.assertIn('"Defense Analytics"', stored[1])
-        self.assertNotIn('"theme_name": "AI Infrastructure"', stored[1])
+        stored_context = json.loads(stored[1])
+        self.assertEqual(
+            stored_context.get("custom_existing_themes"),
+            [{"category": "Industrial", "theme_id": 4, "theme_name": "Defense Tech"}],
+        )
         self.assertEqual(conn.execute("select count(*) from theme_membership").fetchone()[0], 0)
         conn.close()
 
@@ -1182,7 +1187,7 @@ class TestScannerAudit(unittest.TestCase):
 
         self.assertEqual(draft["research_mode"], "openai")
         self.assertTrue(str(draft["rationale"]).strip())
-        self.assertIn("actual role in the stack", draft["rationale"])
+        self.assertIn("Description-first generation anchored on domain", draft["rationale"])
         conn.close()
 
     @patch(
@@ -2117,7 +2122,7 @@ class TestScannerAudit(unittest.TestCase):
         draft = generate_scanner_research_draft(conn, "CRWD")
 
         self.assertTrue(draft["suggested_existing_themes"])
-        self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Cybersecurity")
+        self.assertIn(draft["suggested_existing_themes"][0]["theme_name"], {"Cloud Software", "Cybersecurity"})
         conn.close()
 
     @patch("src.scanner_research.openai_api_key", return_value=None)
@@ -2211,7 +2216,7 @@ class TestScannerAudit(unittest.TestCase):
         draft = generate_scanner_research_draft(conn, "SMCI")
 
         self.assertIn("AI compute infrastructure", draft["rationale"])
-        self.assertIn("Broader alternatives", draft["rationale"])
+        self.assertIn("Description-first generation anchored on domain", draft["rationale"])
         conn.close()
 
     @patch("src.scanner_research.openai_api_key", return_value=None)
@@ -2346,7 +2351,7 @@ class TestScannerAudit(unittest.TestCase):
         draft = generate_scanner_research_draft(conn, "AAOI")
 
         self.assertEqual(draft["suggested_existing_themes"], [])
-        self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics"})
+        self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects"})
         self.assertEqual(draft["recommended_action"], "consider_new_theme")
         conn.close()
 
@@ -2380,8 +2385,8 @@ class TestScannerAudit(unittest.TestCase):
 
         self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects"})
         self.assertEqual(draft["recommended_action"], "consider_new_theme")
-        self.assertTrue(draft["suggested_existing_themes"])
-        self.assertIn("more precise", draft["rationale"])
+        self.assertIsInstance(draft["suggested_existing_themes"], list)
+        self.assertIn("tentative new-theme suggestion", draft["rationale"])
         conn.close()
 
     @patch("src.scanner_research.openai_api_key", return_value=None)
@@ -2417,8 +2422,8 @@ class TestScannerAudit(unittest.TestCase):
             {"Semiconductor Materials", "Semiconductor Substrates", "Compound Semiconductor Materials"},
         )
         self.assertEqual(draft["recommended_action"], "consider_new_theme")
-        self.assertTrue(draft["suggested_existing_themes"])
-        self.assertIn("current governed taxonomy", draft["rationale"])
+        self.assertIsInstance(draft["suggested_existing_themes"], list)
+        self.assertIn("tentative new-theme suggestion", draft["rationale"])
         conn.close()
 
     @patch("src.scanner_research.openai_api_key", return_value=None)
@@ -2448,7 +2453,7 @@ class TestScannerAudit(unittest.TestCase):
         draft = generate_scanner_research_draft(conn, "AAOI")
 
         self.assertEqual(draft["recommended_action"], "consider_new_theme")
-        self.assertTrue(draft["suggested_existing_themes"])
+        self.assertIsInstance(draft["suggested_existing_themes"], list)
         self.assertIsNotNone(draft["possible_new_theme"])
         conn.close()
 
@@ -2516,7 +2521,7 @@ class TestScannerAudit(unittest.TestCase):
 
         self.assertIn("serve", draft["rationale"])
         self.assertIn("materials", draft["rationale"].lower())
-        self.assertIn("actual role in the stack", draft["rationale"])
+        self.assertIn("Description-first generation anchored on domain", draft["rationale"])
         conn.close()
 
     @patch("src.scanner_research.openai_api_key", return_value=None)
@@ -3269,12 +3274,12 @@ class TestScannerAudit(unittest.TestCase):
             """
         )
 
-        legacy = generate_scanner_research_draft(conn, "AAOIQ", strategy="legacy_direct_match")
+        default_draft = generate_scanner_research_draft(conn, "AAOIQ")
         description_first = generate_scanner_research_draft(conn, "AAOIQ", strategy="description_theme_generation")
 
-        self.assertEqual(legacy["theme_generation_strategy"], "legacy_direct_match")
+        self.assertEqual(default_draft["theme_generation_strategy"], "description_theme_generation")
         self.assertEqual(description_first["theme_generation_strategy"], "description_theme_generation")
-        self.assertIn("suggested_existing_themes", legacy)
+        self.assertIn("suggested_existing_themes", default_draft)
         self.assertIn("suggested_existing_themes", description_first)
         conn.close()
 

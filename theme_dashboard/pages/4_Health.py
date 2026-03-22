@@ -97,7 +97,6 @@ try:
 except Exception as exc:
     stop_for_database_error(exc)
 db_token = db_cache_token()
-render_feedback_message(st.session_state, "governed_onboarding_feedback")
 
 ops_tab, themes_tab = st.tabs(["Operations", "Theme Health"])
 
@@ -107,6 +106,7 @@ with ops_tab:
     st.write(f"Default provider: `{DEFAULT_PROVIDER}`")
     st.write(f"Massive configured: `{bool(massive_api_key())}` ({MASSIVE_API_KEY_ENV})")
     st.write(f"Live sources: quote/profile=`{LIVE_QUOTE_PROFILE_SOURCE}`, historical=`{LIVE_HISTORICAL_SOURCE}`")
+    st.caption("Current dashboard views resolve against live-preferred data only; mock fallback is no longer used in app workflows.")
     st.write(f"Stale timeout: `{REFRESH_STALE_TIMEOUT_MINUTES}` minutes")
     if stale_marked:
         st.warning(f"Marked {stale_marked} stale run(s) failed on page load.")
@@ -196,6 +196,7 @@ with ops_tab:
         "Tracks post-addition history readiness for newly governed tickers. "
         "This does not run on advisory review actions; it starts only when governed membership is actually written."
     )
+    render_feedback_message(st.session_state, "governed_onboarding_feedback")
     if governed_onboarding.empty:
         st.success("No newly governed tickers are currently being tracked for onboarding.")
     else:
@@ -311,13 +312,23 @@ with ops_tab:
                 )
                 with get_conn() as conn:
                     result = run_governed_ticker_onboarding_theme_reconstruction(conn, selected_reconstruction_tickers)
+                reconstruction_result = result.get("reconstruction_result") or {}
+                snapshot_rows_written = int(reconstruction_result.get("snapshot_rows_written") or 0)
+                snapshot_rows_skipped = int(reconstruction_result.get("snapshot_rows_skipped") or 0)
+                failed_tickers = list(reconstruction_result.get("failed_tickers") or [])
+                detail_parts = [
+                    f"snapshot rows written={snapshot_rows_written}",
+                    f"skipped={snapshot_rows_skipped}",
+                ]
+                if failed_tickers:
+                    detail_parts.append("failed tickers=" + ", ".join(failed_tickers))
                 queue_feedback_message(
                     st.session_state,
                     "governed_onboarding_feedback",
                     level="success",
                     message=(
-                    f"Affected-theme reconstruction finished with status `{result.get('status')}` for "
-                    f"{len(result.get('tickers') or [])} ticker(s)."
+                        f"Affected-theme reconstruction finished with status `{result.get('status')}` for "
+                        f"{len(result.get('tickers') or [])} ticker(s): " + "; ".join(detail_parts) + "."
                     ),
                 )
                 clear_current_market_view_caches()

@@ -22,12 +22,16 @@ class RefreshBlockedError(RuntimeError):
         self.running_run_id = running_run_id
 
 
+class LiveProviderNotConfiguredError(RuntimeError):
+    """Raised when a live refresh is requested without required live credentials."""
+
+
 def get_provider(provider_name: str):
     if provider_name == "live":
         live = LiveProvider(include_reference=LIVE_FETCH_REFERENCE_ON_REFRESH)
         if live.is_configured:
             return live
-        return MockProvider()
+        raise LiveProviderNotConfiguredError("Live refresh requires MASSIVE_API_KEY; mock fallback is no longer enabled.")
     return MockProvider()
 
 

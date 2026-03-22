@@ -14,6 +14,7 @@ from .config import (
     CURRENT_RANKING_MIN_PRICE,
     CURRENT_RANKING_RETURN_CAP_PCT,
 )
+from .db_introspection import table_exists
 from .failure_classification import categorize_failure_message
 from .queries import preferred_ticker_snapshot_source
 
@@ -38,19 +39,6 @@ OVERRIDE_ACTIONS = {
     "watch": "Return to watch",
     "reset": "Reset history",
 }
-
-
-def _table_exists(conn, table_name: str) -> bool:
-    row = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM duckdb_tables()
-        WHERE schema_name = 'main'
-          AND table_name = ?
-        """,
-        [table_name],
-    ).fetchone()
-    return bool(row and int(row[0]) > 0)
 
 
 def _load_state(conn, ticker: str):
@@ -254,7 +242,7 @@ def _base_symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
     membership_join = ""
     membership_columns = "NULL AS current_theme_names, NULL AS current_categories,"
     membership_cte = ""
-    if _table_exists(conn, "theme_membership") and _table_exists(conn, "themes"):
+    if table_exists(conn, "theme_membership") and table_exists(conn, "themes"):
         membership_cte = """
         ,
         membership_context AS (
@@ -341,7 +329,7 @@ def _execute_df(conn, sql: str, params: list[object] | None = None) -> pd.DataFr
 
 
 def _calculation_outlier_candidates(conn) -> pd.DataFrame:
-    if not _table_exists(conn, "theme_membership") or not _table_exists(conn, "themes"):
+    if not table_exists(conn, "theme_membership") or not table_exists(conn, "themes"):
         return pd.DataFrame()
 
     preferred_source = preferred_ticker_snapshot_source(conn)

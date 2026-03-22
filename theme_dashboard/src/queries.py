@@ -7,6 +7,7 @@ from .config import (
     ENABLE_RECENT_TICKER_HISTORY_PREFERRED_RECONSTRUCTION,
     THEME_CONFIDENCE_FULL_COUNT,
 )
+from .db_introspection import table_exists, table_has_column
 
 
 RECENT_TICKER_HISTORY_DERIVED_CALENDAR_DAYS = 45
@@ -27,43 +28,18 @@ CORE_TABLES = [
 ]
 
 
-def _table_has_column(conn, table_name: str, column_name: str) -> bool:
-    row = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM duckdb_columns()
-        WHERE table_name = ?
-          AND column_name = ?
-        """,
-        [table_name, column_name],
-    ).fetchone()
-    return bool(row and int(row[0]) > 0)
-
-
-def _table_exists(conn, table_name: str) -> bool:
-    row = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM duckdb_tables()
-        WHERE table_name = ?
-        """,
-        [table_name],
-    ).fetchone()
-    return bool(row and int(row[0]) > 0)
-
-
 def _theme_snapshot_source_expr(conn) -> str:
-    if _table_has_column(conn, "theme_snapshots", "snapshot_source"):
+    if table_has_column(conn, "theme_snapshots", "snapshot_source"):
         return "snapshot_source"
-    if _table_has_column(conn, "refresh_runs", "provider"):
+    if table_has_column(conn, "refresh_runs", "provider"):
         return "COALESCE((SELECT provider FROM refresh_runs rr WHERE rr.run_id = theme_snapshots.run_id), 'live')"
     return "'live'"
 
 
 def _ticker_snapshot_source_expr(conn) -> str:
-    if _table_has_column(conn, "ticker_snapshots", "snapshot_source"):
+    if table_has_column(conn, "ticker_snapshots", "snapshot_source"):
         return "s.snapshot_source"
-    if _table_has_column(conn, "refresh_runs", "provider"):
+    if table_has_column(conn, "refresh_runs", "provider"):
         return "COALESCE(r.provider, 'live')"
     return "'live'"
 
@@ -79,8 +55,8 @@ def _historical_theme_snapshot_union(
     preferred_source = preferred_theme_snapshot_source(conn) or _preferred_ticker_history_source(conn)
     if not preferred_source:
         return pd.DataFrame()
-    positive_1w_expr = "ts.positive_1w_breadth_pct" if _table_has_column(conn, "theme_snapshots", "positive_1w_breadth_pct") else "NULL"
-    positive_3m_expr = "ts.positive_3m_breadth_pct" if _table_has_column(conn, "theme_snapshots", "positive_3m_breadth_pct") else "NULL"
+    positive_1w_expr = "ts.positive_1w_breadth_pct" if table_has_column(conn, "theme_snapshots", "positive_1w_breadth_pct") else "NULL"
+    positive_3m_expr = "ts.positive_3m_breadth_pct" if table_has_column(conn, "theme_snapshots", "positive_3m_breadth_pct") else "NULL"
     theme_filter_sql = "AND ts.theme_id = ?" if theme_id is not None else ""
     captured_date_filter_sql = "AND CAST(ts.snapshot_time AS DATE) >= ?" if start_date is not None else ""
     captured_params: list[object] = [preferred_source]
@@ -119,7 +95,7 @@ def _historical_theme_snapshot_union(
     ).df()
 
     reconstructed = pd.DataFrame()
-    if _table_exists(conn, "reconstructed_theme_snapshots"):
+    if table_exists(conn, "reconstructed_theme_snapshots"):
         reconstructed_theme_filter_sql = "AND r.theme_id = ?" if theme_id is not None else ""
         reconstructed_date_filter_sql = "AND r.snapshot_date >= ?" if start_date is not None else ""
         reconstructed_params: list[object] = [preferred_source]
@@ -232,7 +208,7 @@ def _resolve_recent_movement_boundaries(history: pd.DataFrame, lookback_days: in
 
 
 def _preferred_ticker_history_source(conn) -> str | None:
-    if not _table_exists(conn, "ticker_daily_history"):
+    if not table_exists(conn, "ticker_daily_history"):
         return None
     row = conn.execute(
         """
@@ -260,7 +236,7 @@ def _recent_ticker_history_theme_history(
     theme_id: int | None = None,
     start_date: object | None = None,
 ) -> pd.DataFrame:
-    if not market_data_source or not _table_exists(conn, "ticker_daily_history"):
+    if not market_data_source or not table_exists(conn, "ticker_daily_history"):
         return pd.DataFrame()
 
     latest_row = conn.execute(
@@ -442,7 +418,7 @@ def latest_completed_runs(conn, limit: int = 2) -> pd.DataFrame:
 
 
 def preferred_theme_snapshot_source(conn) -> str | None:
-    if _table_has_column(conn, "theme_snapshots", "snapshot_source"):
+    if table_has_column(conn, "theme_snapshots", "snapshot_source"):
         row = conn.execute(
             """
             SELECT snapshot_source
@@ -453,26 +429,26 @@ def preferred_theme_snapshot_source(conn) -> str | None:
             LIMIT 1
             """
         ).fetchone()
-    else:
-        if _table_has_column(conn, "refresh_runs", "provider"):
-            row = conn.execute(
-                """
-                SELECT COALESCE(r.provider, 'live')
-                FROM theme_snapshots ts
-                LEFT JOIN refresh_runs r ON r.run_id = ts.run_id
-                ORDER BY CASE WHEN COALESCE(r.provider, 'live') = 'live' THEN 0 ELSE 1 END,
-                         ts.snapshot_time DESC,
-                         ts.run_id DESC
-                LIMIT 1
-                """
-            ).fetchone()
-        else:
-            row = ("live",)
-    return str(row[0]) if row and row[0] else None
+        return str(row[0]) if row and row[0] else None
+    if table_has_column(conn, "refresh_runs", "provider"):
+        row = conn.execute(
+            """
+            SELECT COALESCE(r.provider, 'live')
+            FROM theme_snapshots ts
+            LEFT JOIN refresh_runs r ON r.run_id = ts.run_id
+            ORDER BY CASE WHEN COALESCE(r.provider, 'live') = 'live' THEN 0 ELSE 1 END,
+                     ts.snapshot_time DESC,
+                     ts.run_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return str(row[0]) if row and row[0] else None
+    row = conn.execute("SELECT 1 FROM theme_snapshots LIMIT 1").fetchone()
+    return "live" if row else None
 
 
 def preferred_ticker_snapshot_source(conn) -> str | None:
-    if _table_has_column(conn, "ticker_snapshots", "snapshot_source"):
+    if table_has_column(conn, "ticker_snapshots", "snapshot_source"):
         row = conn.execute(
             """
             SELECT s.snapshot_source
@@ -484,22 +460,30 @@ def preferred_ticker_snapshot_source(conn) -> str | None:
             LIMIT 1
             """
         ).fetchone()
-    else:
-        if _table_has_column(conn, "refresh_runs", "provider"):
-            row = conn.execute(
-                """
-                SELECT COALESCE(r.provider, 'live')
-                FROM ticker_snapshots s
-                JOIN refresh_runs r ON r.run_id = s.run_id
-                WHERE r.status IN ('success', 'partial')
-                ORDER BY CASE WHEN COALESCE(r.provider, 'live') = 'live' THEN 0 ELSE 1 END,
-                         s.run_id DESC
-                LIMIT 1
-                """
-            ).fetchone()
-        else:
-            row = ("live",)
-    return str(row[0]) if row and row[0] else None
+        return str(row[0]) if row and row[0] else None
+    if table_has_column(conn, "refresh_runs", "provider"):
+        row = conn.execute(
+            """
+            SELECT COALESCE(r.provider, 'live')
+            FROM ticker_snapshots s
+            JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE r.status IN ('success', 'partial')
+            ORDER BY CASE WHEN COALESCE(r.provider, 'live') = 'live' THEN 0 ELSE 1 END,
+                     s.run_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return str(row[0]) if row and row[0] else None
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM ticker_snapshots s
+        JOIN refresh_runs r ON r.run_id = s.run_id
+        WHERE r.status IN ('success', 'partial')
+        LIMIT 1
+        """
+    ).fetchone()
+    return "live" if row else None
 
 
 def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
@@ -509,9 +493,9 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
             "SELECT ticker FROM theme_membership WHERE theme_id = ? ORDER BY ticker", [theme_id]
         ).df()
 
-    if _table_has_column(conn, "ticker_snapshots", "snapshot_source"):
+    if table_has_column(conn, "ticker_snapshots", "snapshot_source"):
         ticker_source_expr = "s.snapshot_source"
-    elif _table_has_column(conn, "refresh_runs", "provider"):
+    elif table_has_column(conn, "refresh_runs", "provider"):
         ticker_source_expr = "COALESCE(r.provider, 'live')"
     else:
         ticker_source_expr = "'live'"
@@ -700,7 +684,7 @@ def historical_theme_boundary_debug(conn, theme_id: int, lookback_days: int) -> 
     if not captured.empty:
         candidate_frames.append(captured)
 
-    if _table_exists(conn, "reconstructed_theme_snapshots"):
+    if table_exists(conn, "reconstructed_theme_snapshots"):
         reconstructed = conn.execute(
             """
             SELECT
@@ -1243,7 +1227,7 @@ def themes_dimension(conn) -> pd.DataFrame:
 
 
 def historical_reconstruction_runs(conn, limit: int = 20) -> pd.DataFrame:
-    if not _table_exists(conn, "historical_reconstruction_runs"):
+    if not table_exists(conn, "historical_reconstruction_runs"):
         return pd.DataFrame()
     return conn.execute(
         """
@@ -1298,7 +1282,7 @@ def ticker_history_readiness(conn, target_trading_days: int = 30) -> pd.DataFram
     ).df()
     governed_count = int(len(governed_active_tickers))
 
-    if not _table_exists(conn, "ticker_daily_history"):
+    if not table_exists(conn, "ticker_daily_history"):
         return pd.DataFrame(
             [
                 {

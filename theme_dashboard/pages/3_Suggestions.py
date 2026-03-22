@@ -827,16 +827,7 @@ if active_suggestions_tab == "Scanner Audit":
 
             draft_store = st.session_state.setdefault("scanner_research_drafts", {})
             debug_store = st.session_state.setdefault("scanner_research_debug", {})
-            strategy_options = {
-                "Legacy direct match": "legacy_direct_match",
-                "Description-first generation": "description_theme_generation",
-            }
-            selected_strategy_label = st.selectbox(
-                "Research strategy",
-                options=list(strategy_options.keys()),
-                key=f"scanner_research_strategy_{selected_audit_ticker}",
-            )
-            selected_strategy = strategy_options[selected_strategy_label]
+            selected_strategy = "description_theme_generation"
             existing_draft = draft_store.get(selected_audit_ticker)
             if existing_draft:
                 debug_store[selected_audit_ticker] = build_scanner_research_debug_entry(

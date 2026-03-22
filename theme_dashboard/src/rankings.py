@@ -11,6 +11,7 @@ from .config import (
     CURRENT_RANKING_RETURN_CAP_PCT,
     THEME_CONFIDENCE_FULL_COUNT,
 )
+from .db_introspection import table_exists, table_has_column
 from .queries import latest_ticker_snapshots, preferred_theme_snapshot_source
 
 
@@ -87,7 +88,7 @@ def _compute_theme_metrics(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_theme_metrics_for_run(conn, run_id: int) -> pd.DataFrame:
-    status_join = "LEFT JOIN symbol_refresh_status sr ON sr.ticker = m.ticker" if _table_exists(conn, "symbol_refresh_status") else ""
+    status_join = "LEFT JOIN symbol_refresh_status sr ON sr.ticker = m.ticker" if table_exists(conn, "symbol_refresh_status") else ""
     calculation_eligible_expr = "COALESCE(sr.status, 'active') <> 'refresh_suppressed'" if status_join else "TRUE"
     raw = conn.execute(
         f"""
@@ -139,31 +140,6 @@ def persist_theme_snapshot_for_run(conn, run_id: int) -> None:
     conn.unregister("theme_snapshot_incoming")
 
 
-def _table_has_column(conn, table_name: str, column_name: str) -> bool:
-    row = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM duckdb_columns()
-        WHERE table_name = ?
-          AND column_name = ?
-        """,
-        [table_name, column_name],
-    ).fetchone()
-    return bool(row and int(row[0]) > 0)
-
-
-def _table_exists(conn, table_name: str) -> bool:
-    row = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM duckdb_tables()
-        WHERE table_name = ?
-        """,
-        [table_name],
-    ).fetchone()
-    return bool(row and int(row[0]) > 0)
-
-
 def _safe_numeric(series: pd.Series) -> pd.Series:
     values = pd.to_numeric(series, errors="coerce")
     return values.where(np.isfinite(values), np.nan)
@@ -197,9 +173,9 @@ def _load_current_ranking_constituents(conn) -> pd.DataFrame:
         if col not in latest.columns:
             latest[col] = np.nan
 
-    if _table_exists(conn, "symbol_refresh_status"):
+    if table_exists(conn, "symbol_refresh_status"):
         status_cols = ["ticker"]
-        if _table_has_column(conn, "symbol_refresh_status", "status"):
+        if table_has_column(conn, "symbol_refresh_status", "status"):
             status_cols.append("status")
         statuses = conn.execute(f"SELECT {', '.join(status_cols)} FROM symbol_refresh_status").df()
         if "status" not in statuses.columns:
