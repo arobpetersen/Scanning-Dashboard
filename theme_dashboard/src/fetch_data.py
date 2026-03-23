@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable
 
 import pandas as pd
@@ -26,6 +26,10 @@ class LiveProviderNotConfiguredError(RuntimeError):
     """Raised when a live refresh is requested without required live credentials."""
 
 
+def _utc_now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def get_provider(provider_name: str):
     if provider_name == "live":
         live = LiveProvider(include_reference=LIVE_FETCH_REFERENCE_ON_REFRESH)
@@ -36,7 +40,7 @@ def get_provider(provider_name: str):
 
 
 def mark_stale_running_runs(conn, stale_minutes: int = REFRESH_STALE_TIMEOUT_MINUTES) -> int:
-    stale_before = datetime.utcnow() - timedelta(minutes=stale_minutes)
+    stale_before = _utc_now_naive() - timedelta(minutes=stale_minutes)
     stale_count = conn.execute(
         "SELECT COUNT(*) FROM refresh_runs WHERE status = 'running' AND started_at < ?",
         [stale_before],
@@ -127,7 +131,7 @@ def run_refresh(
             INSERT INTO refresh_runs(provider, started_at, finished_at, status, ticker_count, scope_type, scope_theme_name, error_message)
             VALUES (?, ?, CURRENT_TIMESTAMP, 'blocked', 0, ?, ?, ?)
             """,
-            [provider_name, datetime.utcnow(), scope_type, scope_theme_name, f"Refresh blocked: run {run_id} is already running."],
+            [provider_name, _utc_now_naive(), scope_type, scope_theme_name, f"Refresh blocked: run {run_id} is already running."],
         )
         raise RefreshBlockedError(f"Refresh already running (run_id={run_id}).", run_id)
 
@@ -142,7 +146,7 @@ def run_refresh(
         VALUES (?, ?, 'running', ?, ?, ?)
         RETURNING run_id
         """,
-        [provider.name, datetime.utcnow(), len(clean_tickers), scope_type, scope_theme_name],
+        [provider.name, _utc_now_naive(), len(clean_tickers), scope_type, scope_theme_name],
     ).fetchone()[0]
 
     for ticker in clean_tickers:
@@ -150,7 +154,7 @@ def run_refresh(
 
     success_count = 0
     failure_count = 0
-    started = datetime.utcnow()
+    started = _utc_now_naive()
     consecutive_rate_limit_failures = 0
     early_stop_reason: str | None = None
     failed_tickers: set[str] = set()
@@ -208,7 +212,11 @@ def run_refresh(
                     ).df()
                     if not prior_caps.empty:
                         payload = payload.merge(prior_caps, on="ticker", how="left", suffixes=("", "_prev"))
-                        payload["market_cap"] = payload["market_cap"].combine_first(payload["market_cap_prev"])
+                        if "market_cap_prev" in payload.columns:
+                            payload["market_cap"] = payload["market_cap"].where(
+                                payload["market_cap"].notna(),
+                                payload["market_cap_prev"],
+                            )
                         payload = payload.drop(columns=["market_cap_prev"], errors="ignore")
                 payload["run_id"] = run_id
                 conn.register("incoming_snapshots", payload)
@@ -274,7 +282,7 @@ def run_refresh(
                         "completed": idx,
                         "success": success_count,
                         "failure": failure_count,
-                        "elapsed_seconds": (datetime.utcnow() - started).total_seconds(),
+                        "elapsed_seconds": (_utc_now_naive() - started).total_seconds(),
                     }
                 )
 

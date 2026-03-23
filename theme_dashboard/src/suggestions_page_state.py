@@ -79,6 +79,15 @@ def sync_suggested_theme_checkbox_state(
     return {theme_id: theme_id in normalized_selected for theme_id in normalized_suggested}
 
 
+def default_selected_existing_theme_ids(
+    suggested_ids: object,
+    *,
+    limit: int = 2,
+) -> list[int]:
+    normalized_suggested = normalize_theme_id_list(suggested_ids)
+    return normalized_suggested[: max(0, int(limit))]
+
+
 def normalize_possible_new_theme_input(value: object) -> str:
     return str(value or "").strip()
 

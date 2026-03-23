@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import streamlit as st
@@ -28,6 +29,21 @@ def get_canonical_multiselect_values(session_state, key: str) -> list[str]:
     return []
 
 
+def unique_normalized_select_options(values) -> list[str]:
+    seen: set[str] = set()
+    options: list[str] = []
+    for value in values or []:
+        label = str(value or "").strip()
+        if not label:
+            continue
+        normalized = label.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        options.append(label)
+    return options
+
+
 def sync_valid_multiselect_state(
     session_state,
     key: str,
@@ -48,6 +64,7 @@ def queue_feedback_message(session_state, key: str, *, level: str, message: str)
     session_state[key] = {
         "level": str(level or "info"),
         "message": str(message or ""),
+        "occurred_at": datetime.now(UTC).replace(tzinfo=None).isoformat(sep=" "),
     }
 
 
@@ -63,6 +80,9 @@ def render_feedback_message(session_state, key: str) -> None:
         st.warning(message)
     else:
         st.error(message)
+    occurred_at = str(feedback.get("occurred_at") or "").strip()
+    if occurred_at:
+        st.caption(f"Updated at `{occurred_at} UTC`")
 
 
 def clear_scanner_research_state(session_state) -> None:
@@ -74,6 +94,25 @@ def clear_scanner_research_state(session_state) -> None:
     session_state.pop("scanner_research_drafts", None)
     session_state.pop("scanner_research_debug", None)
     session_state.pop("scanner_research_feedback", None)
+
+
+def prepare_post_mutation_refresh(
+    session_state,
+    feedback_key: str,
+    *,
+    level: str,
+    message: str,
+    clear_market: bool = False,
+    clear_scanner_summary: bool = False,
+    clear_research: bool = False,
+) -> None:
+    if clear_research:
+        clear_scanner_research_state(session_state)
+    if clear_scanner_summary:
+        clear_scanner_candidate_summary_cache()
+    if clear_market:
+        clear_current_market_view_caches()
+    queue_feedback_message(session_state, feedback_key, level=level, message=message)
 
 
 def extract_selected_row(event) -> int | None:

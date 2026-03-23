@@ -1,6 +1,7 @@
 import streamlit as st
 
 import html
+import time
 
 from src.ai_proposals import generate_ai_suggestions, sanitize_context
 from src.config import (
@@ -33,6 +34,7 @@ from src.scanner_research_service import (
 from src.suggestions_page_state import (
     apply_generated_theme_idea_checkbox_selection,
     build_scanner_research_debug_entry,
+    default_selected_existing_theme_ids,
     finalize_possible_new_theme_category_state,
     finalize_possible_new_theme_state,
     has_meaningful_theme_review_selection,
@@ -49,13 +51,11 @@ from src.suggestions_page_state import (
     sync_suggested_theme_checkbox_state,
 )
 from src.streamlit_utils import (
-    clear_scanner_research_state,
-    clear_scanner_candidate_summary_cache,
-    clear_current_market_view_caches,
     db_cache_token,
     load_scanner_candidate_summary_cached,
     load_theme_health_overview_cached,
     load_theme_rankings_cached,
+    prepare_post_mutation_refresh,
     render_dataframe,
     reset_perf_timings,
     show_perf_summary,
@@ -103,6 +103,24 @@ if feedback:
         st.warning(message)
     else:
         st.error(message)
+
+
+def _render_inline_feedback(feedback: dict[str, object] | None) -> None:
+    if not feedback:
+        return
+    level = str(feedback.get("level") or feedback.get("status") or "info")
+    message = str(feedback.get("message") or "")
+    if level == "success":
+        st.success(message)
+    elif level in {"warning", "partial"}:
+        st.warning(message)
+    elif level == "no_files":
+        st.info(message)
+    else:
+        st.error(message)
+    occurred_at = str(feedback.get("occurred_at") or "").strip()
+    if occurred_at:
+        st.caption(f"Updated at `{occurred_at} UTC`")
 
 
 def _render_ticker_membership_context(row) -> None:
@@ -282,6 +300,7 @@ db_token = db_cache_token()
 
 theme_options = themes[["id", "name"]].to_dict("records")
 theme_option_by_id = {int(row["id"]): row for row in theme_options}
+all_theme_ids = {int(row["id"]) for row in theme_options}
 
 suggestions_tab_options = ["Manual", "Queue", "Rules", "AI", "Scanner Audit"]
 st.session_state["suggestions_active_tab"] = resolve_active_suggestions_tab(
@@ -487,14 +506,22 @@ if active_suggestions_tab == "Queue":
             )
             if st.button("Apply approved", key=f"queue_apply_{int(selected_queue_id)}"):
                 try:
+                    apply_started = time.perf_counter()
                     with get_conn() as conn:
                         apply_suggestion(conn, int(selected_queue_id), apply_notes)
-                    clear_scanner_research_state(st.session_state)
-                    clear_current_market_view_caches()
-                    st.session_state["suggestions_feedback"] = {
-                        "level": "success",
-                        "message": f"Suggestion #{int(selected_queue_id)} applied.{_queue_visibility_note(status_filter, 'applied')}",
-                    }
+                    prepare_post_mutation_refresh(
+                        st.session_state,
+                        "suggestions_feedback",
+                        level="success",
+                        message=(
+                            f"Suggestion #{int(selected_queue_id)} applied in "
+                            f"{time.perf_counter() - apply_started:.1f}s."
+                            f"{_queue_visibility_note(status_filter, 'applied')}"
+                        ),
+                        clear_market=True,
+                        clear_scanner_summary=True,
+                        clear_research=True,
+                    )
                 except Exception as exc:
                     st.session_state["suggestions_feedback"] = {
                         "level": "error",
@@ -517,15 +544,22 @@ if active_suggestions_tab == "Queue":
                 key=f"queue_fast_path_create_theme_{int(selected_queue_id)}",
             ):
                 try:
+                    fast_path_started = time.perf_counter()
                     with get_conn() as conn:
                         result = fast_path_create_governed_theme_and_assign_ticker(conn, int(selected_queue_id), fast_path_notes)
-                    clear_scanner_research_state(st.session_state)
-                    clear_scanner_candidate_summary_cache()
-                    clear_current_market_view_caches()
-                    st.session_state["suggestions_feedback"] = {
-                        "level": "success",
-                        "message": f"{result['message']}{_queue_visibility_note(status_filter, 'applied')}",
-                    }
+                    prepare_post_mutation_refresh(
+                        st.session_state,
+                        "suggestions_feedback",
+                        level="success",
+                        message=(
+                            f"{result['message']} Completed in "
+                            f"{time.perf_counter() - fast_path_started:.1f}s."
+                            f"{_queue_visibility_note(status_filter, 'applied')}"
+                        ),
+                        clear_market=True,
+                        clear_scanner_summary=True,
+                        clear_research=True,
+                    )
                 except Exception as exc:
                     st.session_state["suggestions_feedback"] = {
                         "level": "error",
@@ -623,19 +657,11 @@ if active_suggestions_tab == "Scanner Audit":
     sc3.metric("Default source label", TC2000_DEFAULT_SOURCE_LABEL)
 
     reset_feedback = st.session_state.pop("scanner_reset_feedback", None)
-    if reset_feedback:
-        st.warning(reset_feedback["message"])
+    _render_inline_feedback(reset_feedback)
 
     import_feedback = st.session_state.pop("scanner_import_feedback", None)
     if import_feedback:
-        if import_feedback["status"] == "success":
-            st.success(import_feedback["message"])
-        elif import_feedback["status"] == "partial":
-            st.warning(import_feedback["message"])
-        elif import_feedback["status"] == "no_files":
-            st.info(import_feedback["message"])
-        else:
-            st.error(import_feedback["message"])
+        _render_inline_feedback(import_feedback)
         file_results = import_feedback.get("file_results") or []
         if file_results:
             render_dataframe("scanner_import_file_results", file_results, width="stretch", hide_index=True)
@@ -643,7 +669,15 @@ if active_suggestions_tab == "Scanner Audit":
     if st.button("Import latest TC2000 exports", type="primary"):
         with get_conn() as conn:
             result = import_tc2000_exports(conn)
-        clear_scanner_candidate_summary_cache()
+        prepare_post_mutation_refresh(
+            st.session_state,
+            "scanner_import_feedback",
+            level=result.get("status") or "info",
+            message=result.get("message") or "",
+            clear_scanner_summary=True,
+            clear_research=True,
+        )
+        result["occurred_at"] = st.session_state.get("scanner_import_feedback", {}).get("occurred_at")
         st.session_state["scanner_import_feedback"] = result
         st.rerun()
 
@@ -658,7 +692,15 @@ if active_suggestions_tab == "Scanner Audit":
             if st.button("Confirm Reset Scanner Audit Data", type="secondary"):
                 with get_conn() as conn:
                     result = reset_scanner_audit_data(conn)
-                clear_scanner_candidate_summary_cache()
+                prepare_post_mutation_refresh(
+                    st.session_state,
+                    "scanner_reset_feedback",
+                    level=result.get("status") or "warning",
+                    message=result.get("message") or "",
+                    clear_scanner_summary=True,
+                    clear_research=True,
+                )
+                result["occurred_at"] = st.session_state.get("scanner_reset_feedback", {}).get("occurred_at")
                 st.session_state["scanner_reset_feedback"] = result
                 st.session_state["scanner_reset_armed"] = False
                 st.session_state.pop("scanner_import_feedback", None)
@@ -824,8 +866,13 @@ if active_suggestions_tab == "Scanner Audit":
                 try:
                     with get_conn() as conn:
                         result = set_scanner_candidate_review_state(conn, selected_audit_ticker, review_action, review_note)
-                    clear_scanner_candidate_summary_cache()
-                    st.success(f"Saved `{result['review_state']}` state for {result['ticker']}.")
+                    prepare_post_mutation_refresh(
+                        st.session_state,
+                        "scanner_research_feedback",
+                        level="success",
+                        message=f"Saved `{result['review_state']}` state for {result['ticker']}.",
+                        clear_scanner_summary=True,
+                    )
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Could not save candidate review state. {exc}")
@@ -865,6 +912,38 @@ if active_suggestions_tab == "Scanner Audit":
                         prior_debug=debug_store.get(selected_audit_ticker),
                         draft_source=draft_result.draft_source,
                     )
+                    selected_existing_key = f"scanner_selected_existing_theme_ids_{selected_audit_ticker}"
+                    custom_new_key = f"scanner_custom_new_{selected_audit_ticker}"
+                    custom_new_state_key = f"scanner_custom_new_state_{selected_audit_ticker}"
+                    custom_new_category_key = f"scanner_custom_new_category_{selected_audit_ticker}"
+                    custom_new_category_state_key = f"scanner_custom_new_category_state_{selected_audit_ticker}"
+                    draft_suggested_ids = [
+                        int(item.get("theme_id"))
+                        for item in list(draft.get("suggested_existing_themes") or [])
+                        if item.get("theme_id") not in (None, "")
+                    ]
+                    current_selected_existing = normalize_theme_id_list(
+                        st.session_state.get(selected_existing_key, []),
+                        set(all_theme_ids),
+                    )
+                    current_new_themes = split_possible_new_theme_ideas(st.session_state.get(custom_new_key))
+                    current_new_category = str(st.session_state.get(custom_new_category_key) or "").strip()
+                    if not current_selected_existing and not current_new_themes and not current_new_category:
+                        st.session_state[selected_existing_key] = default_selected_existing_theme_ids(draft_suggested_ids, limit=2)
+                        default_new_theme, default_new_theme_state = prepare_possible_new_theme_prefill(
+                            st.session_state.get(custom_new_key),
+                            draft.get("possible_new_theme"),
+                            st.session_state.get(custom_new_state_key),
+                        )
+                        st.session_state[custom_new_key] = default_new_theme
+                        st.session_state[custom_new_state_key] = default_new_theme_state
+                        default_category, default_category_state = prepare_possible_new_theme_category_prefill(
+                            st.session_state.get(custom_new_category_key),
+                            draft.get("possible_new_theme_category"),
+                            st.session_state.get(custom_new_category_state_key),
+                        )
+                        st.session_state[custom_new_category_key] = default_category
+                        st.session_state[custom_new_category_state_key] = default_category_state
                     st.session_state["scanner_research_feedback"] = {
                         "level": "success",
                         "message": draft_result.feedback_message,
@@ -1099,7 +1178,6 @@ if active_suggestions_tab == "Scanner Audit":
 
                 with main_review_col:
                     suggested_themes = existing_draft.get("suggested_existing_themes") or []
-                    all_theme_ids = {int(option["id"]) for option in theme_options}
                     selected_existing_key = f"scanner_selected_existing_theme_ids_{selected_audit_ticker}"
                     st.session_state[selected_existing_key] = normalize_theme_id_list(
                         st.session_state.get(selected_existing_key, []),
@@ -1154,6 +1232,35 @@ if active_suggestions_tab == "Scanner Audit":
                         selected_existing_theme_ids,
                         suggested_theme_ids,
                     )
+                    selection_c1, selection_c2 = st.columns(2)
+                    if selection_c1.button("Use Draft Defaults", key=f"use_scanner_draft_defaults_{selected_audit_ticker}"):
+                        st.session_state[selected_existing_key] = default_selected_existing_theme_ids(suggested_theme_ids, limit=2)
+                        st.session_state[custom_new_key] = prepare_possible_new_theme_prefill(
+                            st.session_state.get(custom_new_key),
+                            existing_draft.get("possible_new_theme"),
+                            None,
+                        )[0]
+                        st.session_state[custom_new_state_key] = {
+                            "auto_value": st.session_state.get(custom_new_key) or "",
+                            "user_edited": False,
+                        }
+                        st.session_state[custom_new_category_key] = prepare_possible_new_theme_category_prefill(
+                            st.session_state.get(custom_new_category_key),
+                            existing_draft.get("possible_new_theme_category"),
+                            None,
+                        )[0]
+                        st.session_state[custom_new_category_state_key] = {
+                            "auto_value": st.session_state.get(custom_new_category_key) or "",
+                            "user_edited": False,
+                        }
+                        st.rerun()
+                    if selection_c2.button("Clear Review Selections", key=f"clear_scanner_review_selections_{selected_audit_ticker}"):
+                        st.session_state[selected_existing_key] = []
+                        st.session_state[custom_new_key] = ""
+                        st.session_state[custom_new_state_key] = {"auto_value": "", "user_edited": False}
+                        st.session_state[custom_new_category_key] = ""
+                        st.session_state[custom_new_category_state_key] = {"auto_value": "", "user_edited": False}
+                        st.rerun()
                     custom_new_theme_raw = st.text_input(
                         "Proposed new theme ideas",
                         placeholder="Comma-separated new theme ideas",
@@ -1186,6 +1293,71 @@ if active_suggestions_tab == "Scanner Audit":
                             st.caption(f"Proposed category: `{proposed_new_theme_category}`")
                     else:
                         st.caption("No theme ideas selected yet. You can check suggested themes, search/select existing themes manually, or enter proposed new-theme labels.")
+                    review_ready_to_stage = has_meaningful_theme_review_selection(
+                        selected_existing_theme_ids,
+                        st.session_state.get(custom_new_key),
+                    )
+                    review_ready_to_apply = bool(selected_suggested_theme_ids or custom_existing_theme_ids)
+                    default_existing_ids = default_selected_existing_theme_ids(suggested_theme_ids, limit=2)
+                    missing_default_ids = [
+                        theme_id for theme_id in default_existing_ids if theme_id not in selected_existing_theme_ids
+                    ]
+                    added_nondefault_existing = [
+                        theme_id for theme_id in selected_existing_theme_ids if theme_id not in default_existing_ids
+                    ]
+                    draft_new_theme_ideas = split_possible_new_theme_ideas(existing_draft.get("possible_new_theme"))
+                    new_theme_matches_default = custom_new_themes == draft_new_theme_ideas
+                    category_matches_default = (proposed_new_theme_category or "").strip() == str(existing_draft.get("possible_new_theme_category") or "").strip()
+                    selected_existing_theme_names = (
+                        [item.get("theme_name") for item in suggested_themes if int(item.get("theme_id")) in selected_suggested_theme_ids]
+                        + [theme_option_by_id[theme_id]["name"] for theme_id in custom_existing_theme_ids if theme_id in theme_option_by_id]
+                    )
+                    st.markdown("**Current Review Selection**")
+                    st.caption(
+                        "Existing themes: "
+                        + (", ".join(selected_existing_theme_names) if selected_existing_theme_names else "none")
+                    )
+                    st.caption(
+                        "Proposed new themes: "
+                        + (", ".join(custom_new_themes) if custom_new_themes else "none")
+                        + " | Category: "
+                        + (f"`{proposed_new_theme_category}`" if proposed_new_theme_category else "none")
+                    )
+                    draft_diff_parts: list[str] = []
+                    if not missing_default_ids and not added_nondefault_existing and new_theme_matches_default and category_matches_default:
+                        draft_diff_parts.append("matches draft defaults")
+                    else:
+                        if missing_default_ids:
+                            draft_diff_parts.append(
+                                "missing draft themes="
+                                + ", ".join(theme_option_by_id[theme_id]["name"] for theme_id in missing_default_ids if theme_id in theme_option_by_id)
+                            )
+                        if added_nondefault_existing:
+                            draft_diff_parts.append(
+                                "added existing="
+                                + ", ".join(theme_option_by_id[theme_id]["name"] for theme_id in added_nondefault_existing if theme_id in theme_option_by_id)
+                            )
+                        if not new_theme_matches_default:
+                            draft_diff_parts.append("new-theme ideas edited")
+                        if not category_matches_default:
+                            draft_diff_parts.append("category edited")
+                    st.caption("Compared with draft defaults: " + "; ".join(draft_diff_parts))
+                    st.caption(
+                        "Review readiness: "
+                        f"stage=`{'ready' if review_ready_to_stage else 'not ready'}` | "
+                        f"apply=`{'ready' if review_ready_to_apply else 'not ready'}` | "
+                        f"existing_selected=`{len(selected_existing_theme_ids)}` "
+                        f"(suggested=`{len(selected_suggested_theme_ids)}`, custom=`{len(custom_existing_theme_ids)}`) | "
+                        f"new_themes=`{len(custom_new_themes)}`"
+                    )
+                    if review_ready_to_apply:
+                        st.caption(
+                            "If you apply now: governed membership will be written for the selected existing themes, and any proposed new themes/category will be preserved in the audit trail."
+                        )
+                    elif review_ready_to_stage:
+                        st.caption(
+                            "If you stage now: a Theme Review item will be created from the current selection, without changing governed membership."
+                        )
                     st.markdown("<div class='scanner-audit-main-divider'>", unsafe_allow_html=True)
                     promotion_note = st.text_area(
                         "Promotion note (optional)",
@@ -1272,7 +1444,7 @@ if active_suggestions_tab == "Scanner Audit":
                     if apply_now_disabled and existing_draft is not None:
                         st.caption("Direct apply requires at least one selected existing theme. Custom new-theme ideas can still be staged for later review.")
                     action_c1, action_c2 = st.columns(2)
-                    if action_c1.button("Send Selected Suggestions to Theme Review", disabled=send_disabled):
+                    if action_c1.button("Stage in Theme Review", disabled=send_disabled):
                         try:
                             with get_conn() as conn:
                                 result = promote_scanner_candidate_to_theme_review(
@@ -1289,8 +1461,9 @@ if active_suggestions_tab == "Scanner Audit":
                             st.caption("Selected ideas were sent to staged Theme Review only. No governed membership was changed.")
                         except Exception as exc:
                             st.error(f"Could not send candidate to Theme Review. {exc}")
-                    if action_c2.button("Apply Selected Themes & Start Onboarding", disabled=apply_now_disabled, type="primary"):
+                    if action_c2.button("Apply Existing Themes & Start Onboarding", disabled=apply_now_disabled, type="primary"):
                         try:
+                            apply_selected_started = time.perf_counter()
                             with get_conn() as conn:
                                 result = apply_scanner_candidate_selected_themes(
                                     conn,
@@ -1302,9 +1475,18 @@ if active_suggestions_tab == "Scanner Audit":
                                     custom_new_themes=custom_new_themes,
                                     proposed_new_theme_category=proposed_new_theme_category,
                                 )
-                            clear_scanner_research_state(st.session_state)
-                            clear_scanner_candidate_summary_cache()
-                            clear_current_market_view_caches()
+                            prepare_post_mutation_refresh(
+                                st.session_state,
+                                "scanner_research_feedback",
+                                level="success",
+                                message=(
+                                    f"{result['message']} Completed in "
+                                    f"{time.perf_counter() - apply_selected_started:.1f}s."
+                                ),
+                                clear_market=True,
+                                clear_scanner_summary=True,
+                                clear_research=True,
+                            )
                             onboarding_state = result.get("onboarding_state") or {}
                             theme_summary = ", ".join(result.get("applied_theme_names") or [])
                             st.success(str(result["message"]))

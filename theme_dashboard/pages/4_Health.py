@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import time
 
 import pandas as pd
 import streamlit as st
@@ -34,12 +35,11 @@ from src.queries import (
     theme_member_hygiene_context,
 )
 from src.streamlit_utils import (
-    clear_scanner_research_state,
-    clear_current_market_view_caches,
     db_cache_token,
     extract_selected_row,
     get_canonical_multiselect_values,
     load_theme_health_overview_cached,
+    prepare_post_mutation_refresh,
     queue_feedback_message,
     render_dataframe,
     render_feedback_message,
@@ -251,6 +251,7 @@ with ops_tab:
         ):
             try:
                 selected_onboarding_tickers = get_canonical_multiselect_values(st.session_state, "governed_onboarding_tickers")
+                started = time.perf_counter()
                 with get_conn() as conn:
                     result = run_governed_ticker_onboarding_backfill(conn, selected_onboarding_tickers)
                 updated_rows = result.get("updated_rows") or []
@@ -268,13 +269,14 @@ with ops_tab:
                         f"status=`{current_snapshot_result.get('status') or 'unknown'}` | "
                         f"run_id=`{current_snapshot_result.get('run_id') or 'n/a'}`."
                     )
-                queue_feedback_message(
+                prepare_post_mutation_refresh(
                     st.session_state,
                     "governed_onboarding_feedback",
                     level="success",
-                    message=feedback_message,
+                    message=feedback_message + f" Completed in {time.perf_counter() - started:.1f}s.",
+                    clear_market=True,
+                    clear_scanner_summary=True,
                 )
-                clear_current_market_view_caches()
                 st.rerun()
             except Exception as exc:
                 queue_feedback_message(
@@ -311,6 +313,7 @@ with ops_tab:
                     st.session_state,
                     "governed_onboarding_reconstruction_tickers",
                 )
+                started = time.perf_counter()
                 with get_conn() as conn:
                     result = run_governed_ticker_onboarding_theme_reconstruction(conn, selected_reconstruction_tickers)
                 reconstruction_result = result.get("reconstruction_result") or {}
@@ -323,16 +326,18 @@ with ops_tab:
                 ]
                 if failed_tickers:
                     detail_parts.append("failed tickers=" + ", ".join(failed_tickers))
-                queue_feedback_message(
+                prepare_post_mutation_refresh(
                     st.session_state,
                     "governed_onboarding_feedback",
                     level="success",
                     message=(
                         f"Affected-theme reconstruction finished with status `{result.get('status')}` for "
-                        f"{len(result.get('tickers') or [])} ticker(s): " + "; ".join(detail_parts) + "."
+                        f"{len(result.get('tickers') or [])} ticker(s): " + "; ".join(detail_parts) + ". "
+                        f"Completed in {time.perf_counter() - started:.1f}s."
                     ),
+                    clear_market=True,
+                    clear_scanner_summary=True,
                 )
-                clear_current_market_view_caches()
                 st.rerun()
             except Exception as exc:
                 queue_feedback_message(
@@ -904,13 +909,14 @@ with themes_tab:
                         with get_conn() as conn:
                             result = replace_ticker_in_theme(conn, theme_id, current_member, replacement_member)
                         st.session_state["health_selected_theme_id"] = theme_id
-                        clear_scanner_research_state(st.session_state)
-                        clear_current_market_view_caches()
-                        queue_feedback_message(
+                        prepare_post_mutation_refresh(
                             st.session_state,
                             "governed_onboarding_feedback",
                             level="success",
                             message=f"Removed {result['removed_ticker']} from {theme_name} and added {result['added_ticker']}.",
+                            clear_market=True,
+                            clear_scanner_summary=True,
+                            clear_research=True,
                         )
                         st.rerun()
                     except Exception as exc:
@@ -952,13 +958,14 @@ with themes_tab:
                         with get_conn() as conn:
                             update_theme(conn, theme_id, edit_name, edit_category, edit_active)
                         st.session_state["health_selected_theme_id"] = theme_id
-                        clear_scanner_research_state(st.session_state)
-                        clear_current_market_view_caches()
-                        queue_feedback_message(
+                        prepare_post_mutation_refresh(
                             st.session_state,
                             "governed_onboarding_feedback",
                             level="success",
                             message=f"Updated theme `{intended_name}`.",
+                            clear_market=True,
+                            clear_scanner_summary=True,
+                            clear_research=True,
                         )
                         st.rerun()
                     except Exception as exc:

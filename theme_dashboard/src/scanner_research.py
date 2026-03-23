@@ -145,9 +145,28 @@ ROLE_KEYWORDS: dict[str, set[str]] = {
         "process equipment",
     },
     "chip_designer": {"fabless", "asic", "gpu", "cpu", "processor", "chip designer"},
-    "server_systems": {"server", "servers", "rack-scale", "rack", "system", "systems", "accelerated computing"},
+    "server_systems": {"server", "servers", "rack-scale", "rack", "accelerated computing"},
     "power_generation": {"utility", "utilities", "generation", "electricity", "power plant", "nuclear plant", "renewable generation"},
-    "power_equipment": {"transformer", "inverter", "switchgear", "power conversion", "grid equipment", "electrical equipment"},
+    "power_equipment": {
+        "transformer",
+        "inverter",
+        "switchgear",
+        "power conversion",
+        "grid equipment",
+        "electrical equipment",
+        "energy storage",
+        "energy storage systems",
+        "battery storage",
+        "grid-scale battery",
+        "battery-based energy storage",
+        "grid services",
+        "grid optimization",
+        "storage optimization",
+        "power optimization",
+        "dispatch",
+        "storage assets",
+        "renewables optimization",
+    },
     "software_tooling": {"software", "platform", "tooling", "workflow", "analytics", "integration", "observability"},
     "robotics_automation": {"robotics", "automation", "autonomous", "factory", "industrial automation"},
     "devices_endpoints": {"device", "devices", "endpoint", "consumer electronics", "handset"},
@@ -654,10 +673,41 @@ DESCRIPTION_NATIVE_DESCRIPTOR_RULES = (
             "storage devices",
             "memory and storage products",
             "memory products",
-            "storage products",
         ),
         "layers": {"component", "device"},
         "family": "memory_storage",
+    },
+    {
+        "label": "Energy Storage Systems",
+        "phrases": (
+            "energy storage",
+            "energy storage system",
+            "energy storage systems",
+            "battery storage",
+            "battery storage systems",
+            "grid-scale battery storage",
+            "battery-based energy storage",
+            "stationary storage infrastructure",
+            "storage infrastructure",
+        ),
+        "layers": {"system", "platform"},
+        "family": "energy_storage_grid",
+    },
+    {
+        "label": "Grid & Storage Software",
+        "phrases": (
+            "energy storage software",
+            "storage optimization software",
+            "renewables optimization software",
+            "grid optimization software",
+            "power optimization software",
+            "dispatch software",
+            "grid services software",
+            "optimizes and manages renewables and storage assets",
+            "optimizes renewable generation, storage assets, and grid operations",
+        ),
+        "layers": {"platform", "software_application"},
+        "family": "energy_storage_grid",
     },
     {
         "label": "Software-Defined Radio",
@@ -842,6 +892,7 @@ MISSING_THEME_CATEGORY_BY_FAMILY = {
     "upstream_oil_gas": "Oil & Gas / Upstream",
     "connected_operations_iot": "Industrial Software / IoT",
     "extractive_resources": "Metals & Mining",
+    "energy_storage_grid": "Energy / Grid Infrastructure",
 }
 
 END_MARKET_DISPLAY_NAMES = {
@@ -1480,6 +1531,9 @@ def _candidate_roles(profile: dict[str, object], candidate: dict[str, object], *
     if "software_tooling" in roles and _contains_phrase(combined_text, "software-defined radio"):
         if not any(_contains_phrase(combined_text, term) for term in explicit_software_service_terms):
             roles.discard("software_tooling")
+    strong_server_context = {"server", "servers", "data center", "data-center", "datacenter", "rack-scale", "accelerated computing", "gpu cluster"}
+    if "server_systems" in roles and not any(_contains_phrase(combined_text, term) for term in strong_server_context):
+        roles.discard("server_systems")
     if "semiconductor_materials" in roles and not _merchant_input_evidence(combined_text):
         roles.discard("semiconductor_materials")
     return roles
@@ -1522,6 +1576,10 @@ def _theme_roles(theme_entry: dict[str, object]) -> set[str]:
         representative_roles = _representative_ticker_role_hints(list(theme_entry.get("representative_tickers") or []))
         if device_hits < 2 and not has_strong_device_term and "devices_endpoints" not in representative_roles:
             roles.discard("devices_endpoints")
+    strong_server_context = {"server", "servers", "data center", "data-center", "datacenter", "rack-scale", "accelerated computing", "gpu cluster"}
+    representative_roles = _representative_ticker_role_hints(list(theme_entry.get("representative_tickers") or []))
+    if "server_systems" in roles and not any(_contains_phrase(combined_text, term) for term in strong_server_context) and "server_systems" not in representative_roles:
+        roles.discard("server_systems")
     return roles
 
 
@@ -1647,16 +1705,20 @@ def _infer_economic_role_scores(
     *parts: object,
     roles: set[str] | None = None,
     archetypes: set[str] | None = None,
+    markets: set[str] | None = None,
 ) -> dict[str, int]:
     scores = _count_signal_hits(ECONOMIC_ROLE_KEYWORDS, *parts)
     roles = roles or set()
     archetypes = archetypes or set()
+    markets = markets or set()
     for role in roles:
         for economic_role in ROLE_ALIGNMENT.get(role, set()):
             scores[economic_role] = scores.get(economic_role, 0) + 3
     for archetype in archetypes:
         for economic_role in ARCHETYPE_ALIGNMENT.get(archetype, set()):
             scores[economic_role] = scores.get(economic_role, 0) + 2
+    if "energy_market" in markets and roles & {"power_equipment", "power_generation"}:
+        scores["infrastructure_operator"] = scores.get("infrastructure_operator", 0) + 7
     return {key: value for key, value in scores.items() if value > 0}
 
 
@@ -1672,6 +1734,7 @@ def _candidate_economic_roles(profile: dict[str, object], candidate: dict[str, o
         *parts,
         roles=_candidate_roles(profile, candidate, *extra_parts),
         archetypes=_candidate_archetypes(profile, candidate, *extra_parts),
+        markets=_candidate_end_markets(profile, candidate, *extra_parts),
     )
     return _ranked_archetypes(scores, threshold=3)
 
@@ -1687,6 +1750,7 @@ def _theme_economic_roles(theme_entry: dict[str, object]) -> set[str]:
         *parts,
         roles=_theme_roles(theme_entry),
         archetypes=_theme_archetypes(theme_entry),
+        markets=_theme_end_markets(theme_entry),
     )
     return _ranked_archetypes(scores, threshold=2)
 
@@ -1716,6 +1780,8 @@ def _domain_anchor(profile: dict[str, object], candidate: dict[str, object], *ex
         return "industrial software/iot"
     if "extractive_resources" in descriptor_families:
         return "mining/resources"
+    if "energy_storage_grid" in descriptor_families:
+        return "energy/grid infrastructure"
     archetypes = sorted(_candidate_archetypes(profile, candidate, *extra_parts))
     if archetypes:
         return DOMAIN_ANCHOR_LABELS.get(archetypes[0], archetypes[0].replace("_", "/"))
@@ -1726,6 +1792,8 @@ def _domain_anchor(profile: dict[str, object], candidate: dict[str, object], *ex
         return "fintech"
     if "semiconductor" in concepts:
         return "semiconductor/electronics"
+    if "energy" in concepts or "energy_market" in _candidate_end_markets(profile, candidate, *extra_parts):
+        return "energy/grid infrastructure"
     return "unclear"
 
 
@@ -2577,6 +2645,21 @@ def _refine_ranked_description_descriptors(descriptors: list[str], normalized_te
         _contains_phrase(text, token)
         for token in ("semiconductor memory", "memory semiconductors", "nand flash", "flash memory", "storage controller", "storage controllers")
     )
+    energy_storage_signals = any(
+        _contains_phrase(text, token)
+        for token in (
+            "energy storage",
+            "battery storage",
+            "grid-scale battery",
+            "battery-based energy storage",
+            "storage assets",
+            "grid services",
+            "renewables optimization",
+            "grid optimization",
+            "power optimization",
+            "dispatch",
+        )
+    )
 
     if optical_signals:
         if any(_contains_phrase(text, token) for token in ("interconnect", "optical module", "optical modules")):
@@ -2614,6 +2697,10 @@ def _refine_ranked_description_descriptors(descriptors: list[str], normalized_te
         add("Semiconductor Memory")
         add("Memory & Storage")
         add("Data Storage")
+    if energy_storage_signals:
+        add("Energy Storage Systems")
+        if any(_contains_phrase(text, token) for token in ("software", "platform", "optimization", "dispatch", "grid services")):
+            add("Grid & Storage Software")
 
     generic_communications_labels = {
         "Wireless Communications Infrastructure",
@@ -2706,7 +2793,19 @@ def _descriptor_families(descriptors: list[str]) -> set[str]:
     if any("digital asset" in _normalize_text(descriptor).lower() or "crypto" in _normalize_text(descriptor).lower() for descriptor in descriptors):
         families.add("digital_asset_infrastructure")
     if any("memory" in _normalize_text(descriptor).lower() or "storage" in _normalize_text(descriptor).lower() for descriptor in descriptors):
-        families.add("memory_storage")
+        if any(
+            "memory" in _normalize_text(descriptor).lower()
+            or "semiconductor" in _normalize_text(descriptor).lower()
+            or "data storage" in _normalize_text(descriptor).lower()
+            for descriptor in descriptors
+        ):
+            families.add("memory_storage")
+    if any(
+        "energy storage" in _normalize_text(descriptor).lower()
+        or "grid & storage" in _normalize_text(descriptor).lower()
+        for descriptor in descriptors
+    ):
+        families.add("energy_storage_grid")
     if any("radio" in _normalize_text(descriptor).lower() or "wireless" in _normalize_text(descriptor).lower() for descriptor in descriptors):
         families.add("wireless_systems")
     if any("autonomous" in _normalize_text(descriptor).lower() or "drone" in _normalize_text(descriptor).lower() or "unmanned" in _normalize_text(descriptor).lower() for descriptor in descriptors):
@@ -2966,8 +3065,8 @@ def _theme_match_from_generated_idea(
         "autonomous_systems" in descriptor_families
         and bool({"component", "module"} & value_chain_layers)
         and _theme_looks_autonomous_component_drift(prepared_theme)
-        and not role_overlap
-        and not specific_overlap
+        and set(role_overlap) <= {"robotics_automation"}
+        and set(specific_overlap) <= {"robotics"}
         and not economic_role_overlap
     )
     if autonomous_component_drift_overlap:

@@ -10,6 +10,7 @@ from src.scanner_research_cache import _DESCRIPTION_ANALYSIS_CACHE, _PROFILE_CAC
 from src.scanner_research_analysis import (
     build_candidate_analysis,
     candidate_analysis,
+    prefilter_ai_theme_catalog,
     preprocessed_theme_entry,
 )
 from src.scanner_research_heuristics import (
@@ -33,7 +34,7 @@ from src.scanner_research_service import (
     persist_research_review,
     research_status_metadata,
 )
-from src.streamlit_utils import clear_scanner_research_state
+from src.streamlit_utils import clear_scanner_research_state, prepare_post_mutation_refresh, queue_feedback_message
 
 
 class TestResearchDraftContract(unittest.TestCase):
@@ -262,6 +263,61 @@ class TestExtractedResearchHelpers(unittest.TestCase):
         rebuilt = build_candidate_analysis(profile, candidate)
         self.assertEqual(first["dominant_economic_role"], rebuilt["dominant_economic_role"])
 
+    def test_fluence_style_candidate_analysis_stays_in_energy_storage_lane(self):
+        profile = {
+            "company_name": "Fluence Energy",
+            "description": (
+                "Provides energy storage products and services, recurring operations and maintenance services, "
+                "and digital applications for renewables and storage applications. Offers grid-scale battery-based "
+                "energy storage products and a software platform that optimizes and manages renewables and storage assets."
+            ),
+            "sic_description": "Electrical industrial apparatus",
+        }
+        candidate = {
+            "ticker": "FLNC",
+            "recommendation_reason": "Energy storage systems, grid-scale battery storage, renewables optimization software, storage services and infrastructure.",
+        }
+
+        analysis = build_candidate_analysis(profile, candidate)
+
+        self.assertNotIn("server_systems", set(analysis.get("candidate_roles") or set()))
+        self.assertNotIn("Memory & Storage", list(analysis.get("business_descriptors") or []))
+        self.assertIn("energy_market", set(analysis.get("candidate_markets") or set()))
+        self.assertIn(analysis.get("dominant_economic_role"), {"infrastructure_operator", "component_supplier"})
+
+    def test_prefilter_excludes_luxury_and_geography_noise_when_energy_storage_matches_exist(self):
+        profile = {
+            "company_name": "Fluence Energy",
+            "description": (
+                "Provides grid-scale battery-based energy storage products and a software platform that optimizes "
+                "renewables, storage assets, dispatch, and grid operations."
+            ),
+            "sic_description": "Electrical industrial apparatus",
+        }
+        candidate = {
+            "ticker": "FLNC",
+            "recommendation_reason": "Energy storage systems, battery storage, grid services, renewables optimization software.",
+        }
+        catalog = [
+            {"theme_id": 1, "theme_name": "Energy Storage", "category": "Energy", "theme_description": "Grid-scale battery storage systems and energy storage software.", "representative_tickers": ["FLNC"]},
+            {"theme_id": 2, "theme_name": "Grid Infrastructure", "category": "Energy", "theme_description": "Grid modernization, power infrastructure, and electrical grid equipment.", "representative_tickers": ["VRT"]},
+            {"theme_id": 3, "theme_name": "Renewables Software", "category": "Energy", "theme_description": "Software that optimizes renewable generation, storage assets, and grid operations.", "representative_tickers": ["NXT"]},
+            {"theme_id": 4, "theme_name": "Japan", "category": "Geography", "theme_description": "Japan macro and equities exposure across sectors.", "representative_tickers": ["EWJ"]},
+            {"theme_id": 5, "theme_name": "Europe - Luxury", "category": "Consumer", "theme_description": "European luxury brands and premium fashion houses.", "representative_tickers": ["LVMUY"]},
+            {"theme_id": 6, "theme_name": "Luxury & Apparel", "category": "Consumer", "theme_description": "Luxury apparel, fashion, and upscale retail brands.", "representative_tickers": ["CPRI"]},
+        ]
+
+        filtered, meta = prefilter_ai_theme_catalog(candidate, catalog, profile, max_themes=8)
+        filtered_names = [item["theme_name"] for item in filtered]
+
+        self.assertIn("Energy Storage", filtered_names)
+        self.assertIn("Grid Infrastructure", filtered_names)
+        self.assertIn("Renewables Software", filtered_names)
+        self.assertNotIn("Japan", filtered_names)
+        self.assertNotIn("Europe - Luxury", filtered_names)
+        self.assertNotIn("Luxury & Apparel", filtered_names)
+        self.assertEqual(meta["weak_backfill_count"], 0)
+
     def test_theme_catalog_context_and_profile_cache_helpers_preserve_current_behavior(self):
         conn = duckdb.connect(":memory:")
         conn.execute(SCHEMA_SQL)
@@ -358,6 +414,50 @@ class TestExtractedResearchHelpers(unittest.TestCase):
         self.assertEqual(merged["possible_new_theme"], "Optical Networking")
         self.assertEqual(merged["possible_new_theme_category"], "Systems & Infrastructure")
 
+    def test_merge_drops_luxury_and_geography_ai_survivors_when_energy_storage_evidence_is_strong(self):
+        catalog = [
+            {"theme_id": 1, "theme_name": "Japan", "category": "Geography", "theme_description": "Japan macro and equities exposure across sectors.", "representative_tickers": ["EWJ"]},
+            {"theme_id": 2, "theme_name": "Europe - Luxury", "category": "Consumer", "theme_description": "European luxury brands and premium fashion houses.", "representative_tickers": ["LVMUY"]},
+            {"theme_id": 3, "theme_name": "Luxury & Apparel", "category": "Consumer", "theme_description": "Luxury apparel, fashion, and upscale retail brands.", "representative_tickers": ["CPRI"]},
+            {"theme_id": 4, "theme_name": "Energy Storage", "category": "Energy", "theme_description": "Grid-scale battery storage systems and energy storage software.", "representative_tickers": ["FLNC"]},
+        ]
+        heuristic = {
+            "company_name": "Fluence Energy",
+            "short_company_description": "Grid-scale battery energy storage systems and storage optimization software.",
+            "suggested_existing_themes": [{"theme_id": 4, "theme_name": "Energy Storage", "category": "Energy", "why_it_might_fit": "Direct energy storage fit.", "fit_label": "direct_fit"}],
+            "recommended_action": "add_to_existing_theme_review",
+            "confidence": "medium",
+            "rationale": "Energy storage is the grounded fit.",
+        }
+        ai_draft = {
+            "rationale": "Possible themes include Japan and Europe - Luxury.",
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "Japan", "category": "Geography", "why_it_might_fit": "Broad market exposure.", "fit_label": "broad_fit"},
+                {"theme_id": 2, "theme_name": "Europe - Luxury", "category": "Consumer", "why_it_might_fit": "Premium consumer adjacency.", "fit_label": "broad_fit"},
+                {"theme_id": 3, "theme_name": "Luxury & Apparel", "category": "Consumer", "why_it_might_fit": "Retail adjacency.", "fit_label": "broad_fit"},
+                {"theme_id": 4, "theme_name": "Energy Storage", "category": "Energy", "why_it_might_fit": "Grid-scale battery storage systems.", "fit_label": "direct_fit"},
+            ],
+            "recommended_action": "add_to_existing_theme_review",
+            "confidence": "high",
+        }
+
+        merged = merge_ai_with_heuristic_draft(
+            ai_draft,
+            heuristic,
+            catalog,
+            {
+                "company_name": "Fluence Energy",
+                "description": "Provides energy storage products, grid-scale battery systems, renewables optimization software, dispatch, and grid services.",
+                "sic_description": "Electrical industrial apparatus",
+            },
+            {
+                "ticker": "FLNC",
+                "recommendation_reason": "Energy storage systems, battery storage, renewables optimization software, grid services.",
+            },
+        )
+
+        self.assertEqual([item["theme_name"] for item in merged["suggested_existing_themes"]], ["Energy Storage"])
+
     def test_ai_research_draft_for_strategy_keeps_contract_fields_with_sparse_ai_response(self):
         candidate = {"ticker": "SMCI"}
         catalog = [{"theme_id": 1, "theme_name": "AI - Infrastructure", "category": "AI", "representative_tickers": ["NVDA"]}]
@@ -441,3 +541,37 @@ class TestExtractedResearchHelpers(unittest.TestCase):
         self.assertNotIn("scanner_research_debug", session_state)
         self.assertNotIn("scanner_research_feedback", session_state)
         self.assertTrue(session_state["keep_me"])
+
+    def test_prepare_post_mutation_refresh_clears_requested_state_and_queues_timestamped_feedback(self):
+        _PROFILE_CACHE["NVDA"] = {"company_name": "NVIDIA"}
+        session_state = {"scanner_research_drafts": {"NVDA": {}}, "keep_me": True}
+
+        with (
+            patch("src.streamlit_utils.clear_scanner_candidate_summary_cache") as clear_summary,
+            patch("src.streamlit_utils.clear_current_market_view_caches") as clear_market,
+        ):
+            prepare_post_mutation_refresh(
+                session_state,
+                "feedback_key",
+                level="success",
+                message="Saved.",
+                clear_market=True,
+                clear_scanner_summary=True,
+                clear_research=True,
+            )
+
+        clear_summary.assert_called_once()
+        clear_market.assert_called_once()
+        self.assertEqual(_PROFILE_CACHE, {})
+        self.assertNotIn("scanner_research_drafts", session_state)
+        self.assertEqual(session_state["feedback_key"]["message"], "Saved.")
+        self.assertIn("occurred_at", session_state["feedback_key"])
+
+    def test_queue_feedback_message_adds_occurrence_timestamp(self):
+        session_state = {}
+
+        queue_feedback_message(session_state, "feedback_key", level="success", message="Saved.")
+
+        self.assertEqual(session_state["feedback_key"]["level"], "success")
+        self.assertEqual(session_state["feedback_key"]["message"], "Saved.")
+        self.assertIn("occurred_at", session_state["feedback_key"])

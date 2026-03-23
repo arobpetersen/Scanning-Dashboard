@@ -16,6 +16,7 @@ from .ai_proposals import sanitize_context
 from .config import AI_MODEL, OPENAI_API_KEY_ENV, openai_api_key
 from .scanner_research_heuristics import (
     candidate_roles,
+    fit_label_from_details,
     has_strong_role_evidence,
     is_generic_factor_theme,
 )
@@ -465,14 +466,28 @@ def merge_ai_with_heuristic_draft(
     if not legacy._normalize_text(merged.get("rationale")):
         merged["rationale"] = heuristic_rationale or "No strong governed-theme fit was identified; review the business role manually."
 
-    merged["suggested_existing_themes"] = legacy._annotate_existing_theme_suggestions(
+    annotated_suggestions = legacy._annotate_existing_theme_suggestions(
         list(merged.get("suggested_existing_themes") or []),
         catalog,
         profile,
         candidate,
     )
+    filtered_suggestions = filter_supported_existing_theme_suggestions(
+        list(annotated_suggestions or []),
+        catalog,
+        profile,
+        candidate,
+        strong_role_evidence=strong_role_evidence,
+    )
+    if not filtered_suggestions and heuristic_draft.get("suggested_existing_themes"):
+        filtered_suggestions = legacy._annotate_existing_theme_suggestions(
+            list(heuristic_draft.get("suggested_existing_themes") or []),
+            catalog,
+            profile,
+            candidate,
+        )
     merged["suggested_existing_themes"] = legacy._prioritize_operating_role_suggestions(
-        list(merged.get("suggested_existing_themes") or []),
+        list(filtered_suggestions or []),
         strong_role_evidence=strong_role_evidence,
     )
 
@@ -513,3 +528,111 @@ def normalize_ai_theme_suggestions(raw_items: object, catalog: list[dict[str, ob
             }
         )
     return legacy._truncate_existing_theme_suggestions(normalized)
+
+
+def _candidate_has_energy_storage_grounding(profile: dict[str, object], candidate: dict[str, object]) -> bool:
+    from . import scanner_research as legacy
+
+    text = " ".join(
+        [
+            legacy._normalize_text(profile.get("company_name")),
+            legacy._normalize_text(profile.get("description")),
+            legacy._normalize_text(profile.get("sic_description")),
+            legacy._normalize_text(candidate.get("recommendation_reason")),
+        ]
+    ).lower()
+    if not text:
+        return False
+    direct_terms = (
+        "energy storage",
+        "battery storage",
+        "grid-scale battery",
+        "battery-based energy storage",
+        "storage assets",
+        "grid services",
+        "renewables optimization",
+        "grid optimization",
+        "power optimization",
+        "dispatch",
+        "utility",
+        "renewable",
+        "renewables",
+        "grid",
+    )
+    return any(legacy._contains_phrase(text, term) for term in direct_terms)
+
+
+def _candidate_has_consumer_luxury_support(profile: dict[str, object], candidate: dict[str, object]) -> bool:
+    from . import scanner_research as legacy
+
+    text = " ".join(
+        [
+            legacy._normalize_text(profile.get("company_name")),
+            legacy._normalize_text(profile.get("description")),
+            legacy._normalize_text(profile.get("sic_description")),
+            legacy._normalize_text(candidate.get("recommendation_reason")),
+        ]
+    ).lower()
+    if not text:
+        return False
+    consumer_terms = ("consumer", "luxury", "apparel", "fashion", "retail", "premium brand")
+    return any(legacy._contains_phrase(text, term) for term in consumer_terms)
+
+
+def _theme_is_consumer_luxury_or_geography_drift(theme_entry: dict[str, object]) -> bool:
+    from . import scanner_research as legacy
+
+    theme_text = " ".join(
+        [
+            legacy._normalize_text(theme_entry.get("theme_name")),
+            legacy._normalize_text(theme_entry.get("category")),
+            legacy._normalize_text(theme_entry.get("theme_description")),
+        ]
+    ).lower()
+    luxury_terms = ("luxury", "apparel", "fashion", "consumer", "premium retail")
+    geography_terms = ("japan", "japanese", "europe", "european", "asia", "asian")
+    return any(legacy._contains_phrase(theme_text, term) for term in luxury_terms) or any(
+        legacy._contains_phrase(theme_text, term) for term in geography_terms
+    )
+
+
+def filter_supported_existing_theme_suggestions(
+    suggestions: list[dict[str, object]],
+    catalog: list[dict[str, object]],
+    profile: dict[str, object],
+    candidate: dict[str, object],
+    *,
+    strong_role_evidence: bool,
+) -> list[dict[str, object]]:
+    from . import scanner_research as legacy
+
+    if not suggestions:
+        return []
+    candidate_analysis = legacy._candidate_analysis(profile, candidate)
+    by_id = {int(item["theme_id"]): item for item in legacy._preprocessed_catalog(catalog)}
+    strong_energy_grounding = _candidate_has_energy_storage_grounding(profile, candidate)
+    has_consumer_support = _candidate_has_consumer_luxury_support(profile, candidate)
+    filtered: list[dict[str, object]] = []
+    for suggestion in suggestions:
+        try:
+            theme_id = int(suggestion.get("theme_id"))
+        except Exception:
+            continue
+        entry = by_id.get(theme_id)
+        if entry is None:
+            continue
+        fit_details = legacy._theme_fit_details(entry, profile, candidate, candidate_analysis=candidate_analysis)
+        suggestion_with_fit = dict(suggestion)
+        suggestion_with_fit.setdefault("fit_label", fit_label_from_details(fit_details))
+        unsupported = int(fit_details.get("score") or 0) < 3
+        contradiction = bool(
+            strong_energy_grounding
+            and not has_consumer_support
+            and _theme_is_consumer_luxury_or_geography_drift(entry)
+        )
+        if contradiction:
+            continue
+        if strong_energy_grounding and unsupported:
+            continue
+        filtered.append(suggestion_with_fit)
+    return legacy._truncate_existing_theme_suggestions(filtered)

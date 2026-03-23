@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import duckdb
 import pandas as pd
@@ -68,6 +68,7 @@ from src.scanner_audit import (
 from src.suggestions_page_state import (
     apply_generated_theme_idea_checkbox_selection,
     add_theme_to_selected_existing,
+    default_selected_existing_theme_ids,
     finalize_possible_new_theme_category_state,
     finalize_possible_new_theme_state,
     has_meaningful_theme_review_selection,
@@ -86,7 +87,7 @@ from src.suggestions_page_state import (
     sync_suggested_theme_checkbox_state,
 )
 from src.suggestions_service import recent_applied_suggestions
-from src.theme_service import add_ticker, refresh_active_ticker_universe, remove_ticker, replace_ticker_in_theme, seed_if_needed
+from src.theme_service import add_ticker, get_theme_members, refresh_active_ticker_universe, remove_ticker, replace_ticker_in_theme, seed_if_needed
 from src.theme_service import set_ticker_theme_assignments
 from src.provider_live import LiveProvider
 from src.scanner_research import (
@@ -214,6 +215,9 @@ class TestSuggestionsPageState(unittest.TestCase):
     def test_duplicate_clicks_do_not_create_duplicate_selected_existing_themes(self):
         selected = add_theme_to_selected_existing([7], 7, {1, 7, 9})
         self.assertEqual(selected, [7])
+
+    def test_default_selected_existing_theme_ids_keeps_top_suggested_ids(self):
+        self.assertEqual(default_selected_existing_theme_ids([7, 9, 11], limit=2), [7, 9])
 
     def test_selected_existing_theme_state_persists_cleanly_across_rerun_normalization(self):
         normalized = normalize_theme_id_list([7, "9", 7, "bad"], {7, 9, 10})
@@ -1770,6 +1774,58 @@ class TestTickerLookup(unittest.TestCase):
         self.assertEqual(memberships.iloc[0]["theme_name"], "AI")
         conn.close()
 
+    def test_ticker_lookup_normalizes_trimmed_membership_rows_consistently_across_summary_and_table(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'Cloud Security', 'Software', true)")
+        conn.execute("insert into themes values (2, 'Data Infrastructure', 'Software', true)")
+        conn.execute("insert into themes values (3, 'Legacy Theme', 'Software', false)")
+        conn.execute("insert into theme_membership values (1, ' DOCN ')")
+        conn.execute("insert into theme_membership values (2, 'DOCN')")
+        conn.execute("insert into theme_membership values (3, 'docn')")
+
+        summary = ticker_lookup_summary(conn, "DOCN")
+        memberships = ticker_lookup_memberships(conn, "DOCN")
+
+        self.assertEqual(int(summary.iloc[0]["assigned_theme_count"]), 3)
+        self.assertEqual(int(summary.iloc[0]["active_assigned_theme_count"]), 2)
+        self.assertEqual(int(summary.iloc[0]["inactive_assigned_theme_count"]), 1)
+        self.assertTrue(bool(summary.iloc[0]["exists_in_theme_membership"]))
+        self.assertEqual(len(memberships), 3)
+        self.assertEqual(sorted(memberships["theme_name"].tolist()), ["Cloud Security", "Data Infrastructure", "Legacy Theme"])
+        conn.close()
+
     def test_ticker_lookup_reports_snapshots_only(self):
         conn = duckdb.connect(":memory:")
         conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
@@ -2016,8 +2072,199 @@ class TestTickerAssignmentEditing(unittest.TestCase):
         self.assertEqual(members_after, [(2, "NVDA")])
         conn.close()
 
+    def test_set_ticker_theme_assignments_surfaces_changed_flag_and_onboarding_state(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute(
+            """
+            create table governed_ticker_onboarding(
+                ticker varchar primary key,
+                added_at timestamp default current_timestamp,
+                onboarding_source varchar,
+                history_readiness_status varchar,
+                backfill_status varchar,
+                last_backfill_attempt_at timestamp,
+                last_backfill_error varchar,
+                downstream_refresh_needed boolean,
+                history_row_count bigint,
+                history_target_days bigint,
+                history_market_data_source varchar,
+                history_latest_trading_date date,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("create table ticker_daily_history(ticker varchar, trading_date date, market_data_source varchar, updated_at timestamp)")
+        conn.execute("create table refresh_runs(run_id bigint, provider varchar, status varchar, started_at timestamp, finished_at timestamp)")
+        conn.execute("create table refresh_failures(run_id bigint, ticker varchar, error_message varchar, failure_category varchar, created_at timestamp)")
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table symbol_refresh_status(ticker varchar, status varchar, updated_at timestamp)")
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
+
+        with patch("src.theme_service.record_new_governed_ticker_onboarding", return_value={"history_readiness_status": "needs_backfill", "backfill_status": "needed", "downstream_refresh_needed": False}):
+            result = set_ticker_theme_assignments(conn, "DOCN", [1])
+
+        self.assertTrue(bool(result["changed"]))
+        self.assertEqual(result["onboarding_state"]["history_readiness_status"], "needs_backfill")
+
+        noop = set_ticker_theme_assignments(conn, "DOCN", [1])
+        self.assertFalse(bool(noop["changed"]))
+        self.assertIsNone(noop["onboarding_state"])
+        conn.close()
+
+    def test_get_theme_members_normalizes_governed_membership_for_manage_theme_views(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("insert into theme_membership values (1, ' docn ')")
+        conn.execute("insert into theme_membership values (1, 'DOCN')")
+        conn.execute("insert into theme_membership values (1, 'docn')")
+        conn.execute("insert into theme_membership values (1, 'NVDA')")
+
+        members = get_theme_members(conn, 1)
+
+        self.assertEqual(members["ticker"].tolist(), ["DOCN", "NVDA"])
+        conn.close()
+
+    def test_get_theme_members_uses_range_theme_predicate_for_live_manage_path(self):
+        conn = MagicMock()
+        result = MagicMock()
+        result.df.return_value = pd.DataFrame({"ticker": ["DOCN"]})
+        conn.execute.return_value = result
+
+        members = get_theme_members(conn, 1006)
+
+        sql, params = conn.execute.call_args[0]
+        self.assertIn("WHERE theme_id BETWEEN ? AND ?", sql)
+        self.assertEqual(params, [1006, 1006])
+        self.assertEqual(members["ticker"].tolist(), ["DOCN"])
+
+    def test_manage_theme_member_source_matches_ticker_lookup_normalized_membership(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'AI - Agentic', 'AI', true)")
+        conn.execute("insert into themes values (2, 'Cloud Software', 'Software', true)")
+        conn.execute("insert into theme_membership values (1, ' DOCN ')")
+        conn.execute("insert into theme_membership values (1, 'docn')")
+        conn.execute("insert into theme_membership values (2, 'DOCN')")
+
+        summary = ticker_lookup_summary(conn, "DOCN")
+        memberships = ticker_lookup_memberships(conn, "DOCN")
+        manage_members = get_theme_members(conn, 1)
+
+        self.assertTrue(bool(summary.iloc[0]["exists_in_theme_membership"]))
+        self.assertEqual(int(summary.iloc[0]["assigned_theme_count"]), 3)
+        self.assertEqual(sorted(memberships["theme_name"].tolist()), ["AI - Agentic", "AI - Agentic", "Cloud Software"])
+        self.assertEqual(manage_members["ticker"].tolist(), ["DOCN"])
+        conn.close()
+
+    def test_theme_ticker_metrics_matches_manage_theme_membership_without_snapshots(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("insert into theme_membership values (1006, ' DOCN ')")
+        conn.execute("insert into theme_membership values (1006, 'docn')")
+        conn.execute("insert into theme_membership values (1006, 'TWLO')")
+
+        manage_members = get_theme_members(conn, 1006)
+        detail_members = theme_ticker_metrics(conn, 1006)
+
+        self.assertEqual(manage_members["ticker"].tolist(), ["DOCN", "TWLO"])
+        self.assertEqual(detail_members["ticker"].tolist(), ["DOCN", "TWLO"])
+        conn.close()
+
+    def test_theme_ticker_metrics_uses_normalized_governed_membership_with_snapshots(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp, provider varchar)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+
+        conn.execute("insert into theme_membership values (1006, ' DOCN ')")
+        conn.execute("insert into theme_membership values (1006, 'TWLO')")
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-22 10:00:00', 'live')")
+        conn.execute(
+            """
+            insert into ticker_snapshots values
+            (1, 'DOCN', 40, 1, 2, 3, 1000, 2000, null, null, null, '2026-03-22 09:59:00', 'live'),
+            (1, ' twlo ', 50, 4, 5, 6, 2000, 3000, null, null, null, '2026-03-22 09:59:00', 'live')
+            """
+        )
+
+        detail_members = theme_ticker_metrics(conn, 1006)
+
+        self.assertEqual(detail_members["ticker"].tolist(), ["DOCN", "TWLO"])
+        self.assertEqual(float(detail_members.iloc[0]["price"]), 40.0)
+        self.assertEqual(float(detail_members.iloc[1]["price"]), 50.0)
+        conn.close()
+
 
 class TestThemesPageRemovalFlow(unittest.TestCase):
+    def test_remove_ticker_uses_range_theme_predicate_for_live_manage_path(self):
+        conn = MagicMock()
+        delete_result = MagicMock()
+        delete_result.fetchone.return_value = ("DOCN",)
+        members_result = MagicMock()
+        members_result.df.return_value = pd.DataFrame({"ticker": ["TWLO"]})
+        conn.execute.side_effect = [delete_result, members_result]
+
+        result = remove_ticker(conn, 1006, " docn ")
+
+        delete_sql, delete_params = conn.execute.call_args_list[0][0]
+        members_sql, members_params = conn.execute.call_args_list[1][0]
+        self.assertIn("WHERE theme_id BETWEEN ? AND ? AND upper(trim(ticker)) = ?", delete_sql)
+        self.assertEqual(delete_params, [1006, 1006, "DOCN"])
+        self.assertIn("WHERE theme_id BETWEEN ? AND ?", members_sql)
+        self.assertEqual(members_params, [1006, 1006])
+        self.assertTrue(bool(result["removed"]))
+        self.assertEqual(result["members"]["ticker"].tolist(), ["TWLO"])
+
     def test_resolve_valid_selectbox_value_prefers_current_then_first_valid_option(self):
         self.assertEqual(resolve_valid_selectbox_value("QBTS", ["IONQ", "QBTS"]), "QBTS")
         self.assertEqual(resolve_valid_selectbox_value("RGTI", ["IONQ", "QBTS"]), "IONQ")
@@ -2033,14 +2280,37 @@ class TestThemesPageRemovalFlow(unittest.TestCase):
         self.assertIn('members = remove_result["members"]', content)
         self.assertIn('remove_options = members["ticker"].tolist()', content)
         self.assertIn('render_dataframe("manage_theme_members", members, width="stretch")', content)
-        self.assertIn("clear_current_market_view_caches()", content)
-        self.assertIn('st.session_state["manage_ticker_feedback"] = {', content)
+        self.assertIn("prepare_post_mutation_refresh(", content)
+        self.assertIn('"manage_ticker_feedback"', content)
         self.assertIn('st.warning(f"No membership row was removed for {remove_result[\'ticker\']} in {selected[\'name\']} [{selected_id}].")', content)
         self.assertNotIn('st.session_state[remove_select_key] = next_remove_ticker', content)
         self.assertNotIn('st.session_state.pop(remove_select_key, None)\n                        else:', content)
 
 
 class TestStreamlitHealthMutationState(unittest.TestCase):
+    def test_unique_normalized_select_options_dedupes_case_and_whitespace_variants(self):
+        options = streamlit_utils.unique_normalized_select_options(
+            [
+                "Artificial Intelligence",
+                " artificial intelligence ",
+                "ARTIFICIAL INTELLIGENCE",
+                "Autos & EV",
+                " Autos & EV ",
+                "autos & ev",
+                "",
+                None,
+            ]
+        )
+
+        self.assertEqual(options, ["Artificial Intelligence", "Autos & EV"])
+
+    def test_themes_page_category_drill_uses_unique_normalized_category_options(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('category_options = unique_normalized_select_options(breakdown_df["category"].tolist())', content)
+        self.assertIn('breakdown_df["category"].fillna("").astype(str).str.strip().str.casefold() == picked_category_key', content)
+
     def test_sync_valid_multiselect_state_prefers_session_state_selection(self):
         session_state = {"governed_onboarding_reconstruction_tickers": ["LPTH"]}
 
@@ -2077,10 +2347,10 @@ class TestStreamlitHealthMutationState(unittest.TestCase):
             message="Affected-theme reconstruction finished.",
         )
 
-        self.assertEqual(
-            session_state["governed_onboarding_feedback"],
-            {"level": "success", "message": "Affected-theme reconstruction finished."},
-        )
+        payload = session_state["governed_onboarding_feedback"]
+        self.assertEqual(payload["level"], "success")
+        self.assertEqual(payload["message"], "Affected-theme reconstruction finished.")
+        self.assertIn("occurred_at", payload)
 
     def test_clear_current_market_view_caches_clears_theme_analytics_loaders(self):
         with patch.object(streamlit_utils._load_current_ranking_snapshot_cached, "clear") as clear_current, patch.object(
@@ -3158,6 +3428,63 @@ class TestDescriptionFirstResearchRefinements(unittest.TestCase):
         self.assertEqual(draft["possible_new_theme"], "Additive Manufacturing")
         self.assertEqual(draft["validation_debug"]["possible_new_theme_decision"]["status"], "selected_no_actionable_governed_match")
 
+    def test_description_first_fluence_style_energy_storage_does_not_drift_into_memory_or_luxury(self):
+        profile = {
+            "company_name": "Fluence Energy",
+            "description": (
+                "Provides energy storage products and services, recurring maintenance services, and digital applications "
+                "for renewables and storage applications. Offers grid-scale battery-based energy storage products and a "
+                "software platform that optimizes and manages renewables and storage assets."
+            ),
+            "sic_description": "Electrical industrial apparatus",
+        }
+        catalog = [
+            self._theme(1, "Energy Storage", "Energy", "Grid-scale battery storage systems and energy storage software.", ["FLNC"]),
+            self._theme(2, "Grid Infrastructure", "Energy", "Grid modernization, electrical infrastructure, and grid equipment.", ["VRT"]),
+            self._theme(3, "Renewables Software", "Energy", "Software that optimizes renewable generation, storage assets, and grid operations.", ["NXT"]),
+            self._theme(4, "Japan", "Geography", "Japan macro and equities exposure across sectors.", ["EWJ"]),
+            self._theme(5, "Europe - Luxury", "Consumer", "European luxury brands and premium fashion houses.", ["LVMUY"]),
+            self._theme(6, "Luxury & Apparel", "Consumer", "Luxury apparel, fashion, and upscale retail brands.", ["CPRI"]),
+        ]
+
+        draft = _description_theme_generation_draft(
+            self._candidate(
+                ticker="FLNC",
+                recommendation_reason="Energy storage systems, grid-scale battery storage, renewables optimization software, storage services and infrastructure.",
+            ),
+            catalog,
+            profile,
+        )
+
+        self.assertEqual(draft["domain_anchor"], "energy/grid infrastructure")
+        self.assertNotIn("Memory & Storage", draft["candidate_theme_ideas"])
+        self.assertTrue(draft["suggested_existing_themes"])
+        self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Energy Storage")
+        self.assertFalse({"Japan", "Europe - Luxury", "Luxury & Apparel"} & {item["theme_name"] for item in draft["suggested_existing_themes"]})
+
+    def test_description_first_energy_storage_products_do_not_trigger_memory_storage_descriptor(self):
+        profile = {
+            "company_name": "Fluence Energy",
+            "description": (
+                "Provides energy storage products, grid-scale battery storage systems, grid services, and renewables "
+                "optimization software for utility-scale storage assets."
+            ),
+            "sic_description": "Electrical industrial apparatus",
+        }
+
+        draft = _description_theme_generation_draft(
+            self._candidate(
+                ticker="FLNC",
+                recommendation_reason="Energy storage products, battery storage, dispatch software, and grid services.",
+            ),
+            [],
+            profile,
+        )
+
+        self.assertNotIn("Memory & Storage", draft["validation_debug"]["business_descriptors"])
+        self.assertEqual(draft["domain_anchor"], "energy/grid infrastructure")
+        self.assertIn("Energy Storage Systems", draft["candidate_theme_ideas"])
+
 
 class TestScannerResearchReviewPersistence(unittest.TestCase):
     def test_save_scanner_research_review_inserts_and_updates_same_draft_context(self):
@@ -3353,15 +3680,50 @@ class TestSuggestionsWorkflow(unittest.TestCase):
         self.assertIn("Send preserved proposed theme to Theme Review", content)
         self.assertIn("there is nothing governed to apply to membership yet", content)
         self.assertIn("Create governed theme and assign ticker", content)
-        self.assertIn("clear_scanner_candidate_summary_cache()", content)
-        self.assertIn("clear_scanner_research_state(st.session_state)", content)
+        self.assertIn("prepare_post_mutation_refresh(", content)
+        self.assertIn("research_status_metadata(", content)
+        self.assertIn("Use Draft Defaults", content)
+        self.assertIn("Clear Review Selections", content)
+        self.assertIn("Current Review Selection", content)
+        self.assertIn("Compared with draft defaults:", content)
+        self.assertIn("Review readiness:", content)
+        self.assertIn("If you apply now:", content)
+        self.assertIn("If you stage now:", content)
+        self.assertIn("Stage in Theme Review", content)
+        self.assertIn("Apply Existing Themes & Start Onboarding", content)
+
+    def test_suggestions_page_defines_all_theme_ids_before_draft_generation_uses_it(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "3_Suggestions.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        definition = 'all_theme_ids = {int(row["id"]) for row in theme_options}'
+        usage = "set(all_theme_ids)"
+
+        self.assertIn(definition, content)
+        self.assertIn(usage, content)
+        self.assertLess(content.index(definition), content.index(usage))
 
     def test_theme_and_health_pages_clear_scanner_research_state_on_theme_mutations(self):
         themes_source = (Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py").read_text(encoding="utf-8")
         health_source = (Path(__file__).resolve().parents[1] / "pages" / "4_Health.py").read_text(encoding="utf-8")
 
-        self.assertIn("clear_scanner_research_state(st.session_state)", themes_source)
-        self.assertIn("clear_scanner_research_state(st.session_state)", health_source)
+        self.assertIn("clear_research=True", themes_source)
+        self.assertIn("clear_research=True", health_source)
+
+    def test_pages_use_post_mutation_refresh_helper_for_live_write_feedback(self):
+        themes_source = (Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py").read_text(encoding="utf-8")
+        suggestions_source = (Path(__file__).resolve().parents[1] / "pages" / "3_Suggestions.py").read_text(encoding="utf-8")
+        health_source = (Path(__file__).resolve().parents[1] / "pages" / "4_Health.py").read_text(encoding="utf-8")
+
+        self.assertIn("prepare_post_mutation_refresh(", themes_source)
+        self.assertIn("prepare_post_mutation_refresh(", suggestions_source)
+        self.assertIn("prepare_post_mutation_refresh(", health_source)
+
+    def test_fetch_data_source_no_longer_uses_datetime_utcnow(self):
+        fetch_data_source = (Path(__file__).resolve().parents[1] / "src" / "fetch_data.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("datetime.utcnow()", fetch_data_source)
+        self.assertIn("datetime.now(timezone.utc)", fetch_data_source)
 
     def test_update_suggestion_status_supports_obsolete_from_selected_row_path(self):
         conn = duckdb.connect(":memory:")

@@ -1,3 +1,5 @@
+import time
+
 import pandas as pd
 import streamlit as st
 
@@ -13,17 +15,18 @@ from src.leaderboard_utils import (
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.queries import ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
 from src.streamlit_utils import (
-    clear_scanner_research_state,
-    clear_current_market_view_caches,
     db_cache_token,
     extract_selected_row,
     load_current_ranking_snapshot_cached,
     load_theme_momentum_cached,
+    prepare_post_mutation_refresh,
     render_dataframe,
+    render_feedback_message,
     reset_perf_timings,
     resolve_valid_selectbox_value,
     show_perf_summary,
     stop_for_database_error,
+    unique_normalized_select_options,
 )
 from src.theme_selection import (
     SELECTED_THEME_ID_KEY,
@@ -144,13 +147,20 @@ def _render_category_theme_drill(title: str, breakdown_df) -> None:
         return
 
     with st.expander(f"Underlying themes — {title}", expanded=False):
-        category_options = breakdown_df["category"].dropna().astype(str).tolist()
+        category_options = unique_normalized_select_options(breakdown_df["category"].tolist())
         picked_category = st.selectbox(
             f"Inspect category ({title})",
             options=category_options,
             key=f"category_drill_{title}",
         )
-        category_rows = breakdown_df[breakdown_df["category"] == picked_category].copy().reset_index(drop=True)
+        picked_category_key = str(picked_category or "").strip().casefold()
+        category_rows = (
+            breakdown_df[
+                breakdown_df["category"].fillna("").astype(str).str.strip().str.casefold() == picked_category_key
+            ]
+            .copy()
+            .reset_index(drop=True)
+        )
         category_rows["rank"] = category_rows.index + 1
         render_dataframe(
             f"{title}_category_drill",
@@ -433,16 +443,7 @@ with explore_tab:
             render_dataframe("theme_history_table", history_df, width="stretch")
 
 with manage_tab:
-    ticker_feedback = st.session_state.pop("manage_ticker_feedback", None)
-    if ticker_feedback:
-        level = str(ticker_feedback.get("level") or "info")
-        message = str(ticker_feedback.get("message") or "")
-        if level == "success":
-            st.success(message)
-        elif level == "warning":
-            st.warning(message)
-        else:
-            st.error(message)
+    render_feedback_message(st.session_state, "manage_ticker_feedback")
 
     st.subheader("Create Theme")
     with st.form("create_theme", clear_on_submit=True):
@@ -455,9 +456,15 @@ with manage_tab:
         try:
             with get_conn() as conn:
                 create_theme(conn, new_name, new_category, new_is_active)
-            clear_scanner_research_state(st.session_state)
-            clear_current_market_view_caches()
-            st.success("Theme created")
+            prepare_post_mutation_refresh(
+                st.session_state,
+                "manage_ticker_feedback",
+                level="success",
+                message="Theme created.",
+                clear_market=True,
+                clear_scanner_summary=True,
+                clear_research=True,
+            )
             st.rerun()
         except Exception as exc:
             st.error(f"Create failed: {exc}")
@@ -481,9 +488,15 @@ with manage_tab:
         try:
             with get_conn() as conn:
                 update_theme(conn, selected_id, edit_name, edit_category, edit_active)
-            clear_scanner_research_state(st.session_state)
-            clear_current_market_view_caches()
-            st.success("Theme updated")
+            prepare_post_mutation_refresh(
+                st.session_state,
+                "manage_ticker_feedback",
+                level="success",
+                message="Theme updated.",
+                clear_market=True,
+                clear_scanner_summary=True,
+                clear_research=True,
+            )
             st.rerun()
         except Exception as exc:
             st.error(f"Update failed: {exc}")
@@ -492,15 +505,23 @@ with manage_tab:
         try:
             with get_conn() as conn:
                 delete_theme(conn, selected_id)
-            clear_scanner_research_state(st.session_state)
-            clear_current_market_view_caches()
-            st.success("Theme deleted")
+            prepare_post_mutation_refresh(
+                st.session_state,
+                "manage_ticker_feedback",
+                level="success",
+                message="Theme deleted.",
+                clear_market=True,
+                clear_scanner_summary=True,
+                clear_research=True,
+            )
             st.rerun()
         except Exception as exc:
             st.error(f"Delete failed: {exc}")
 
     with get_conn() as conn:
         members = get_theme_members(conn, selected_id)
+
+    st.caption("Manage Theme membership reflects normalized governed membership for the selected theme.")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -511,9 +532,15 @@ with manage_tab:
             try:
                 with get_conn() as conn:
                     add_ticker(conn, selected_id, new_ticker, onboarding_source="themes_page_manual_add")
-                clear_scanner_research_state(st.session_state)
-                clear_current_market_view_caches()
-                st.success(f"Added {new_ticker.strip().upper()}")
+                prepare_post_mutation_refresh(
+                    st.session_state,
+                    "manage_ticker_feedback",
+                    level="success",
+                    message=f"Added {new_ticker.strip().upper()}.",
+                    clear_market=True,
+                    clear_scanner_summary=True,
+                    clear_research=True,
+                )
                 st.rerun()
             except Exception as exc:
                 st.error(f"Add ticker failed: {exc}")
@@ -538,12 +565,15 @@ with manage_tab:
                         remove_result = remove_ticker(conn, selected_id, remove_tkr)
                     members = remove_result["members"]
                     if remove_result["removed"]:
-                        clear_scanner_research_state(st.session_state)
-                        clear_current_market_view_caches()
-                        st.session_state["manage_ticker_feedback"] = {
-                            "level": "success",
-                            "message": f"Removed {remove_result['ticker']} from {selected['name']} [{selected_id}]",
-                        }
+                        prepare_post_mutation_refresh(
+                            st.session_state,
+                            "manage_ticker_feedback",
+                            level="success",
+                            message=f"Removed {remove_result['ticker']} from {selected['name']} [{selected_id}].",
+                            clear_market=True,
+                            clear_scanner_summary=True,
+                            clear_research=True,
+                        )
                         st.rerun()
                     else:
                         st.warning(f"No membership row was removed for {remove_result['ticker']} in {selected['name']} [{selected_id}].")
@@ -572,9 +602,16 @@ with manage_tab:
             st.write(f"**Status:** `{row['lookup_status']}` for `{lookup_ticker}`")
             l1, l2, l3, l4 = st.columns(4)
             l1.metric("Assigned themes", int(row.get("assigned_theme_count") or 0))
-            l2.metric("In membership", "yes" if bool(row.get("exists_in_theme_membership")) else "no")
+            l2.metric("In governed membership", "yes" if bool(row.get("exists_in_theme_membership")) else "no")
             l3.metric("In snapshots", "yes" if bool(row.get("exists_in_ticker_snapshots")) else "no")
             l4.metric("Seen elsewhere", "yes" if bool(row.get("exists_in_refresh_run_tickers") or row.get("exists_in_symbol_refresh_status")) else "no")
+            active_assignment_count = int(row.get("active_assigned_theme_count") or 0)
+            inactive_assignment_count = int(row.get("inactive_assigned_theme_count") or 0)
+            if int(row.get("assigned_theme_count") or 0):
+                assignment_bits = [f"active=`{active_assignment_count}`"]
+                if inactive_assignment_count:
+                    assignment_bits.append(f"inactive=`{inactive_assignment_count}`")
+                st.caption("Governed membership assignment breakdown: " + " | ".join(assignment_bits))
 
             detail = {
                 "ticker": lookup_ticker,
@@ -587,7 +624,7 @@ with manage_tab:
             render_dataframe("ticker_lookup_detail", [detail], width="stretch", hide_index=True)
 
             if not memberships.empty:
-                st.caption("Assigned themes")
+                st.caption("Assigned themes from governed membership")
                 render_dataframe(
                     "ticker_lookup_memberships",
                     memberships[["theme_name", "category", "is_active"]],
@@ -657,18 +694,36 @@ with manage_tab:
                                     run_kind="ticker_intake_backfill",
                                     replace_existing=True,
                                 )
-                        clear_scanner_research_state(st.session_state)
-                        clear_current_market_view_caches()
-                        if int(result["added_count"]) == 0 and int(result["removed_count"]) == 0:
-                            st.session_state["manage_ticker_feedback"] = {
-                                "level": "warning",
-                                "message": (
-                                    f"No membership changes were needed for `{result['ticker']}`. "
-                                    f"It is already assigned to {int(result['assigned_theme_count'])} theme(s)."
+                        if not bool(result.get("changed")):
+                            prepare_post_mutation_refresh(
+                                st.session_state,
+                                "manage_ticker_feedback",
+                                level="warning",
+                                message=(
+                                    f"No changes detected for `{result['ticker']}`. "
+                                    f"It already matches the selected {int(result['assigned_theme_count'])} theme assignment(s)."
                                 ),
-                            }
+                                clear_market=True,
+                                clear_scanner_summary=True,
+                                clear_research=True,
+                            )
                         else:
                             extra = ""
+                            onboarding_state = result.get("onboarding_state") or {}
+                            onboarding_bits = []
+                            if onboarding_state:
+                                onboarding_bits.append(
+                                    " Onboarding status: "
+                                    f"history=`{onboarding_state.get('history_readiness_status') or 'unknown'}`"
+                                )
+                                if onboarding_state.get("backfill_status"):
+                                    onboarding_bits.append(
+                                        f", backfill=`{onboarding_state.get('backfill_status')}`"
+                                    )
+                                if onboarding_state.get("downstream_refresh_needed") is not None:
+                                    onboarding_bits.append(
+                                        f", downstream refresh needed=`{'yes' if bool(onboarding_state.get('downstream_refresh_needed')) else 'no'}`"
+                                    )
                             if backfill_result is not None:
                                 extra = (
                                     f" Stored {int(backfill_result.get('ticker_history_rows_written', 0))} ticker-day rows "
@@ -676,15 +731,21 @@ with manage_tab:
                                     f"{int(backfill_result.get('snapshot_rows_written', 0))} reconstructed theme rows "
                                     f"(skipped {int(backfill_result.get('snapshot_rows_skipped', 0))})."
                                 )
-                            st.session_state["manage_ticker_feedback"] = {
-                                "level": "success",
-                                "message": (
+                            extra += "".join(onboarding_bits)
+                            prepare_post_mutation_refresh(
+                                st.session_state,
+                                "manage_ticker_feedback",
+                                level="success",
+                                message=(
                                     f"Saved `{result['ticker']}`: "
                                     f"{int(result['added_count'])} assignment(s) added, "
                                     f"{int(result['removed_count'])} removed."
                                     f"{extra}"
                                 ),
-                            }
+                                clear_market=True,
+                                clear_scanner_summary=True,
+                                clear_research=True,
+                            )
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Ticker save failed: {exc}")
@@ -710,6 +771,7 @@ with manage_tab:
             st.warning("Select at least one ticker to backfill.")
         else:
             try:
+                backfill_started = time.perf_counter()
                 with get_conn() as conn:
                     manual_backfill_result = reconstruct_theme_history_range(
                         conn,
@@ -721,13 +783,22 @@ with manage_tab:
                         run_kind="ticker_intake_backfill_manual",
                         replace_existing=True,
                     )
-                st.success(
-                    "Recent ticker history stored and affected reconstructed theme history refreshed. "
-                    f"Ticker-day rows written: {int(manual_backfill_result.get('ticker_history_rows_written', 0))}, "
-                    f"skipped: {int(manual_backfill_result.get('ticker_history_rows_skipped', 0))}. "
-                    f"Theme rows written: {int(manual_backfill_result.get('snapshot_rows_written', 0))}, "
-                    f"skipped: {int(manual_backfill_result.get('snapshot_rows_skipped', 0))}."
+                prepare_post_mutation_refresh(
+                    st.session_state,
+                    "manage_ticker_feedback",
+                    level="success",
+                    message=(
+                        "Recent ticker history stored and affected reconstructed theme history refreshed. "
+                        f"Ticker-day rows written: {int(manual_backfill_result.get('ticker_history_rows_written', 0))}, "
+                        f"skipped: {int(manual_backfill_result.get('ticker_history_rows_skipped', 0))}. "
+                        f"Theme rows written: {int(manual_backfill_result.get('snapshot_rows_written', 0))}, "
+                        f"skipped: {int(manual_backfill_result.get('snapshot_rows_skipped', 0))}. "
+                        f"Completed in {time.perf_counter() - backfill_started:.1f}s."
+                    ),
+                    clear_market=True,
+                    clear_scanner_summary=True,
                 )
+                st.rerun()
             except Exception as exc:
                 st.error(f"Manual ticker-history backfill failed: {exc}")
 

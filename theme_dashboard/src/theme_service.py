@@ -27,6 +27,18 @@ def _normalize_ticker(ticker: str) -> str:
     return value
 
 
+def _theme_membership_theme_predicate(column: str = "theme_id") -> str:
+    # DuckDB has shown a live-path edge case where `theme_membership.theme_id = ?`
+    # can miss rows that are still visible through joins/range predicates.
+    # Keep membership reads/writes on a single exact-id range predicate instead.
+    return f"{column} BETWEEN ? AND ?"
+
+
+def _theme_membership_theme_params(theme_id: int) -> list[int]:
+    normalized_theme_id = int(theme_id)
+    return [normalized_theme_id, normalized_theme_id]
+
+
 def _is_duckdb_result_state_error(exc: Exception) -> bool:
     message = str(exc or "").lower()
     return any(
@@ -99,8 +111,8 @@ def _seed_if_needed_core(conn) -> bool:
 
             for ticker in tickers:
                 before = conn.execute(
-                    "SELECT 1 FROM theme_membership WHERE theme_id = ? AND ticker = ? LIMIT 1",
-                    [theme_id, ticker],
+                    f"SELECT 1 FROM theme_membership WHERE {_theme_membership_theme_predicate()} AND ticker = ? LIMIT 1",
+                    [*_theme_membership_theme_params(theme_id), ticker],
                 ).fetchone()
                 conn.execute(
                     "INSERT OR IGNORE INTO theme_membership(theme_id, ticker) VALUES (?, ?)",
@@ -147,7 +159,15 @@ def list_themes(conn, active_only: bool = False) -> pd.DataFrame:
 
 def get_theme_members(conn, theme_id: int) -> pd.DataFrame:
     return conn.execute(
-        "SELECT ticker FROM theme_membership WHERE theme_id = ? ORDER BY ticker", [theme_id]
+        f"""
+        SELECT
+            upper(trim(ticker)) AS ticker
+        FROM theme_membership
+        WHERE {_theme_membership_theme_predicate()}
+        GROUP BY upper(trim(ticker))
+        ORDER BY upper(trim(ticker))
+        """,
+        _theme_membership_theme_params(theme_id),
     ).df()
 
 
@@ -170,7 +190,10 @@ def update_theme(conn, theme_id: int, name: str, category: str, is_active: bool)
 
 
 def delete_theme(conn, theme_id: int) -> None:
-    conn.execute("DELETE FROM theme_membership WHERE theme_id = ?", [theme_id])
+    conn.execute(
+        f"DELETE FROM theme_membership WHERE {_theme_membership_theme_predicate()}",
+        _theme_membership_theme_params(theme_id),
+    )
     conn.execute("DELETE FROM themes WHERE id = ?", [theme_id])
 
 
@@ -184,8 +207,8 @@ def add_ticker(conn, theme_id: int, ticker: str, *, onboarding_source: str = "go
         or 0
     )
     existed_in_theme = conn.execute(
-        "SELECT 1 FROM theme_membership WHERE theme_id = ? AND upper(trim(ticker)) = ? LIMIT 1",
-        [theme_id, normalized_ticker],
+        f"SELECT 1 FROM theme_membership WHERE {_theme_membership_theme_predicate()} AND upper(trim(ticker)) = ? LIMIT 1",
+        [*_theme_membership_theme_params(theme_id), normalized_ticker],
     ).fetchone()
     conn.execute(
         "INSERT OR IGNORE INTO theme_membership(theme_id, ticker) VALUES (?, ?)",
@@ -214,8 +237,8 @@ def add_ticker(conn, theme_id: int, ticker: str, *, onboarding_source: str = "go
 def remove_ticker(conn, theme_id: int, ticker: str) -> dict[str, object]:
     normalized_ticker = _normalize_ticker(ticker)
     removed_row = conn.execute(
-        "DELETE FROM theme_membership WHERE theme_id = ? AND upper(trim(ticker)) = ? RETURNING ticker",
-        [theme_id, normalized_ticker],
+        f"DELETE FROM theme_membership WHERE {_theme_membership_theme_predicate()} AND upper(trim(ticker)) = ? RETURNING ticker",
+        [*_theme_membership_theme_params(theme_id), normalized_ticker],
     ).fetchone()
     members = get_theme_members(conn, theme_id)
     remaining_tickers = members["ticker"].tolist() if not members.empty else []
@@ -236,15 +259,15 @@ def replace_ticker_in_theme(conn, theme_id: int, current_ticker: str, replacemen
         raise ValueError("Replacement ticker must be different from the current ticker.")
 
     current_row = conn.execute(
-        "SELECT 1 FROM theme_membership WHERE theme_id = ? AND upper(trim(ticker)) = ? LIMIT 1",
-        [theme_id, current],
+        f"SELECT 1 FROM theme_membership WHERE {_theme_membership_theme_predicate()} AND upper(trim(ticker)) = ? LIMIT 1",
+        [*_theme_membership_theme_params(theme_id), current],
     ).fetchone()
     if current_row is None:
         raise ValueError(f"{current} is not currently assigned to this theme.")
 
     replacement_row = conn.execute(
-        "SELECT 1 FROM theme_membership WHERE theme_id = ? AND upper(trim(ticker)) = ? LIMIT 1",
-        [theme_id, replacement],
+        f"SELECT 1 FROM theme_membership WHERE {_theme_membership_theme_predicate()} AND upper(trim(ticker)) = ? LIMIT 1",
+        [*_theme_membership_theme_params(theme_id), replacement],
     ).fetchone()
     if replacement_row is not None:
         raise ValueError(f"{replacement} is already assigned to this theme.")
@@ -253,8 +276,8 @@ def replace_ticker_in_theme(conn, theme_id: int, current_ticker: str, replacemen
     conn.execute("BEGIN TRANSACTION")
     try:
         conn.execute(
-            "DELETE FROM theme_membership WHERE theme_id = ? AND ticker = ?",
-            [theme_id, current],
+            f"DELETE FROM theme_membership WHERE {_theme_membership_theme_predicate()} AND ticker = ?",
+            [*_theme_membership_theme_params(theme_id), current],
         )
         conn.execute(
             "INSERT INTO theme_membership(theme_id, ticker) VALUES (?, ?)",
@@ -305,6 +328,7 @@ def set_ticker_theme_assignments(conn, ticker: str, theme_ids: list[int]) -> dic
     to_remove = [theme_id for theme_id in current_theme_ids if theme_id not in normalized_theme_ids]
 
     was_ungoverned = not bool(current_theme_ids)
+    onboarding_state = None
     conn.execute("BEGIN TRANSACTION")
     try:
         for theme_id in to_add:
@@ -314,11 +338,11 @@ def set_ticker_theme_assignments(conn, ticker: str, theme_ids: list[int]) -> dic
             )
         for theme_id in to_remove:
             conn.execute(
-                "DELETE FROM theme_membership WHERE theme_id = ? AND upper(trim(ticker)) = ?",
-                [theme_id, normalized_ticker],
+                f"DELETE FROM theme_membership WHERE {_theme_membership_theme_predicate()} AND upper(trim(ticker)) = ?",
+                [*_theme_membership_theme_params(theme_id), normalized_ticker],
             )
         if was_ungoverned and to_add:
-            record_new_governed_ticker_onboarding(conn, normalized_ticker, onboarding_source="theme_assignment_update")
+            onboarding_state = record_new_governed_ticker_onboarding(conn, normalized_ticker, onboarding_source="theme_assignment_update")
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -329,6 +353,8 @@ def set_ticker_theme_assignments(conn, ticker: str, theme_ids: list[int]) -> dic
         "assigned_theme_count": len(normalized_theme_ids),
         "added_count": len(to_add),
         "removed_count": len(to_remove),
+        "changed": bool(to_add or to_remove),
+        "onboarding_state": onboarding_state,
         "affected_theme_ids": sorted(set(to_add + to_remove + normalized_theme_ids)),
     }
 

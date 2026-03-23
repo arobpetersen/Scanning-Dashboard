@@ -217,36 +217,75 @@ def prefilter_ai_theme_catalog(
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     from . import scanner_research as legacy
 
+    combined_text = " ".join(
+        [
+            legacy._normalize_text(profile.get("company_name")),
+            legacy._normalize_text(profile.get("description")),
+            legacy._normalize_text(profile.get("sic_description")),
+            legacy._normalize_text(candidate.get("recommendation_reason")),
+        ]
+    ).lower()
+    strong_energy_storage_grounding = any(
+        legacy._contains_phrase(combined_text, term)
+        for term in (
+            "energy storage",
+            "battery storage",
+            "grid-scale battery",
+            "battery-based energy storage",
+            "grid services",
+            "renewables optimization",
+            "grid optimization",
+            "power optimization",
+            "dispatch",
+        )
+    )
     candidate_analysis_result = candidate_analysis(profile, candidate)
-    ranked: list[tuple[int, int, dict[str, object]]] = []
-    adjacent: list[tuple[int, int, dict[str, object]]] = []
+    strong_role_evidence = bool(candidate_analysis_result.get("strong_role_evidence"))
+    grounded_ranked: list[tuple[int, int, dict[str, object]]] = []
+    weak_ranked: list[tuple[int, int, dict[str, object]]] = []
     for entry in preprocessed_catalog(catalog):
         fit_details = theme_fit_details(entry, profile, candidate, candidate_analysis=candidate_analysis_result)
         score = int(fit_details["score"])
         direct_bonus = 1 if fit_details.get("direct_role_fit") else 0
-        ranked.append((score, direct_bonus, entry))
-        if fit_details.get("indirect_only_fit") or fit_details.get("market_overlap") or fit_details.get("specific_overlap"):
-            adjacent.append((score, direct_bonus, entry))
-    ranked.sort(key=lambda item: (-item[0], -item[1], str(item[2].get("theme_name") or "")))
-    adjacent.sort(key=lambda item: (-item[0], -item[1], str(item[2].get("theme_name") or "")))
+        grounded_support = bool(
+            fit_details.get("direct_role_fit")
+            or fit_details.get("role_overlap")
+            or fit_details.get("specific_overlap")
+            or fit_details.get("archetype_overlap")
+            or fit_details.get("economic_role_overlap")
+            or fit_details.get("market_overlap")
+            or fit_details.get("indirect_only_fit")
+        )
+        item = (score, direct_bonus, entry)
+        if score >= 3 and grounded_support:
+            grounded_ranked.append(item)
+        elif score > 0 or grounded_support:
+            weak_ranked.append(item)
+    grounded_ranked.sort(key=lambda item: (-item[0], -item[1], str(item[2].get("theme_name") or "")))
+    weak_ranked.sort(key=lambda item: (-item[0], -item[1], str(item[2].get("theme_name") or "")))
 
     selected: list[dict[str, object]] = []
     seen_theme_ids: set[int] = set()
-    for _, _, entry in ranked[:max_themes]:
+    weak_backfill_count = 0
+    for _, _, entry in grounded_ranked[:max_themes]:
         theme_id = int(entry["theme_id"])
         if theme_id in seen_theme_ids:
             continue
         selected.append(concise_theme_context(entry))
         seen_theme_ids.add(theme_id)
 
-    if len(selected) < min(6, max_themes):
-        for _, _, entry in adjacent:
+    weak_backfill_target = min(4 if strong_role_evidence else 6, max_themes)
+    if len(selected) < weak_backfill_target and not (strong_energy_storage_grounding and selected):
+        for _, _, entry in weak_ranked:
             theme_id = int(entry["theme_id"])
             if theme_id in seen_theme_ids:
                 continue
-            selected.append(concise_theme_context(entry))
+            weak_item = concise_theme_context(entry)
+            weak_item["weak_prefilter_backfill"] = True
+            selected.append(weak_item)
             seen_theme_ids.add(theme_id)
-            if len(selected) >= min(6, max_themes):
+            weak_backfill_count += 1
+            if len(selected) >= weak_backfill_target:
                 break
 
     if not selected:
@@ -262,6 +301,8 @@ def prefilter_ai_theme_catalog(
         "filtered_theme_count": len(selected),
         "catalog_was_prefiltered": len(selected) < len(catalog),
         "max_themes": max_themes,
+        "grounded_theme_count": len(grounded_ranked),
+        "weak_backfill_count": weak_backfill_count,
     }
     return selected[:max_themes], meta
 

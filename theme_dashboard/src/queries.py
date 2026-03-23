@@ -448,6 +448,8 @@ def preferred_theme_snapshot_source(conn) -> str | None:
 
 
 def preferred_ticker_snapshot_source(conn) -> str | None:
+    if not table_exists(conn, "ticker_snapshots") or not table_exists(conn, "refresh_runs"):
+        return None
     if table_has_column(conn, "ticker_snapshots", "snapshot_source"):
         row = conn.execute(
             """
@@ -490,7 +492,14 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
     preferred_source = preferred_ticker_snapshot_source(conn)
     if not preferred_source:
         return conn.execute(
-            "SELECT ticker FROM theme_membership WHERE theme_id = ? ORDER BY ticker", [theme_id]
+            """
+            SELECT upper(trim(ticker)) AS ticker
+            FROM theme_membership
+            WHERE theme_id BETWEEN ? AND ?
+            GROUP BY upper(trim(ticker))
+            ORDER BY upper(trim(ticker))
+            """,
+            [int(theme_id), int(theme_id)],
         ).df()
 
     if table_has_column(conn, "ticker_snapshots", "snapshot_source"):
@@ -513,9 +522,16 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
 
     return conn.execute(
         f"""
-        WITH completed_snapshots AS (
+        WITH governed_members AS (
             SELECT
-                s.ticker,
+                upper(trim(ticker)) AS ticker
+            FROM theme_membership
+            WHERE theme_id BETWEEN ? AND ?
+            GROUP BY upper(trim(ticker))
+        ),
+        completed_snapshots AS (
+            SELECT
+                upper(trim(s.ticker)) AS ticker,
                 s.price,
                 s.perf_1w,
                 s.perf_1m,
@@ -535,9 +551,9 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
         ),
         latest_nonnull_market_caps AS (
             SELECT
-                s.ticker,
+                upper(trim(s.ticker)) AS ticker,
                 s.market_cap,
-                ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) AS rn
+                ROW_NUMBER() OVER (PARTITION BY upper(trim(s.ticker)) ORDER BY s.run_id DESC) AS rn
             FROM ticker_snapshots s
             JOIN refresh_runs r ON r.run_id = s.run_id
             WHERE r.status IN ('success', 'partial')
@@ -545,7 +561,7 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
               AND s.market_cap IS NOT NULL
         )
         SELECT
-            m.ticker,
+            gm.ticker,
             cs.price,
             cs.perf_1w,
             cs.perf_1m,
@@ -558,15 +574,14 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
             cs.last_updated,
             cs.snapshot_time,
             ? AS latest_refresh_time
-        FROM theme_membership m
+        FROM governed_members gm
         LEFT JOIN completed_snapshots cs
-          ON m.ticker = cs.ticker AND cs.rn = 1
+          ON gm.ticker = cs.ticker AND cs.rn = 1
         LEFT JOIN latest_nonnull_market_caps lmc
-          ON m.ticker = lmc.ticker AND lmc.rn = 1
-        WHERE m.theme_id = ?
-        ORDER BY m.ticker
+          ON gm.ticker = lmc.ticker AND lmc.rn = 1
+        ORDER BY gm.ticker
         """,
-        [preferred_source, preferred_source, latest_refresh_time, theme_id],
+        [int(theme_id), int(theme_id), preferred_source, preferred_source, latest_refresh_time],
     ).df()
 
 
@@ -1108,9 +1123,13 @@ def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
     return conn.execute(
         f"""
         WITH membership AS (
-            SELECT COUNT(*) AS membership_count
-            FROM theme_membership
-            WHERE ticker = ?
+            SELECT
+                COUNT(*) AS membership_count,
+                COUNT(*) FILTER (WHERE COALESCE(t.is_active, FALSE)) AS active_membership_count,
+                COUNT(*) FILTER (WHERE NOT COALESCE(t.is_active, FALSE)) AS inactive_membership_count
+            FROM theme_membership m
+            LEFT JOIN themes t ON t.id = m.theme_id
+            WHERE upper(trim(m.ticker)) = ?
         ),
         snapshots AS (
             SELECT
@@ -1149,6 +1168,8 @@ def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
             CAST(r.refresh_run_count > 0 AS BOOLEAN) AS exists_in_refresh_run_tickers,
             CAST(ss.symbol_status_count > 0 AS BOOLEAN) AS exists_in_symbol_refresh_status,
             COALESCE(m.membership_count, 0) AS assigned_theme_count,
+            COALESCE(m.active_membership_count, 0) AS active_assigned_theme_count,
+            COALESCE(m.inactive_membership_count, 0) AS inactive_assigned_theme_count,
             ls.latest_snapshot_time,
             ls.latest_snapshot_source,
             ls.latest_price,
@@ -1184,7 +1205,7 @@ def ticker_lookup_memberships(conn, ticker: str) -> pd.DataFrame:
             t.is_active
         FROM theme_membership m
         JOIN themes t ON t.id = m.theme_id
-        WHERE m.ticker = ?
+        WHERE upper(trim(m.ticker)) = ?
         ORDER BY t.name
         """,
         [normalized],
@@ -1438,7 +1459,7 @@ def tickers_dimension(conn) -> pd.DataFrame:
                 s.avg_volume,
                 s.last_updated,
                 r.finished_at AS latest_snapshot_time,
-                ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) AS rn
+                ROW_NUMBER() OVER (PARTITION BY upper(trim(s.ticker)) ORDER BY s.run_id DESC) AS rn
             FROM ticker_snapshots s
             JOIN refresh_runs r ON r.run_id = s.run_id
             WHERE r.status IN ('success', 'partial')
