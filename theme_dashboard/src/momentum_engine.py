@@ -43,6 +43,12 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
     if history.empty:
         return _empty_result()
 
+    history = history.copy()
+    if "theme_id" not in history.columns:
+        history["theme_id"] = history["theme"].astype(str)
+    if "category" not in history.columns:
+        history["category"] = None
+
     source_preference = None
     if "snapshot_source" in history.columns and not history["snapshot_source"].dropna().empty:
         sources = sorted(set(history["snapshot_source"].dropna().astype(str).tolist()))
@@ -67,17 +73,23 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
         else (f"{boundary_classes[0]}-only" if boundary_classes else "unknown")
     )
 
-    history = history.sort_values(["theme", "snapshot_time"]).copy()
+    history = history.sort_values(["theme_id", "snapshot_time", "theme"]).copy()
     history["rank"] = history.groupby("snapshot_time")["composite_score"].rank(method="dense", ascending=False)
 
-    first = history.groupby("theme", as_index=False).first()
-    last = history.groupby("theme", as_index=False).last()
+    first = history.groupby("theme_id", as_index=False).first()
+    last = history.groupby("theme_id", as_index=False).last()
 
-    merged = first[["theme", "composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct", "ticker_count", "rank"]].merge(
-        last[["theme", "composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct", "ticker_count", "rank"]],
-        on="theme",
+    merged = first[
+        ["theme_id", "theme", "category", "composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct", "ticker_count", "rank"]
+    ].merge(
+        last[
+            ["theme_id", "theme", "category", "composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct", "ticker_count", "rank"]
+        ],
+        on="theme_id",
         suffixes=("_start", "_end"),
     )
+    merged["theme"] = merged["theme_end"].where(merged["theme_end"].notna(), merged["theme_start"])
+    merged["category"] = merged["category_end"].where(merged["category_end"].notna(), merged["category_start"])
 
     merged["delta_composite"] = merged["composite_score_end"] - merged["composite_score_start"]
     merged["delta_avg_1w"] = merged["avg_1w_end"] - merged["avg_1w_start"]

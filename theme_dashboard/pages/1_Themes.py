@@ -11,6 +11,8 @@ from src.leaderboard_utils import (
     build_current_leadership_table,
     build_current_performance_table,
     build_window_leaderboard,
+    current_leadership_quality_label,
+    disambiguate_theme_labels,
 )
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.queries import ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
@@ -74,13 +76,47 @@ def _handled_selection_key(source: str) -> str:
     return f"{source}_handled_selection_token"
 
 
+def _theme_option_maps(themes_df: pd.DataFrame) -> tuple[dict[str, int], dict[int, str], dict[str, int]]:
+    base_label_by_id: dict[int, str] = {}
+    base_counts: dict[str, int] = {}
+    for _, row in themes_df.iterrows():
+        theme_id = int(row["id"])
+        base_label = f"{row['name']} ({row['category']})"
+        base_label_by_id[theme_id] = base_label
+        base_counts[base_label] = base_counts.get(base_label, 0) + 1
+
+    label_by_id: dict[int, str] = {}
+    for theme_id, base_label in base_label_by_id.items():
+        label_by_id[theme_id] = f"{base_label} [#{theme_id}]" if base_counts.get(base_label, 0) > 1 else base_label
+
+    options = {label: theme_id for theme_id, label in label_by_id.items()}
+    return options, label_by_id, dict(options)
+
+
+def _display_theme_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "theme" not in df.columns:
+        return df
+    out = disambiguate_theme_labels(df)
+    if "theme_display" in out.columns:
+        out["theme"] = out["theme_display"]
+    return out
+
+
 def _build_historical_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tuple[object, str | None]:
     ranked, msg = build_window_leaderboard(momentum, metric_col, top_k=10)
     if ranked.empty:
         return None, msg
 
-    latest = momentum["history"].sort_values("snapshot_time").groupby("theme", as_index=False).tail(1)
-    ranked = ranked.merge(latest[["theme", "theme_id", "category", "positive_1m_breadth_pct"]], on="theme", how="left")
+    latest = momentum["history"].sort_values(["snapshot_time", "theme"]).groupby("theme_id", as_index=False).tail(1)
+    ranked = ranked.merge(
+        latest[["theme_id", "category", "positive_1m_breadth_pct"]],
+        on="theme_id",
+        how="left",
+        suffixes=("", "_latest"),
+    )
+    if "category_latest" in ranked.columns:
+        ranked["category"] = ranked["category_latest"].where(ranked["category_latest"].notna(), ranked.get("category"))
+        ranked = ranked.drop(columns=["category_latest"])
     ranked = ranked.rename(columns={metric_col: metric_label, "positive_1m_breadth_pct": "breadth_1m"})
     return ranked[["rank", "theme_id", "theme", "category", metric_label, "momentum_score", "rank_change", "breadth_1m"]], None
 
@@ -99,14 +135,16 @@ def _render_leaderboard(title: str, key_prefix: str, leaderboard_df, label_by_id
     st.markdown(f"**{title}**")
     st.caption(
         "Ranked by performance first, then momentum score, then rank improvement. "
+        "This is a historical end-of-window table, so `performance` is the selected boundary-window snapshot metric, not a current eligible/capped rank metric. "
         "Breadth is contextual only and does not determine rank."
     )
+    display_df = _display_theme_table(leaderboard_df)
     visible_cols = ["rank", "theme", "category", "performance", "momentum_score"]
     if show_advanced:
         visible_cols.extend(["rank_change", "breadth_1m"])
     event = render_dataframe(
         f"{key_prefix}_leaderboard",
-        leaderboard_df[visible_cols],
+        display_df[visible_cols],
         width="stretch",
         hide_index=True,
         on_select="rerun",
@@ -139,7 +177,7 @@ def _render_category_leaderboard(title: str, leaderboard_df) -> None:
     st.caption(
         "Category rows are built by grouping the full eligible theme set for the selected window by category. "
         "`performance`, `momentum_score`, and `breadth_1m` are category-level averages across those grouped theme rows. "
-        "`top_themes` previews the strongest underlying themes in that category for the same window. "
+        "`top_themes` previews the strongest underlying themes in that category for the same window, with a minimal suffix only when duplicate names would otherwise look collapsed. "
         "`contributing_themes` is the number of grouped theme rows included in the category summary and is informational; "
         "sorting is driven primarily by performance, then momentum and breadth, with `contributing_themes` only as a lower-priority tie-breaker."
     )
@@ -165,9 +203,12 @@ def _render_category_theme_drill(title: str, breakdown_df) -> None:
             .reset_index(drop=True)
         )
         category_rows["rank"] = category_rows.index + 1
+        display_rows = category_rows.copy()
+        if "theme_display" in display_rows.columns:
+            display_rows["theme"] = display_rows["theme_display"]
         render_dataframe(
             f"{title}_category_drill",
-            category_rows[["rank", "theme", "performance", "momentum_score", "breadth_1m"]],
+            display_rows[["rank", "theme", "performance", "momentum_score", "breadth_1m"]],
             width="stretch",
             hide_index=True,
         )
@@ -180,9 +221,10 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str]) -> No
         "Ranks active themes by current confidence-adjusted composite strength using only eligible preferred-source contributors. "
         "`eligible_contributors` shows how many names actually fed the current rank, while `eligible_breadth_pct` shows the share of governed members that passed live ranking filters."
     )
+    display_df = _display_theme_table(leadership_df)
     event = render_dataframe(
         "current_leadership",
-        leadership_df[
+        display_df[
             [
                 "rank",
                 "theme",
@@ -224,9 +266,10 @@ def _render_current_performance(title: str, key_prefix: str, leaderboard_df, lab
         "Ranks current active themes on the selected window return using eligible preferred-source contributors only. "
         "Displayed performance uses capped constituent returns for aggregation, but raw ticker rows remain unchanged in the detail table."
     )
+    display_df = _display_theme_table(leaderboard_df)
     event = render_dataframe(
         f"{key_prefix}_current",
-        leaderboard_df[
+        display_df[
             [
                 "rank",
                 "theme",
@@ -263,9 +306,7 @@ def _render_current_performance(title: str, key_prefix: str, leaderboard_df, lab
 explore_tab, manage_tab = st.tabs(["Explore", "Manage"])
 
 with explore_tab:
-    options = {f"{r['name']} ({r['category']})": int(r["id"]) for _, r in themes.iterrows()}
-    label_by_id = {v: k for k, v in options.items()}
-    id_by_label = dict(options)
+    options, label_by_id, id_by_label = _theme_option_maps(themes)
     fallback_theme_id = int(themes.iloc[0]["id"])
     selected_theme_id, selected_theme_label = resolve_theme_selection(
         st.session_state.get(SELECTED_THEME_ID_KEY),
@@ -297,7 +338,7 @@ with explore_tab:
 
     st.divider()
     st.subheader("Current Top Themes By Window")
-    st.caption("These are current live/preferred-source theme rankings, hardened for constituent eligibility, outlier control, and minimum contributor count.")
+    st.caption("These are current live/preferred-source theme rankings, hardened for constituent eligibility, outlier control, and minimum contributor count. They answer strongest-now by one window, not strongest historical movement.")
     current_c1, current_c2 = st.columns(2)
     with current_c1:
         if current_1w_df.empty:
@@ -314,7 +355,7 @@ with explore_tab:
     lb2, lb2_msg = _build_historical_leaderboard(momentum_1m, "avg_1m", "performance")
     st.divider()
     st.subheader("Theme Movement Snapshots")
-    st.caption("These tables remain historical movement views built from snapshot windows. Use them to spot rotation and momentum change, not current live leadership.")
+    st.caption("These tables remain historical movement views built from snapshot windows. Use them to spot rotation and momentum change, not current live leadership; displayed `performance` is the end-of-window historical metric for that view.")
     leaderboard_mode = st.radio("Top table view", ["Themes", "Categories"], horizontal=True, key="themes_leaderboard_mode")
     show_advanced_leaderboard = st.checkbox(
         "Show advanced leaderboard context",
@@ -374,27 +415,59 @@ with explore_tab:
         history_df = theme_snapshot_history(conn, theme_id, limit=50)
         theme_current_row = current_theme_metrics[current_theme_metrics["theme_id"] == theme_id].copy()
 
-    if ticker_df.empty:
-        st.warning("No tickers for selected theme.")
-    else:
-        if not theme_current_row.empty:
-            current_row = theme_current_row.iloc[0]
-            qc1, qc2, qc3, qc4 = st.columns(4)
-            qc1.metric("Governed tickers", int(current_row.get("ticker_count") or 0))
-            qc2.metric("Current eligible", int(current_row.get("eligible_composite_count") or 0))
-            qc3.metric("Eligible breadth", f"{float(current_row.get('eligible_breadth_pct') or 0):.1f}%")
-            qc4.metric("Current quality", str(build_current_leadership_table(theme_current_row, top_k=1).iloc[0]["leadership_quality"]))
-            st.caption(
-                "Current theme ranking eligibility is separate from membership: governed members remain in the theme, "
-                "but only eligible preferred-source contributors feed current ranking calculations."
-            )
-        if "perf_1w" in ticker_df.columns:
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Ticker count", int(ticker_df.shape[0]))
-            c2.metric("Avg 1W", f"{ticker_df['perf_1w'].mean():.2f}%")
-            c3.metric("Avg 1M", f"{ticker_df['perf_1m'].mean():.2f}%")
-            c4.metric("Avg 3M", f"{ticker_df['perf_3m'].mean():.2f}%")
+    current_row = theme_current_row.iloc[0] if not theme_current_row.empty else None
+    governed_count = int(current_row.get("ticker_count") or 0) if current_row is not None else int(len(ticker_df))
+    visible_member_rows = int(len(ticker_df))
+    enriched_basis_cols = [col for col in ["price", "perf_1w", "perf_1m", "perf_3m", "avg_volume", "snapshot_time"] if col in ticker_df.columns]
+    enriched_row_count = int(ticker_df[enriched_basis_cols].notna().any(axis=1).sum()) if enriched_basis_cols else 0
 
+    if current_row is not None:
+        qc1, qc2, qc3, qc4 = st.columns(4)
+        qc1.metric("Governed tickers", int(current_row.get("ticker_count") or 0))
+        qc2.metric("Current eligible", int(current_row.get("eligible_composite_count") or 0))
+        qc3.metric("Eligible breadth", f"{float(current_row.get('eligible_breadth_pct') or 0):.1f}%")
+        quality_label = "n/a (inactive theme)" if not bool(current_row.get("is_active")) else current_leadership_quality_label(current_row)
+        qc4.metric("Current quality", str(quality_label))
+        st.caption(
+            "Current theme ranking eligibility is separate from membership: governed members remain in the theme, "
+            "but only eligible preferred-source contributors feed current ranking calculations."
+        )
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Current eligible contribs", int(current_row.get("eligible_composite_count") or 0))
+        c2.metric("Eligible/capped 1W", f"{float(current_row.get('avg_1w') or 0):.2f}%")
+        c3.metric("Eligible/capped 1M", f"{float(current_row.get('avg_1m') or 0):.2f}%")
+        c4.metric("Eligible/capped 3M", f"{float(current_row.get('avg_3m') or 0):.2f}%")
+        st.caption(
+            "These current summary metrics match the current ranking pipeline: preferred-source contributors only, "
+            "eligibility-filtered, and constituent returns capped before aggregation. Raw governed-member ticker rows remain below for inspection."
+        )
+        st.caption("Ticker rows below are current governed-member snapshot rows. They are not recapped or re-filtered to match the summary cards exactly.")
+
+    if governed_count <= 0:
+        st.info("This theme currently has no governed members, so there are no current member rows to display.")
+    elif ticker_df.empty:
+        st.warning(
+            "This theme still has governed membership in current metrics, but no current governed-member rows are visible in the detail table. "
+            "Manual suppression can remove tickers from this current member view while preserving governed membership/history semantics."
+        )
+    elif enriched_row_count <= 0:
+        st.warning(
+            f"This theme has `{visible_member_rows}` visible governed member row(s), but none currently have preferred-source enriched snapshot fields populated. "
+            "Current snapshot coverage, recent refresh state, or sparse provider data can make the table look thin without changing governed membership."
+        )
+    elif enriched_row_count < visible_member_rows:
+        st.info(
+            f"Current enriched coverage is partial for this theme: `{enriched_row_count}` of `{visible_member_rows}` visible governed member row(s) currently have preferred-source snapshot values."
+        )
+
+    if ticker_df.empty and governed_count > 0:
+        st.caption(
+            "If this looks unexpectedly empty, check ticker-level suppression/refresh status in the Themes management tools. "
+            "Governed membership can still exist even when the current detail table has no visible member rows."
+        )
+
+    if not ticker_df.empty:
         display_ticker_df = format_theme_ticker_table(ticker_df)
         for perf_col in ("perf_1w", "perf_1m", "perf_3m"):
             if perf_col in display_ticker_df.columns:
@@ -440,10 +513,15 @@ with explore_tab:
             "`last_refresh_time` is the latest completed refresh in the current ticker-source view."
         )
         render_dataframe("theme_ticker_view", view_df, width="stretch")
-        if not history_df.empty:
-            hist = history_df.sort_values("snapshot_time")
-            st.line_chart(hist.set_index("snapshot_time")[["composite_score", "avg_1m", "positive_1m_breadth_pct"]])
-            render_dataframe("theme_history_table", history_df, width="stretch")
+
+    if not history_df.empty:
+        hist = history_df.sort_values("snapshot_time")
+        st.caption(
+            "Selected-theme history shows preferred-source captured/reconstructed theme history for this theme. "
+            "The movement tables above may prefer recent ticker-history-derived boundary rows when available, so short-window movement can differ without being a bug."
+        )
+        st.line_chart(hist.set_index("snapshot_time")[["composite_score", "avg_1m", "positive_1m_breadth_pct"]])
+        render_dataframe("theme_history_table", history_df, width="stretch")
 
 with manage_tab:
     render_feedback_message(st.session_state, "manage_ticker_feedback")

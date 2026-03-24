@@ -5,7 +5,47 @@ import pandas as pd
 from .config import CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS
 
 
-def _leadership_quality_label(row: pd.Series) -> str:
+def disambiguate_theme_labels(
+    df: pd.DataFrame,
+    *,
+    theme_col: str = "theme",
+    theme_id_col: str = "theme_id",
+    category_col: str = "category",
+    output_col: str = "theme_display",
+) -> pd.DataFrame:
+    if df.empty or theme_col not in df.columns:
+        out = df.copy()
+        if output_col not in out.columns and theme_col in out.columns:
+            out[output_col] = out[theme_col]
+        return out
+
+    out = df.copy()
+    out[output_col] = out[theme_col].fillna("").astype(str).str.strip()
+    name_counts = out[output_col].value_counts()
+    duplicate_names = set(name_counts[name_counts > 1].index.tolist())
+    if not duplicate_names:
+        return out
+
+    if category_col in out.columns:
+        category_text = out[category_col].fillna("").astype(str).str.strip()
+        duplicate_mask = out[output_col].isin(duplicate_names) & category_text.ne("")
+        out.loc[duplicate_mask, output_col] = out.loc[duplicate_mask, theme_col].astype(str).str.strip() + " (" + category_text[duplicate_mask] + ")"
+
+    rendered_counts = out[output_col].value_counts()
+    duplicate_rendered = set(rendered_counts[rendered_counts > 1].index.tolist())
+    if duplicate_rendered and theme_id_col in out.columns:
+        duplicate_mask = out[output_col].isin(duplicate_rendered) & out[theme_id_col].notna()
+        out.loc[duplicate_mask, output_col] = (
+            out.loc[duplicate_mask, output_col].astype(str).str.strip()
+            + " [#"
+            + out.loc[duplicate_mask, theme_id_col].astype(str).str.strip()
+            + "]"
+        )
+
+    return out
+
+
+def current_leadership_quality_label(row: pd.Series) -> str:
     breadth = row.get("eligible_breadth_pct", row.get("positive_1m_breadth_pct"))
     breadth_value = float(breadth) if breadth is not None and not pd.isna(breadth) else None
     ticker_count = int(row.get("eligible_contributor_count", row.get("eligible_composite_count", row.get("ticker_count") or 0)) or 0)
@@ -22,6 +62,10 @@ def _validate_window_leaderboard_inputs(momentum: dict) -> tuple[pd.DataFrame, p
     if history.empty:
         return pd.DataFrame(), pd.DataFrame(), "No snapshots available for this window yet."
 
+    history = history.copy()
+    if "theme_id" not in history.columns and "theme" in history.columns:
+        history["theme_id"] = history["theme"].astype(str)
+
     snapshot_count = int(history["snapshot_time"].nunique())
     if snapshot_count < 2:
         source_hint = momentum.get("source_preference") or "current"
@@ -35,6 +79,10 @@ def _validate_window_leaderboard_inputs(momentum: dict) -> tuple[pd.DataFrame, p
     summary = momentum.get("window_summary", pd.DataFrame())
     if summary.empty:
         return pd.DataFrame(), pd.DataFrame(), "No momentum summary available for this window."
+
+    summary = summary.copy()
+    if "theme_id" not in summary.columns and "theme" in summary.columns:
+        summary["theme_id"] = summary["theme"].astype(str)
 
     return history, summary, None
 
@@ -51,17 +99,17 @@ def build_window_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -> 
     if msg:
         return pd.DataFrame(), msg
 
-    latest = history.sort_values("snapshot_time").groupby("theme", as_index=False).tail(1)
+    latest = history.sort_values(["snapshot_time", "theme"]).groupby("theme_id", as_index=False).tail(1)
 
     ranked = (
-        latest[["theme", perf_col]]
-        .merge(summary[["theme", "momentum_score", "rank_change"]], on="theme", how="left")
-        .sort_values([perf_col, "momentum_score", "rank_change"], ascending=False)
+        latest[["theme_id", "theme", perf_col]]
+        .merge(summary[["theme_id", "momentum_score", "rank_change"]], on="theme_id", how="left")
+        .sort_values([perf_col, "momentum_score", "rank_change", "theme"], ascending=[False, False, False, True])
         .head(top_k)
         .reset_index(drop=True)
     )
     ranked["rank"] = ranked.index + 1
-    return ranked[["rank", "theme", perf_col, "momentum_score", "rank_change"]], None
+    return ranked[["rank", "theme_id", "theme", perf_col, "momentum_score", "rank_change"]], None
 
 
 def build_current_leadership_table(rankings: pd.DataFrame, top_k: int = 12) -> pd.DataFrame:
@@ -80,7 +128,7 @@ def build_current_leadership_table(rankings: pd.DataFrame, top_k: int = 12) -> p
     ).head(top_k).reset_index(drop=True)
     leadership["rank"] = leadership.index + 1
     leadership["eligible_contributor_count"] = leadership["eligible_composite_count"]
-    leadership["leadership_quality"] = leadership.apply(_leadership_quality_label, axis=1)
+    leadership["leadership_quality"] = leadership.apply(current_leadership_quality_label, axis=1)
     leadership = leadership.rename(columns={"positive_1m_breadth_pct": "breadth_1m"})
     return leadership[
         [
@@ -126,7 +174,7 @@ def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k
         ascending=[False, False, False, False, True],
     ).head(top_k).reset_index(drop=True)
     current["rank"] = current.index + 1
-    current["leadership_quality"] = current.apply(_leadership_quality_label, axis=1)
+    current["leadership_quality"] = current.apply(current_leadership_quality_label, axis=1)
     current = current.rename(columns={perf_col: "performance", "positive_1m_breadth_pct": "breadth_1m"})
     return current[
         [
@@ -151,10 +199,10 @@ def build_category_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -
     if msg:
         return pd.DataFrame(), msg
 
-    latest = history.sort_values("snapshot_time").groupby("theme", as_index=False).tail(1)
-    grouped = latest[["theme", "category", perf_col, "positive_1m_breadth_pct"]].merge(
-        summary[["theme", "momentum_score", "rank_change"]],
-        on="theme",
+    latest = history.sort_values(["snapshot_time", "theme"]).groupby("theme_id", as_index=False).tail(1)
+    grouped = latest[["theme_id", "theme", "category", perf_col, "positive_1m_breadth_pct"]].merge(
+        summary[["theme_id", "momentum_score", "rank_change"]],
+        on="theme_id",
         how="left",
     )
     grouped = grouped.rename(columns={perf_col: "performance", "positive_1m_breadth_pct": "breadth_1m"})
@@ -165,11 +213,8 @@ def build_category_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -
         ascending=[True, False, False, False, True],
     ).reset_index(drop=True)
 
-    preview_map = (
-        grouped.groupby("category_group")["theme"]
-        .apply(lambda s: _format_top_theme_preview(s.tolist()))
-        .to_dict()
-    )
+    grouped = disambiguate_theme_labels(grouped, output_col="theme_display")
+    preview_map = grouped.groupby("category_group")["theme_display"].apply(lambda s: _format_top_theme_preview(s.tolist())).to_dict()
 
     aggregated = (
         grouped.groupby("category_group", dropna=False)
@@ -177,7 +222,7 @@ def build_category_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -
             performance=("performance", "mean"),
             momentum_score=("momentum_score", "mean"),
             breadth_1m=("breadth_1m", "mean"),
-            contributing_themes=("theme", "nunique"),
+            contributing_themes=("theme_id", "nunique"),
         )
         .reset_index()
         .rename(columns={"category_group": "category"})
@@ -198,10 +243,10 @@ def build_category_theme_breakdown(momentum: dict, perf_col: str) -> tuple[pd.Da
     if msg:
         return pd.DataFrame(), msg
 
-    latest = history.sort_values("snapshot_time").groupby("theme", as_index=False).tail(1)
-    breakdown = latest[["theme", "category", perf_col, "positive_1m_breadth_pct"]].merge(
-        summary[["theme", "momentum_score", "rank_change"]],
-        on="theme",
+    latest = history.sort_values(["snapshot_time", "theme"]).groupby("theme_id", as_index=False).tail(1)
+    breakdown = latest[["theme_id", "theme", "category", perf_col, "positive_1m_breadth_pct"]].merge(
+        summary[["theme_id", "momentum_score", "rank_change"]],
+        on="theme_id",
         how="left",
     )
     breakdown = breakdown.rename(columns={perf_col: "performance", "positive_1m_breadth_pct": "breadth_1m"})
@@ -211,9 +256,10 @@ def build_category_theme_breakdown(momentum: dict, perf_col: str) -> tuple[pd.Da
         ["category", "performance", "momentum_score", "breadth_1m", "theme"],
         ascending=[True, False, False, False, True],
     ).reset_index(drop=True)
+    breakdown = disambiguate_theme_labels(breakdown, output_col="theme_display")
     for metric_col in ("performance", "momentum_score", "breadth_1m"):
         breakdown[metric_col] = breakdown[metric_col].round(2)
-    return breakdown[["category", "theme", "performance", "momentum_score", "breadth_1m", "rank_change"]], None
+    return breakdown[["theme_id", "category", "theme", "theme_display", "performance", "momentum_score", "breadth_1m", "rank_change"]], None
 
 
 def _format_top_theme_preview(themes: list[str], preview_limit: int = 3) -> str:

@@ -1,187 +1,753 @@
 # Calculated Fields Dictionary
 
-This document inventories the main calculated, derived, and display-transformed fields used by the local Scanning Dashboard on the 2.1 branch.
+This document describes the calculation semantics currently implemented on branch `2.9-DEV-Agenetic-Refinemnet`.
 
 Scope:
-- Theme-level stored metrics and current-view calculations
-- Ticker-level stored metrics and current-view calculations
-- System and diagnostics status fields
-- UI-only display transforms and page-level dataframe shaping
+- Themes page semantics
+- Historical Performance page semantics
+- Current ranking eligibility, capping, and weighting
+- Historical movement provenance and boundary resolution
+- Expected disagreement cases that are not bugs
 
-Conventions:
-- "Stored" means written into DuckDB tables such as `ticker_snapshots` or `theme_snapshots`.
-- "Query-time" means derived when reading from DuckDB.
-- "UI/display-only" means the value is reformatted or relabeled for presentation and is not stored.
-- "Current-view" means the live-facing, source-preferred view used by operational pages.
-- "Preferred source" currently means: if live data exists, use `live`; otherwise fall back to the latest available source.
+Code is the source of truth. If UI wording or older notes disagree with this file, trust the current code in:
+- [theme_dashboard/pages/1_Themes.py](theme_dashboard/pages/1_Themes.py)
+- [theme_dashboard/pages/2_Historical_Performance.py](theme_dashboard/pages/2_Historical_Performance.py)
+- [theme_dashboard/src/rankings.py](theme_dashboard/src/rankings.py)
+- [theme_dashboard/src/queries.py](theme_dashboard/src/queries.py)
+- [theme_dashboard/src/momentum_engine.py](theme_dashboard/src/momentum_engine.py)
+- [theme_dashboard/src/rotation_engine.py](theme_dashboard/src/rotation_engine.py)
+- [theme_dashboard/src/leaderboard_utils.py](theme_dashboard/src/leaderboard_utils.py)
+- [theme_dashboard/src/inflection_engine.py](theme_dashboard/src/inflection_engine.py)
 
-## Source Selection And Current-View Semantics
+## Core Current Ranking Semantics
 
-| Field Name | Level | Human-Readable Logic | Inputs / Dependencies | Code Source | Used In | Notes / Review Flags |
-| --- | --- | --- | --- | --- | --- | --- |
-| `preferred_theme_snapshot_source` | system/diagnostics | Picks the source that should drive theme-facing views. If any theme snapshots exist, `live` is preferred over other sources; otherwise the latest available source wins. | `theme_snapshots.snapshot_source`; fallback to `refresh_runs.provider` if needed | `theme_dashboard/src/queries.py` - `preferred_theme_snapshot_source()` | Theme rankings, Themes page history, Historical Performance, baseline/source audit | Source-sensitive. This is the root of live-preferred theme behavior. |
-| `preferred_ticker_snapshot_source` | system/diagnostics | Picks the source that should drive ticker-facing views. Among successful or partial refresh-backed ticker snapshots, `live` is preferred over other sources; otherwise the latest available source wins. | `ticker_snapshots.snapshot_source`, `refresh_runs.status`, `refresh_runs.provider` | `theme_dashboard/src/queries.py` - `preferred_ticker_snapshot_source()` | Themes page ticker table, ticker history, baseline/source audit | Source-sensitive. Mock rows can remain in the DB without driving current views if live rows exist. |
-| `current-view latest theme snapshot time` | system/diagnostics | Latest theme snapshot timestamp within the preferred theme source only. | Preferred theme source; `theme_snapshots.snapshot_time` | `theme_dashboard/src/queries.py` - `baseline_status()` | Health page "Current data state", `run_baseline_check.py` | This is intentionally not the raw max across all sources. |
-| `current-view latest ticker snapshot time` | system/diagnostics | Latest completed ticker snapshot time within the preferred ticker source only. | Preferred ticker source; `ticker_snapshots.run_id`; `refresh_runs.finished_at`, `refresh_runs.status` | `theme_dashboard/src/queries.py` - `baseline_status()` | Health page "Current data state", `run_baseline_check.py` | Also current-view semantics, not raw overall max. |
-| `recent_theme_sources` | system/diagnostics | Comma-separated list of distinct sources seen in the most recent theme snapshots sample. | `theme_snapshots.snapshot_source` | `theme_dashboard/src/queries.py` - `baseline_status()`, `source_audit_status()` | Health page, `run_baseline_check.py` | Historical residue indicator. Not restricted to preferred source. |
-| `recent_ticker_sources` | system/diagnostics | Comma-separated list of distinct sources seen in the most recent successful/partial ticker snapshot sample. | `ticker_snapshots.snapshot_source`, `refresh_runs.status` | `theme_dashboard/src/queries.py` - `baseline_status()`, `source_audit_status()` | Health page, `run_baseline_check.py` | Historical residue indicator. |
-| `latest_theme_view_sources` | system/diagnostics | Distinct sources present in the latest current-view theme snapshot set after preferred-source selection. | `latest_theme_snapshots()` output | `theme_dashboard/src/queries.py` - `source_audit_status()` | Health page, `run_baseline_check.py` | Used to detect active contamination of current theme views. |
-| `latest_ticker_view_sources` | system/diagnostics | Distinct sources present in the latest current-view ticker snapshot set after preferred-source selection. | `latest_ticker_snapshots()` output | `theme_dashboard/src/queries.py` - `source_audit_status()` | Health page, `run_baseline_check.py` | Used to detect active contamination of current ticker views. |
-| `active_contamination` | system/diagnostics | True when live is the preferred source but the current live-facing view is still mixed or non-live. | Preferred source fields; current-view source fields | `theme_dashboard/src/queries.py` - `source_audit_status()` | Health page, `run_baseline_check.py` | High-signal operational warning. |
-| `historical_residue_only` | system/diagnostics | True when recent history contains mixed sources but current live-facing views remain source-pure under live-preferred selection. | Preferred source fields; recent source lists; current-view source lists | `theme_dashboard/src/queries.py` - `source_audit_status()` | Health page, `run_baseline_check.py` | Important distinction between harmless residue and active leakage. |
+### Current ranking constituent base
 
-## Ticker-Level Stored Metrics
+Current theme-facing ranking surfaces are built from `compute_current_ranking_snapshot()` in `src/rankings.py`.
 
-| Field Name | Level | Human-Readable Logic | Inputs / Dependencies | Code Source | Used In | Notes / Review Flags |
-| --- | --- | --- | --- | --- | --- | --- |
-| `price` | ticker | Latest close from the fetched daily aggregates series for the ticker. | Massive aggregates API close values | `theme_dashboard/src/provider_live.py` - `fetch_ticker_data()` | `ticker_snapshots`, Themes page ticker table, ticker export/history | Stored at refresh time. |
-| `perf_1w` | ticker | Percent return between the latest close and the close 5 trading bars earlier. | Daily closes from provider history | `theme_dashboard/src/provider_live.py` - `_calc_return()`, `fetch_ticker_data()` | `ticker_snapshots`, theme averages, ticker table | Stored. Depends on sufficient history length. |
-| `perf_1m` | ticker | Percent return between the latest close and the close 21 trading bars earlier. | Daily closes from provider history | `theme_dashboard/src/provider_live.py` - `_calc_return()`, `fetch_ticker_data()` | `ticker_snapshots`, theme averages, ticker table | Stored. |
-| `perf_3m` | ticker | Percent return between the latest close and the close 63 trading bars earlier. | Daily closes from provider history | `theme_dashboard/src/provider_live.py` - `_calc_return()`, `fetch_ticker_data()` | `ticker_snapshots`, theme averages, ticker table | Stored. |
-| `avg_volume` | ticker | Arithmetic mean of the most recent 21 non-null daily volumes from the provider history pull. | Daily volumes from provider history | `theme_dashboard/src/provider_live.py` - `_avg_volume()`, `fetch_ticker_data()` | `ticker_snapshots`, Themes page, Airtable ticker exports | Stored. |
-| `market_cap` | ticker | Market cap from the provider reference endpoint when available; if the latest refresh row is null, refresh/query logic carries forward the latest non-null value within the preferred source. | Massive reference payload `market_cap`; prior `ticker_snapshots.market_cap` | `theme_dashboard/src/provider_live.py` - `_fetch_reference()`, `fetch_ticker_data()`; `theme_dashboard/src/fetch_data.py` - `run_refresh()`; `theme_dashboard/src/queries.py` - `theme_ticker_metrics()`, `tickers_dimension()` | Themes page ticker table, Airtable ticker export | Source-sensitive. Query-time carry-forward prevents a new null row from blanking a prior valid cap. |
-| `last_updated` | ticker | Timestamp of the latest daily aggregate in the fetched series. If the provider does not return a bar timestamp, uses current UTC time. | Provider aggregate timestamp `t` | `theme_dashboard/src/provider_live.py` - `_fetch_history()` | `ticker_snapshots`, Themes page, Airtable ticker export | Stored provider-data timestamp, not refresh completion time. |
-| `snapshot_source` | ticker | Source label written onto each ticker snapshot row, typically `live` or `mock`. | Refresh provider name | `theme_dashboard/src/fetch_data.py` - `run_refresh()` | Current-view filters, source audit, Airtable ticker history export | Core provenance field. |
+Constituent load path:
+- `themes` + `theme_membership`
+- latest preferred-source ticker rows from `latest_ticker_snapshots()`
+- optional suppression status from `symbol_refresh_status`
 
-## Theme-Level Stored Metrics
+Current ranking eligibility is per ticker:
+- `snapshot_present = run_id not null AND snapshot_time not null`
+- `price_valid = price >= CURRENT_RANKING_MIN_PRICE`
+- `avg_volume_valid = avg_volume > 0`
+- `dollar_volume_valid = price * avg_volume >= CURRENT_RANKING_MIN_DOLLAR_VOLUME`
+- `not_refresh_suppressed = status != 'refresh_suppressed'`
+- `eligible_ticker = snapshot_present AND price_valid AND avg_volume_valid AND dollar_volume_valid AND not_refresh_suppressed`
 
-| Field Name | Level | Human-Readable Logic | Inputs / Dependencies | Code Source | Used In | Notes / Review Flags |
-| --- | --- | --- | --- | --- | --- | --- |
-| `ticker_count` | theme | Count of member tickers in the theme at snapshot time. | `theme_membership`; per-run ticker rows | `theme_dashboard/src/rankings.py` - `_compute_theme_metrics()` | `theme_snapshots`, Themes page history, Historical Performance, Health | Stored in `theme_snapshots`. |
-| `avg_1w` | theme | Mean of member tickers' `perf_1w` values for a single refresh run. | `ticker_snapshots.perf_1w` joined to theme membership for the run | `theme_dashboard/src/rankings.py` - `_compute_theme_metrics()` | `theme_snapshots`, Themes page, Historical Performance | Stored. |
-| `avg_1m` | theme | Mean of member tickers' `perf_1m` values for a single refresh run. | `ticker_snapshots.perf_1m` joined to theme membership for the run | `theme_dashboard/src/rankings.py` - `_compute_theme_metrics()` | `theme_snapshots`, Themes page, Historical Performance | Stored. |
-| `avg_3m` | theme | Mean of member tickers' `perf_3m` values for a single refresh run. | `ticker_snapshots.perf_3m` joined to theme membership for the run | `theme_dashboard/src/rankings.py` - `_compute_theme_metrics()` | `theme_snapshots`, Themes page, Historical Performance | Stored. |
-| `positive_1w_breadth_pct` | theme | Percent of non-null member `perf_1w` values that are greater than zero. Returns `0` if no valid values exist. | `ticker_snapshots.perf_1w` | `theme_dashboard/src/rankings.py` - `_compute_theme_metrics()` | `theme_snapshots`, Theme history/export | Stored breadth metric. |
-| `positive_1m_breadth_pct` | theme | Percent of non-null member `perf_1m` values that are greater than zero. Returns `0` if no valid values exist. | `ticker_snapshots.perf_1m` | `theme_dashboard/src/rankings.py` - `_compute_theme_metrics()` | Theme rankings, Themes page charts, Historical Performance, source docs | Stored and heavily reused. |
-| `positive_3m_breadth_pct` | theme | Percent of non-null member `perf_3m` values that are greater than zero. Returns `0` if no valid values exist. | `ticker_snapshots.perf_3m` | `theme_dashboard/src/rankings.py` - `_compute_theme_metrics()` | Theme history/export | Stored breadth metric. |
-| `composite_score` | theme | Weighted base theme score `0.25*avg_1w + 0.50*avg_1m + 0.25*avg_3m`, multiplied by a small-theme confidence factor `min(1, sqrt(ticker_count / 8))`. Missing averages are treated as zero before weighting. | `avg_1w`, `avg_1m`, `avg_3m`, `ticker_count`; `COMPOSITE_WEIGHTS`, `THEME_CONFIDENCE_FULL_COUNT` | `theme_dashboard/src/rankings.py` - `_compute_theme_metrics()`; constants in `theme_dashboard/src/config.py` | Theme rankings, Themes page charts, Historical Performance, top-level leadership logic | Stored. This soft-penalizes very small themes while leaving broader themes unchanged once the count threshold is met. |
-| `snapshot_time` | theme | Snapshot timestamp copied from the refresh run's `finished_at`. | `refresh_runs.finished_at` | `theme_dashboard/src/rankings.py` - `persist_theme_snapshot_for_run()` | `theme_snapshots`, all theme history/current-view logic | Stored timing field. |
-| `snapshot_source` | theme | Source label copied from refresh provider, with fallback to `live` if not recognized. | `refresh_runs.provider` | `theme_dashboard/src/rankings.py` - `persist_theme_snapshot_for_run()` | Source audit, live-preferred theme filtering, exports | Core provenance field. |
+Return handling:
+- `perf_1w`, `perf_1m`, `perf_3m` are capped to `[-CURRENT_RANKING_RETURN_CAP_PCT, +CURRENT_RANKING_RETURN_CAP_PCT]` before aggregation
+- means are calculated only across eligible tickers with non-null return for that window
+- breadth uses raw sign on eligible returns, not capped sign
 
-## Theme Rankings And Latest-View Deltas
+Theme-level current ranking fields:
+- `ticker_count = count of governed member tickers present in theme_membership`
+- `eligible_ticker_count = count of current eligible tickers`
+- `eligible_1w_count`, `eligible_1m_count`, `eligible_3m_count` = count of eligible non-null contributors by window
+- `eligible_composite_count = count of tickers eligible for all 3 windows`
+- `eligible_breadth_pct = eligible_ticker_count / ticker_count * 100`
+- `avg_1w`, `avg_1m`, `avg_3m` = mean of capped eligible returns
+- `positive_1w_breadth_pct`, `positive_1m_breadth_pct`, `positive_3m_breadth_pct` = percent of eligible non-null raw returns above zero
 
-| Field Name | Level | Human-Readable Logic | Inputs / Dependencies | Code Source | Used In | Notes / Review Flags |
-| --- | --- | --- | --- | --- | --- | --- |
-| `delta_avg_1w` | theme | Difference between the current theme snapshot `avg_1w` and the prior snapshot `avg_1w` within the preferred source. | `theme_snapshots.avg_1w`; `LAG()` over `run_id` | `theme_dashboard/src/rankings.py` - `compute_theme_rankings()` | Current rankings tables and drill-downs | Query-time delta. Source-sensitive. |
-| `delta_avg_1m` | theme | Difference between current and prior `avg_1m` within the preferred source. | `theme_snapshots.avg_1m`; prior row in preferred source | `theme_dashboard/src/rankings.py` - `compute_theme_rankings()` | Current rankings and momentum context | Query-time delta. |
-| `delta_avg_3m` | theme | Difference between current and prior `avg_3m` within the preferred source. | `theme_snapshots.avg_3m`; prior row in preferred source | `theme_dashboard/src/rankings.py` - `compute_theme_rankings()` | Current rankings context | Query-time delta. |
-| `delta_positive_1m_breadth_pct` | theme | Change in 1M breadth versus the prior preferred-source snapshot. | `positive_1m_breadth_pct`; prior row in preferred source | `theme_dashboard/src/rankings.py` - `compute_theme_rankings()` | Current rankings context | Query-time delta. |
-| `delta_composite_score` | theme | Change in composite score versus the prior preferred-source snapshot. | `composite_score`; prior row in preferred source | `theme_dashboard/src/rankings.py` - `compute_theme_rankings()` | Current rankings context | Query-time delta. |
-| `latest_theme_snapshots` | theme | One latest row per theme within the preferred theme source. | `theme_snapshots`; preferred source | `theme_dashboard/src/queries.py` - `latest_theme_snapshots()` | Source audit; current-view semantics | Current-view helper, not a stored field. |
-| `latest_ticker_snapshots` | ticker | One latest successful/partial row per ticker within the preferred ticker source. | `ticker_snapshots`; `refresh_runs.status`; preferred source | `theme_dashboard/src/queries.py` - `latest_ticker_snapshots()` | Source audit; current-view semantics | Current-view helper, not a stored field. |
+Composite score:
 
-## Momentum Window And Boundary Logic
+```text
+base_score =
+    0.25 * avg_1w
+  + 0.50 * avg_1m
+  + 0.25 * avg_3m
 
-| Field Name | Level | Human-Readable Logic | Inputs / Dependencies | Code Source | Used In | Notes / Review Flags |
-| --- | --- | --- | --- | --- | --- | --- |
-| `theme_history_window` | theme | Builds a comparison window using preferred-source theme snapshots only. The end boundary is the latest snapshot in that source. The start boundary is the nearest snapshot at or before `latest_time - lookback_days`; if none exists, it falls back to the earliest available snapshot in that source. | Preferred source; `theme_snapshots.snapshot_time` | `theme_dashboard/src/queries.py` - `theme_history_window()` | Themes page Top 10 widgets, Historical Performance, inflection logic | Boundary-based windowing. Two total imports on the same day can still be insufficient for 1W/1M if they do not create a true start boundary. |
-| `snapshot_count` for momentum windows | system/diagnostics | Count of unique boundary timestamps available in the selected momentum history. | `theme_history_window()` output | `theme_dashboard/src/momentum_engine.py`, `theme_dashboard/src/leaderboard_utils.py`, `theme_dashboard/src/inflection_engine.py` | Themes page warning text, Historical Performance, inflection feed | Not stored. Drives insufficient-history messaging. |
-| `rank` | theme | Rank of each theme within a given snapshot timestamp, ordered by descending `composite_score` using dense rank (`1` = strongest). | `theme_history_window()` output; `composite_score` | `theme_dashboard/src/momentum_engine.py` - `compute_theme_momentum()` | Historical Performance, rotation/inflection signals | Query-time field. |
-| `rank_start` / `rank_end` | theme | Theme rank at the first and last boundary snapshots in the selected window. | `rank` field derived inside momentum engine | `theme_dashboard/src/momentum_engine.py` - `compute_theme_momentum()` | Historical Performance tables, rotation and inflection logic | Query-time fields. |
-| `composite_score_start` / `composite_score_end` | theme | Theme composite score at the start and end boundaries of the selected window. | First and last rows per theme in `theme_history_window()` | `theme_dashboard/src/momentum_engine.py` - `compute_theme_momentum()` | Historical Performance detail tables | Query-time fields. |
-| `delta_composite` | theme | End minus start composite score for the selected window. Positive means strengthening. | `composite_score_end`, `composite_score_start` | `theme_dashboard/src/momentum_engine.py` - `compute_theme_momentum()` | Historical Performance, inflections, rotation, top-momentum lists | Query-time field. |
-| `delta_avg_1w` | theme | End minus start `avg_1w` over the selected window. | `avg_1w_end`, `avg_1w_start` | `theme_dashboard/src/momentum_engine.py` - `compute_theme_momentum()` | Historical Performance | Query-time field; same label as rankings delta but different time basis. |
-| `delta_avg_1m` | theme | End minus start `avg_1m` over the selected window. | `avg_1m_end`, `avg_1m_start` | `theme_dashboard/src/momentum_engine.py` - `compute_theme_momentum()` | Historical Performance, inflections, rotation | Query-time field. Same label means something different from latest-vs-prior ranking delta. |
-| `delta_avg_3m` | theme | End minus start `avg_3m` over the selected window. | `avg_3m_end`, `avg_3m_start` | `theme_dashboard/src/momentum_engine.py` - `compute_theme_momentum()` | Historical Performance | Query-time field. |
-| `delta_breadth` | theme | End minus start `positive_1m_breadth_pct` over the selected window. Positive means participation broadened. | `positive_1m_breadth_pct_end`, `positive_1m_breadth_pct_start` | `theme_dashboard/src/momentum_engine.py` - `compute_theme_momentum()` | Historical Performance, inflections, rotation | Query-time field. |
-| `delta_ticker_count` | theme | End minus start `ticker_count` over the selected window. | `ticker_count_end`, `ticker_count_start` | `theme_dashboard/src/momentum_engine.py` - `compute_theme_momentum()` | Historical Performance detail table | Query-time field. |
-| `rank_change` | theme | `rank_start - rank_end`. Positive values mean the theme improved in rank. | `rank_start`, `rank_end` | `theme_dashboard/src/momentum_engine.py` - `compute_theme_momentum()` | Historical Performance, rotation, inflection logic, leaderboard sorting | Query-time field. |
-| `momentum_score` | theme | Deterministic momentum score: `0.45*delta_composite + 0.25*delta_avg_1m + 0.20*delta_breadth + 0.10*rank_change`. | Window deltas and rank change | `theme_dashboard/src/momentum_engine.py` - `compute_theme_momentum()` | Historical Performance, Themes page overview leaderboards, rotation/inflection logic | Query-time field. High-impact future tuning candidate. |
-| `new_leaders` | theme | Themes that were not in the top N at the start boundary but are in the top N at the end boundary. | `top_n_membership_changes()` | `theme_dashboard/src/momentum_engine.py` | Historical Performance, rotation intensity | Boundary-based and preferred-source-sensitive. |
-| `dropped_leaders` | theme | Themes that were in the top N at the start boundary but not in the top N at the end boundary. | `top_n_membership_changes()` | `theme_dashboard/src/momentum_engine.py` | Historical Performance, rotation intensity | Boundary-based and preferred-source-sensitive. |
-| `source_preference` | system/diagnostics | Human-readable label of the source set present in the momentum history; if a single source exists, returns that source. | `history.snapshot_source` | `theme_dashboard/src/momentum_engine.py` - `compute_theme_momentum()` | Mainly diagnostic/debug value | Query-time helper. |
-| `top_theme_movers` helper output | theme | Uses the same preferred-source boundary-window policy as the rest of the theme history stack, then returns start/end composite score and 1M breadth deltas for the strongest end-of-window themes. | Preferred source; `theme_snapshots.snapshot_time`, `composite_score`, `positive_1m_breadth_pct`, `themes.name` | `theme_dashboard/src/queries.py` - `top_theme_movers()` | Utility/helper usage only | Query semantics now align with live-preferred current-view policy. |
+theme_confidence_factor =
+    min(1, sqrt(ticker_count / THEME_CONFIDENCE_FULL_COUNT))
 
-## Rotation, Inflection, And Theme-Movement Signals
+composite_score =
+    base_score * theme_confidence_factor
+```
 
-| Field Name | Level | Human-Readable Logic | Inputs / Dependencies | Code Source | Used In | Notes / Review Flags |
-| --- | --- | --- | --- | --- | --- | --- |
-| `rotating_into` | theme | Themes whose `rank_end` is inside top N while `rank_start` was outside top N. | `rank_start`, `rank_end`, `momentum_score` | `theme_dashboard/src/rotation_engine.py` - `compute_theme_rotation()` | Historical Performance | Query-time classification. |
-| `rotating_out` | theme | Themes whose `rank_start` was inside top N and `rank_end` is outside top N. | `rank_start`, `rank_end`, `momentum_score` | `theme_dashboard/src/rotation_engine.py` - `compute_theme_rotation()` | Historical Performance | Query-time classification. |
-| `emerging` | theme | Themes with large positive rank change and simultaneous improvement in composite score, `avg_1m`, and breadth. Threshold for rank improvement is `max(5, top_n * 0.25)`. | `rank_change`, `delta_composite`, `delta_avg_1m`, `delta_breadth` | `theme_dashboard/src/rotation_engine.py` - `compute_theme_rotation()` | Historical Performance | Query-time classification. Tunable thresholds. |
-| `fading` | theme | Themes with large negative rank change plus deterioration in composite score, `avg_1m`, and breadth. | `rank_change`, `delta_composite`, `delta_avg_1m`, `delta_breadth` | `theme_dashboard/src/rotation_engine.py` - `compute_theme_rotation()` | Historical Performance | Query-time classification. |
-| `acceleration` | theme | Current leaders (`rank_end <= top_n`) still gaining composite score and rank, with momentum score above the 60th percentile of current leaders. | `rank_end`, `delta_composite`, `rank_change`, `momentum_score` | `theme_dashboard/src/rotation_engine.py` - `compute_theme_rotation()` | Historical Performance | Query-time classification with percentile-based threshold. |
-| `deterioration` | theme | Current leaders whose composite score and rank are both worsening. | `rank_end`, `delta_composite`, `rank_change` | `theme_dashboard/src/rotation_engine.py` - `compute_theme_rotation()` | Historical Performance | Query-time classification. |
-| `rotation_intensity_score` | system/diagnostics | Percent of the top-N basket that changed membership during the selected window: `((entered_top_n + exited_top_n) / top_n) * 100`. | `new_leaders`, `dropped_leaders`, `top_n` | `theme_dashboard/src/rotation_engine.py` - `compute_theme_rotation()` | Historical Performance summary metrics | Query-time field. |
-| `accel_trend_up` | theme | True when the last two composite-score changes over the recent history tail show continued or improving acceleration. | Last 4 history points per theme; `composite_score` | `theme_dashboard/src/inflection_engine.py` - `_recent_trend_flags()` | Inflection detection only | Query-time trend flag. |
-| `avg1m_trend_up` | theme | True when the latest `avg_1m` change is positive on the recent history tail. | Last 4 history points per theme; `avg_1m` | `theme_dashboard/src/inflection_engine.py` - `_recent_trend_flags()` | Inflection detection only | Query-time trend flag. |
-| `signal_type` / `signal_label` | theme | High-confidence signal category assigned to a theme, such as `rotating_out`, `rotating_into`, `emerging`, `accelerating`, `weakening`, or `leadership_deterioration`. | Momentum summary, rotation buckets, trend flags, thresholds | `theme_dashboard/src/inflection_engine.py` - `compute_theme_inflections()` | Historical Performance inflection feed | Query-time classification. |
-| `priority` | theme | Internal ordering weight for signal classes, used to keep only the highest-priority signal per theme in a single detection pass. | `SIGNAL_PRIORITY` mapping | `theme_dashboard/src/inflection_engine.py` - `compute_theme_inflections()` | Historical Performance inflection feed | Noise-control field, not a user metric per se. |
-| `reason` | UI/display-only | Human-readable explanation string describing why a signal fired. | Signal metrics and thresholds | `theme_dashboard/src/inflection_engine.py` - `compute_theme_inflections()` | Historical Performance inflection feed | Display text, not a business metric. |
-| `detected_at` / `window_start` / `window_end` | system/diagnostics | Detection time and effective analysis boundaries for an inflection run. | Momentum history timestamps | `theme_dashboard/src/inflection_engine.py` - `compute_theme_inflections()` | Historical Performance inflection metadata | Query-time metadata. |
+Important nuance:
+- the confidence factor uses `ticker_count`, not `eligible_composite_count`
+- `composite_score` is set to null when `eligible_composite_count == 0`
 
-## Theme And Ticker Query-Time Current Views
+Current ranking minimum threshold:
+- `CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS` gates current leaderboard inclusion
+- current leadership requires `eligible_composite_count >= threshold`
+- current top-by-window requires the corresponding `eligible_1w_count` or `eligible_1m_count` or `eligible_3m_count` to meet the threshold
 
-| Field Name | Level | Human-Readable Logic | Inputs / Dependencies | Code Source | Used In | Notes / Review Flags |
-| --- | --- | --- | --- | --- | --- | --- |
-| `theme_ticker_metrics` result set | ticker | Returns one row per ticker in a selected theme using the preferred ticker source only. The main ticker row is the latest successful/partial snapshot per ticker, with market cap backfilled from the latest non-null cap in the same preferred source if necessary. | `theme_membership`, `ticker_snapshots`, `refresh_runs`, preferred ticker source | `theme_dashboard/src/queries.py` - `theme_ticker_metrics()` | Themes page ticker table | Current-view helper. Important for market-cap continuity. |
-| `latest_refresh_time` | system/diagnostics | Latest completed refresh time within the preferred ticker source, attached to every row returned by `theme_ticker_metrics()`. | `refresh_runs.finished_at`; preferred ticker source | `theme_dashboard/src/queries.py` - `theme_ticker_metrics()` | Themes page ticker table | Query-time field for display context. |
-| `theme_snapshot_history` | theme | Recent history for one theme, restricted to the preferred theme source. | `theme_snapshots`; preferred theme source | `theme_dashboard/src/queries.py` - `theme_snapshot_history()` | Themes page single-theme chart | Current-view history helper. |
-| `theme_history_last_n_snapshots` | theme | Last N snapshots for a theme, restricted to the preferred theme source. | `theme_snapshots`; preferred theme source | `theme_dashboard/src/queries.py` - `theme_history_last_n_snapshots()` | Export/analysis helpers | Current-view history helper. |
-| `ticker_history_last_n_snapshots` | ticker | Last N successful/partial snapshots for a ticker, restricted to the preferred ticker source. | `ticker_snapshots`, `refresh_runs`, preferred ticker source | `theme_dashboard/src/queries.py` - `ticker_history_last_n_snapshots()` | Export/analysis helpers | Current-view history helper. |
-| `themes_dimension` | theme | Simple theme dimension projection: `id -> theme_id`, plus `theme_name`, `category`, `is_active`. | `themes` | `theme_dashboard/src/queries.py` - `themes_dimension()` | Airtable export | Not a calculation, but a dimension remap. |
-| `tickers_dimension.latest_market_cap` | ticker | Latest non-null market cap across successful/partial ticker snapshots for each ticker, paired with the latest completed snapshot metadata. | `ticker_snapshots.market_cap`, `ticker_snapshots.avg_volume`, `ticker_snapshots.last_updated`, `refresh_runs.finished_at` | `theme_dashboard/src/queries.py` - `tickers_dimension()` | Airtable export | Similar semantics to `theme_ticker_metrics()` market cap handling. |
+Leadership quality label from `current_leadership_quality_label()`:
+- `Broad leader` if breadth >= 60 and contributor count >= 8
+- `Thin / filtered` if contributor count <= threshold + 1 or breadth < 45
+- otherwise `Narrow leader`
 
-## Health, Baseline, And Operational Status Fields
+## Themes Page
 
-| Field Name | Level | Human-Readable Logic | Inputs / Dependencies | Code Source | Used In | Notes / Review Flags |
-| --- | --- | --- | --- | --- | --- | --- |
-| `themes_count` | system/diagnostics | Number of themes currently stored. | `themes` | `theme_dashboard/src/queries.py` - `baseline_status()` | Health page, baseline check | Read-only count. |
-| `ticker_snapshot_rows` / `theme_snapshot_rows` | system/diagnostics | Total stored row counts in snapshot tables. | `ticker_snapshots`, `theme_snapshots` | `theme_dashboard/src/queries.py` - `baseline_status()`, `snapshot_counts()` | Health page, baseline check | Raw volume counters. |
-| `runs_with_theme_snapshots` | system/diagnostics | Count of distinct runs that persisted theme snapshots. | `theme_snapshots.run_id` | `theme_dashboard/src/queries.py` - `baseline_status()`, `snapshot_counts()` | Health page, baseline check | Useful proxy for history depth. |
-| `theme_snapshot_sets` / `ticker_snapshot_sets` | system/diagnostics | Count of distinct current-view boundary timestamps within the preferred theme/ticker source. | Preferred-source filtered timestamps | `theme_dashboard/src/queries.py` - `baseline_status()` | Health page, baseline check, shallow-history warnings | Current-view semantics. |
-| `latest_run_id` / `latest_run_provider` / `latest_run_status` / `latest_run_finished_at` | system/diagnostics | Metadata for the most recent refresh run, regardless of source. | `refresh_runs` | `theme_dashboard/src/queries.py` - `baseline_status()` | Health page, baseline check | This is run metadata, not current-view selection logic. |
-| `constituent_count` | theme | Total number of member tickers in a theme. | `themes`, `theme_membership` | `theme_dashboard/src/queries.py` - `theme_health_overview()` | Health page theme-health table | Query-time field. |
-| `low_count_flag` | theme | True when a theme has at least one constituent but fewer than the configured low-count threshold. | `constituent_count`; threshold input | `theme_dashboard/src/queries.py` - `theme_health_overview()` | Health page theme-health filters and table | Query-time flag. |
-| `empty_theme_flag` | theme | True when a theme has zero constituents. | `constituent_count` | `theme_dashboard/src/queries.py` - `theme_health_overview()` | Health page | Query-time flag. |
-| `live_failure_count_recent` | theme | Number of recent refresh failures attributable to live runs for tickers belonging to the theme, within the configured lookback window. | `refresh_failures`, `refresh_runs.provider`, `refresh_failures.created_at`, `theme_membership` | `theme_dashboard/src/queries.py` - `theme_health_overview()` | Health page | Query-time field. Live-only by design. |
-| `theme_health latest_snapshot_time` | theme | Latest snapshot time per theme within the preferred current-view theme source. | Preferred theme source; `theme_snapshots.snapshot_time` | `theme_dashboard/src/queries.py` - `theme_health_overview()` | Health page theme-health table | Now aligned with Health's live-preferred diagnostics semantics. |
-| `health_status` | theme | Triage label: `needs_attention` if empty or inactive-with-members; `watch` if recent live failures are high or constituent count is low; otherwise `healthy`. | `constituent_count`, `is_active`, `live_failure_count_recent`, threshold input | `theme_dashboard/src/queries.py` - `theme_health_overview()` | Health page metrics and table | High-signal operational classification. |
-| `missing_tables` | system/diagnostics | List of expected core tables absent from the DB. | `duckdb_tables()` compared to expected list | `theme_dashboard/src/queries.py` - `core_table_status()`; `theme_dashboard/run_baseline_check.py` | Baseline verification CLI | Preflight-only diagnostic. |
-| `warnings` in baseline check | system/diagnostics | Human-readable issues raised when themes are absent, history is shallow, or source contamination/residue is present. | `baseline_status()` and `source_audit_status()` outputs | `theme_dashboard/run_baseline_check.py` - `collect_baseline_check()` | Baseline verification CLI | Display-only status synthesis. |
+### Current Market Leadership
 
-## UI And Display-Only Transformations
+Purpose:
+- strongest current themes now, using the current ranking pipeline
 
-| Field Name | Level | Human-Readable Logic | Inputs / Dependencies | Code Source | Used In | Notes / Review Flags |
-| --- | --- | --- | --- | --- | --- | --- |
-| `human_readable_number` | UI/display-only | Formats large numbers as `K`, `M`, `B`, or `T` with one decimal place. | Numeric value | `theme_dashboard/src/metric_formatting.py` - `human_readable_number()` | Themes page ticker table | Pure formatting. No business logic. |
-| `short_timestamp` | UI/display-only | Formats timestamps as `Mon D HH:MM`. | Timestamp-like value | `theme_dashboard/src/metric_formatting.py` - `short_timestamp()` | Themes page, Health page | Pure formatting. |
-| `format_price` | UI/display-only | Formats prices to two decimals for values >= 1 and four decimals for sub-dollar values. | Numeric price | `theme_dashboard/src/metric_formatting.py` - `format_price()` | Themes page ticker table | Pure formatting. |
-| `display_or_dash` | UI/display-only | Replaces null or blank values with an em-dash-like placeholder. | Any display value | `theme_dashboard/src/metric_formatting.py` - `display_or_dash()` | Themes page, Health page | Pure formatting. File currently renders a mojibake dash string in source; worth a later encoding cleanup. |
-| `dollar_volume` | ticker / UI-display-only | Calculated in the UI table as `price * avg_volume` using numeric values before formatting. | `price`, `avg_volume` | `theme_dashboard/src/metric_formatting.py` - `format_theme_ticker_table()` | Themes page ticker table | Not stored in DuckDB. Display-only derived field. |
-| formatted `perf_1w` / `perf_1m` / `perf_3m` | UI/display-only | Rounded to two decimals and rendered with `%`; missing values show as dash. | Raw perf columns | `theme_dashboard/src/metric_formatting.py` - `format_theme_ticker_table()`; `theme_dashboard/pages/1_Themes.py` | Themes page ticker table | Display-only. |
-| `market_data_time` | UI/display-only | Renamed display label for `last_updated` to distinguish provider data time from snapshot capture time. | `theme_ticker_metrics().last_updated` | `theme_dashboard/pages/1_Themes.py` | Themes page | Pure relabeling. |
-| `last_refresh_time` | UI/display-only | Renamed display label for `latest_refresh_time`. | `theme_ticker_metrics().latest_refresh_time` | `theme_dashboard/pages/1_Themes.py` | Themes page | Pure relabeling. |
-| `breadth_1m` | UI/display-only | Renamed display label for `positive_1m_breadth_pct` in Top 10 theme leaderboard tables. | `positive_1m_breadth_pct` from latest row in momentum history | `theme_dashboard/pages/1_Themes.py` - `_build_leaderboard()` | Themes page Top 10 tables | Display-only rename. |
-| `window_perf` | UI/display-only | Generic display label for the selected primary window metric in Historical Performance tables. | Chosen metric column such as `avg_1w`, `avg_1m`, or `avg_3m` | `theme_dashboard/pages/2_Historical_Performance.py` | Historical Performance | Display alias, not a distinct calculation. |
-| `display_value` | UI/display-only | Chart y-value for Historical Performance, derived from the selected metric, optionally reindexed to 100 at the start or replaced by rank, then optionally smoothed with a rolling mean. | Selected metric, display mode, smoothing choice | `theme_dashboard/pages/2_Historical_Performance.py` | Historical Performance line chart | Pure presentation logic, not stored. |
-| indexed chart mode | UI/display-only | Converts each theme's line to `metric / start_value * 100`, using 100 if the start value is missing or zero after replacement. | `display_value` start per theme | `theme_dashboard/pages/2_Historical_Performance.py` | Historical Performance line chart | Display-only normalization. |
-| rolling smoothing | UI/display-only | Replaces chart `display_value` with a 3-period or 5-period rolling mean if selected. | `display_value`; smoothing window | `theme_dashboard/pages/2_Historical_Performance.py` | Historical Performance line chart | Display-only. |
-| `leader_tier` | UI/display-only | Tags lines as `current leader` when the theme is in the current top 3 by `rank_end`; otherwise `other`. | `summary.rank_end` | `theme_dashboard/pages/2_Historical_Performance.py` | Historical Performance chart styling | Presentation-only classification. |
-| `trigger_reason` | UI/display-only | Compact textual explanation combining rank change, momentum score, delta composite, and delta breadth for specific tables. | Existing momentum fields | `theme_dashboard/pages/2_Historical_Performance.py` - `_signal_reason_text()` | Historical Performance expanders | Display-only helper. |
+View type:
+- current-view
 
-## Page-Level Usage Notes
+Source path:
+- `compute_current_ranking_snapshot()` -> `theme_metrics`
+- `build_current_leadership_table()`
 
-- **Themes page**
-  - Top 10 widgets use `compute_theme_momentum()` plus `build_window_leaderboard()`.
-  - The warning about needing two boundary snapshots is based on unique boundary timestamps inside the selected window, not just total refresh count.
-  - Ticker table uses `theme_ticker_metrics()` and then `format_theme_ticker_table()`, so the visible market cap, volume, dollar volume, and timestamps are display transforms layered on top of current-view query results.
+Visible columns:
+- `rank`
+- `theme`
+- `category`
+- `composite_score`
+- `avg_1w`
+- `avg_1m`
+- `avg_3m`
+- `breadth_1m`
+- `ticker_count`
+- `eligible_contributor_count`
+- `eligible_breadth_pct`
+- `leadership_quality`
 
-- **Historical Performance page**
-  - Uses the same `compute_theme_momentum()` window summary for rankings, rotation, and signal detection.
-  - Several labels reuse the same names as ranking deltas (`delta_avg_1m`, `rank_change`) but here they mean start-vs-end window comparisons, not latest-vs-prior-snapshot deltas.
-  - The chart can switch between raw metric, indexed metric, and rank movement without changing stored data.
+Sort order:
+- `composite_score desc`
+- `positive_1m_breadth_pct desc`
+- `eligible_composite_count desc`
+- `ticker_count desc`
+- `theme asc`
 
-- **Health page**
-  - "Current data state" uses `baseline_status()` and therefore reflects preferred-source current-view timestamps.
-  - "Source audit" uses `source_audit_status()` to distinguish active contamination from harmless mixed-source residue.
-  - Theme health uses `theme_health_overview()` and now reports the latest snapshot time within the preferred current-view theme source.
+Filters and gates:
+- `is_active == True`
+- `eligible_composite_count >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS`
 
-## Review Flags For Later
+Semantics:
+- `avg_*` values are eligible-only and capped
+- `breadth_1m` is renamed from `positive_1m_breadth_pct`
+- `eligible_contributor_count = eligible_composite_count`
 
-- `momentum_score` and `composite_score` are both high-impact composite formulas with fixed weights. They are documented here to make later tuning easier.
-- Several display helpers currently show a mojibake dash string in source (`â€”`). That is formatting-only, but it is a candidate for a later encoding cleanup commit.
-- The same field names such as `delta_avg_1m` and `rank_change` appear in more than one context with different comparison bases:
-  - rankings context = latest snapshot vs prior snapshot
-  - momentum context = window end vs window start
-  This is not wrong, but it is easy to misread during review.
+### Current Top Themes By Window
+
+Purpose:
+- strongest current themes for one return window at a time
+
+View type:
+- current-view
+
+Source path:
+- `compute_current_ranking_snapshot()` -> `theme_metrics`
+- `build_current_performance_table()`
+
+Major surfaces:
+- `Top Themes - Current 1W`
+- `Top Themes - Current 1M`
+
+Visible columns:
+- `rank`
+- `theme`
+- `category`
+- `performance`
+- `composite_score`
+- `breadth_1m`
+- `ticker_count`
+- `eligible_contributor_count`
+- `eligible_breadth_pct`
+- `leadership_quality`
+
+Sort order:
+- selected `perf_col desc`
+- `composite_score desc`
+- `eligible_contributor_count desc`
+- `eligible_breadth_pct desc`
+- `theme asc`
+
+Filters and gates:
+- `is_active == True`
+- `eligible_1w_count >= threshold` for 1W
+- `eligible_1m_count >= threshold` for 1M
+- same capped eligible-return semantics as Current Market Leadership
+
+Semantics:
+- `performance` is the capped current eligible mean for that window
+- `composite_score` is still shown as context, but is not the primary ranking key here
+
+### Theme Movement Snapshots
+
+Purpose:
+- top historical themes across a resolved 1W or 1M movement window
+
+View type:
+- boundary-window historical view
+
+Source path:
+- `theme_history_window()`
+- `compute_theme_momentum()`
+- `build_window_leaderboard()`
+- `build_category_leaderboard()`
+- `build_category_theme_breakdown()`
+
+Major surfaces:
+- `Top 10 Themes - 1W`
+- `Top 10 Themes - 1M`
+- `Top Categories - 1W`
+- `Top Categories - 1M`
+- category drill to underlying themes
+
+Theme leaderboard visible columns:
+- `rank`
+- `theme`
+- `category`
+- `performance`
+- `momentum_score`
+- optional `rank_change`
+- optional `breadth_1m`
+
+Theme leaderboard sort order from `build_window_leaderboard()`:
+- latest selected `perf_col desc`
+- `momentum_score desc`
+- `rank_change desc`
+- `theme asc`
+
+Category leaderboard visible columns:
+- `rank`
+- `category`
+- `top_themes`
+- `contributing_themes`
+- `performance`
+- `momentum_score`
+- `breadth_1m`
+
+Category aggregation:
+- built from the full latest theme set in the selected window, not just the displayed top 10 themes
+- `performance = mean(theme performance)`
+- `momentum_score = mean(theme momentum_score)`
+- `breadth_1m = mean(theme breadth_1m)`
+- `contributing_themes = nunique(theme_id)`
+
+Category sort order:
+- `performance desc`
+- `momentum_score desc`
+- `breadth_1m desc`
+- `contributing_themes desc`
+- `category asc`
+
+Category drill sort order:
+- `category asc`
+- `performance desc`
+- `momentum_score desc`
+- `breadth_1m desc`
+- `theme asc`
+
+Semantics:
+- identity is `theme_id` where available
+- visible labels remain theme names
+- `performance` is historical latest-row window performance, not current-view eligible/capped performance
+
+### Selected Theme Detail Panel
+
+Purpose:
+- current governed-member detail plus theme-level historical snapshot context
+
+View type:
+- mixed current-view + historical-view
+
+Current ticker detail source path:
+- `theme_ticker_metrics(theme_id)`
+- `format_theme_ticker_table()`
+
+Current summary cards:
+- `Governed tickers`
+- `Current eligible`
+- `Eligible/capped 1W`
+- `Eligible/capped 1M`
+- `Eligible/capped 3M`
+- `Eligible breadth`
+- `Current quality`
+
+Current summary semantics:
+- summary cards now intentionally match the current ranking pipeline
+- `Eligible/capped 1W/1M/3M` come from `current_theme_metrics`
+- `Current quality` is computed directly from the selected row; inactive themes show `n/a (inactive theme)`
+
+Ticker table semantics:
+- governed-membership-first view
+- suppression filtered out
+- latest preferred-source ticker row per ticker
+- market cap can backfill from the latest non-null preferred-source row
+- sorted by `ticker asc`
+- `dollar_volume = price * avg_volume` is UI-only
+
+Selected-theme history source path:
+- `theme_snapshot_history(theme_id, include_recent_ticker_history=False)` on Themes page
+
+Selected-theme history precedence:
+- `captured > reconstructed`
+
+Important mismatch:
+- the Themes page selected-theme history is intentionally not the same surface as movement tables above it
+- movement tables may use recent `ticker_history_derived` boundary rows
+- selected-theme history on this page is described as preferred-source captured/reconstructed theme history
+
+## Historical Performance Page
+
+### Main movement workflow
+
+Purpose:
+- audit what changed across a resolved historical window, with explicit trust/provenance context
+
+View type:
+- boundary-window historical view
+
+Source path:
+- `load_theme_momentum_cached()` -> `compute_theme_momentum()` -> `theme_history_window()`
+
+Trust strip fields:
+- `Effective window start`
+- `Effective window end`
+- `Boundary snapshots`
+- `History depth quality`
+
+What the trust strip summarizes:
+- resolved boundary dates actually used
+- number of distinct boundary timestamps in the selected history
+- provenance mix for the full window and the boundary rows
+- whether the requested window collapsed to a shorter effective window
+
+`History depth quality`:
+- `Too shallow` if fewer than 2 boundary snapshots or no analyzed themes
+- `Mixed` if `collapsed_to_available_history` is true, or provenance contains `mixed` or `reconstructed`
+- otherwise `Good`
+
+### theme_history_window()
+
+This is the key movement-window read path.
+
+Source path:
+- `theme_history_window()` in `src/queries.py`
+- internally uses `_recent_movement_theme_snapshot_union()`
+- boundary resolution from `_resolve_recent_movement_boundaries()`
+
+Movement workflow precedence:
+- when recent `ticker_history_derived` rows are available: `ticker_history_derived > captured > reconstructed`
+- otherwise fallback precedence remains `captured > ticker_history_derived > reconstructed`
+
+What can feed the union:
+- `captured`
+- `ticker_history_derived`
+- `reconstructed`
+
+Boundary selection logic:
+- end boundary = latest derived day if any derived rows exist in the movement union
+- otherwise end boundary = latest available snapshot in the union
+- start boundary = nearest snapshot `<= end_time - lookback_days`
+- if none exists, start boundary falls back to earliest available snapshot
+
+Deduping identity:
+- same-date winner is selected per `theme_id + snapshot_date`
+
+Returned window:
+- all rows between resolved start and end timestamps inclusive
+- sorted `snapshot_time asc, composite_score desc`
+
+`collapsed_to_available_history`:
+- true when `effective_window_days < requested_lookback_days`
+- means the requested lookback was longer than the currently available boundary depth
+- this is expected on shallow history and is not, by itself, a bug
+
+### compute_theme_momentum()
+
+Purpose:
+- compute start/end comparison fields for each theme over the resolved movement window
+
+Identity:
+- grouped by `theme_id`
+- narrow fallback to `theme` only if `theme_id` is absent in synthetic/test frames
+
+Per-snapshot rank:
+- dense rank within `snapshot_time`
+- `composite_score desc`
+- rank 1 is strongest
+
+Derived fields:
+- `rank_start`, `rank_end`
+- `composite_score_start`, `composite_score_end`
+- `delta_composite = end - start`
+- `delta_avg_1w = avg_1w_end - avg_1w_start`
+- `delta_avg_1m = avg_1m_end - avg_1m_start`
+- `delta_avg_3m = avg_3m_end - avg_3m_start`
+- `delta_breadth = positive_1m_breadth_pct_end - positive_1m_breadth_pct_start`
+- `delta_ticker_count = ticker_count_end - ticker_count_start`
+- `rank_change = rank_start - rank_end`
+
+Momentum score:
+
+```text
+momentum_score =
+    0.45 * delta_composite
+  + 0.25 * delta_avg_1m
+  + 0.20 * delta_breadth
+  + 0.10 * rank_change
+```
+
+Returned summary ordering:
+- `window_summary`: `momentum_score desc`, `delta_composite desc`
+- `top_momentum`: `momentum_score desc`
+- `biggest_risers`: `rank_change desc`, `delta_composite desc`
+- `biggest_fallers`: `rank_change asc`, `delta_composite asc`
+- `breadth_improvers`: `delta_breadth desc`
+- `weakening_themes`: `delta_composite asc`, `delta_breadth asc`
+
+Metadata returned in `meta`:
+- `requested_lookback_days`
+- `window_start`
+- `window_end`
+- `boundary_snapshot_count`
+- `effective_window_days`
+- `collapsed_to_available_history`
+- `provenance_mix`
+- `boundary_provenance_mix`
+
+### Most Improving Themes In This Window
+
+Purpose:
+- rank themes by strongest positive movement, not strongest current level
+
+Visible columns:
+- `rank`
+- `theme`
+- `rank_change`
+- `delta_composite`
+- `momentum_score`
+- optional `delta_avg_1m`
+- optional `delta_breadth`
+
+Sort order:
+- `momentum_score desc`
+- `delta_composite desc`
+- `rank_change desc`
+
+### Top Momentum Themes
+
+Purpose:
+- clearest direct view of the page's deterministic momentum model
+
+Visible columns:
+- `theme`
+- `momentum_score`
+- `delta_composite`
+- `rank_change`
+- `delta_breadth`
+
+Sort order:
+- `momentum_score desc`
+
+### Movement Chart
+
+Purpose:
+- visualize historical movement for selected themes in the resolved window
+
+Displayed metric options:
+- `composite_score`
+- `avg_1w`
+- `avg_1m`
+- `avg_3m`
+- `positive_1m_breadth_pct`
+- `ticker_count`
+
+Display modes:
+- `raw metric`
+- `indexed (100=start)`
+- `rank movement`
+
+Chart transformations:
+- filtering by category and search is page-side only
+- displayed theme identity is `theme_id`
+- labels remain names
+- indexed mode rebases to `metric / start_value * 100`, using 100 if start is missing or zero
+- smoothing uses 3-period or 5-period rolling mean per `theme_id`
+- `leader_tier = current leader` if `theme_id` is in `summary.sort_values("rank_end").head(3)`
+
+Important note:
+- the chart does not change ranking or stored calculations
+- it is a presentation layer over the resolved movement history
+
+### Theme Signals (Deterministic Inflection Feed)
+
+Purpose:
+- one highest-priority deterministic signal per theme for the selected window
+
+Source path:
+- `compute_theme_inflections()`
+- internally reuses `compute_theme_momentum()` and `compute_theme_rotation()`
+
+Identity:
+- trend merge, rotation membership checks, and one-signal dedupe use `theme_id`
+
+Recent trend flags from `_recent_trend_flags()`:
+- looks at the last 4 rows per `theme_id`
+- `accel_trend_up = last composite delta > 0 AND prior composite delta >= 0`
+- `avg1m_trend_up = latest avg_1m delta > 0`
+
+Signal thresholds:
+- `MIN_SIGNAL_MOMENTUM = 1.5`
+- `MIN_SIGNAL_COMPOSITE = 0.5`
+- `MIN_SIGNAL_AVG1M = 0.25`
+- `rank_thr = max(5, int(top_n * 0.25))`
+
+Signal families:
+- `rotating_out`
+- `leadership_deterioration`
+- `rotating_into`
+- `emerging`
+- `accelerating`
+- `weakening`
+
+Internal priority:
+- `rotating_out = 5`
+- `leadership_deterioration = 4`
+- `rotating_into = 3`
+- `emerging = 2`
+- `accelerating = 1`
+- `weakening = 1`
+
+One-signal-per-theme noise control:
+- sort by `theme_id`, `priority desc`, `momentum_score desc`, `rank_change desc`
+- keep first row per `theme_id`
+- final output sort: `priority desc`, `momentum_score desc`, `rank_change desc`, `theme asc`
+
+### Rotation Signals
+
+Purpose:
+- classify leadership turnover and secondary rotation buckets from the same movement summary
+
+Source path:
+- `compute_theme_rotation(summary, top_n, new_leaders, dropped_leaders)`
+
+Rotation buckets:
+- `rotating_into`: `rank_end <= top_n AND rank_start > top_n`
+- `rotating_out`: `rank_start <= top_n AND rank_end > top_n`
+- `emerging`: `rank_change >= max(5, int(top_n * 0.25))` and `delta_composite > 0` and `delta_avg_1m > 0` and `delta_breadth > 0`
+- `fading`: `rank_change <= -max(5, int(top_n * 0.25))` and `delta_composite < 0` and `delta_avg_1m < 0` and `delta_breadth < 0`
+- `acceleration`: current leaders with `delta_composite > 0`, `rank_change > 0`, and `momentum_score >= 60th percentile of current leaders`
+- `deterioration`: current leaders with `delta_composite < 0` and `rank_change < 0`
+
+Sort order by bucket:
+- `rotating_into`: `rank_change desc`, `momentum_score desc`
+- `rotating_out`: `rank_change asc`, `momentum_score asc`
+- `emerging`: `momentum_score desc`, `rank_change desc`
+- `fading`: `momentum_score asc`, `rank_change asc`
+- `acceleration`: `momentum_score desc`
+- `deterioration`: `momentum_score asc`, `rank_change asc`
+
+Rotation intensity:
+
+```text
+rotation_intensity_score =
+    ((entered_top_n + exited_top_n) / max(1, top_n)) * 100
+```
+
+`new_leaders` and `dropped_leaders`:
+- computed by `top_n_membership_changes()`
+- membership diff is by `theme_id`
+- returned labels are still theme names for compatibility
+
+### Window-End Leaders
+
+Purpose:
+- historical reference tables for strongest themes at the end of a resolved 1W/1M/3M window
+
+Source path:
+- `build_window_leaderboard()`
+
+Visible columns:
+- `rank`
+- `theme`
+- `window_perf`
+- `momentum_score`
+- `rank_change`
+
+Sort order:
+- latest selected `perf_col desc`
+- `momentum_score desc`
+- `rank_change desc`
+- `theme asc`
+
+Important note:
+- these are window-end performance leaders
+- they are not the same thing as top momentum movers
+
+### Single Theme Historical Snapshot Detail
+
+Purpose:
+- theme-level historical snapshot series for one selected theme
+
+View type:
+- historical detail view
+
+Source path:
+- `theme_snapshot_history(theme_id, include_recent_ticker_history=True)`
+
+Selected-theme detail precedence:
+- `captured > ticker_history_derived > reconstructed`
+
+Visible table columns include:
+- `run_id`
+- `snapshot_time`
+- `ticker_count`
+- `avg_1w`
+- `avg_1m`
+- `avg_3m`
+- `positive_1w_breadth_pct`
+- `positive_1m_breadth_pct`
+- `positive_3m_breadth_pct`
+- `composite_score`
+- `snapshot_source`
+- `provenance_class`
+- `provenance_source_label`
+
+Sort order:
+- table: `snapshot_time desc`, `run_id desc`
+- chart: ascending by `snapshot_time`
+
+Important note:
+- this is not a current/live constituent table
+- it is a theme-level historical snapshot surface
+
+### Debug: Historical Source Lineage
+
+Purpose:
+- show which same-date source row actually won the movement boundary selection for the selected theme/window
+
+Source path:
+- `historical_theme_boundary_debug()`
+
+Debug precedence:
+- `ticker_history_derived > captured > reconstructed`
+
+What it shows:
+- resolved movement boundary start and end
+- same-date candidate rows
+- winner rows
+- provenance classes that drove the movement boundary
+
+Important difference:
+- this debug block mirrors the movement workflow
+- it does not mirror selected-theme detail precedence when those differ on recent dates
+
+## Provenance And Precedence Summary
+
+### Movement workflow precedence
+
+Used by:
+- Themes page movement tables
+- Historical Performance movement workflow
+- Historical Performance debug lineage
+
+Rule:
+- prefer `ticker_history_derived` on recent movement boundaries when available
+- otherwise fall back to `captured`
+- `reconstructed` is lowest precedence
+
+Shorthand:
+- recent movement mode: `ticker_history_derived > captured > reconstructed`
+- fallback mode: `captured > ticker_history_derived > reconstructed`
+
+### Selected-theme detail precedence
+
+Themes page selected-theme history:
+- `captured > reconstructed`
+
+Historical Performance selected-theme detail:
+- `captured > ticker_history_derived > reconstructed`
+
+Why selected-theme detail can differ from movement/debug on the same recent date:
+- movement/debug is boundary-window-first and may intentionally prefer recent `ticker_history_derived` rows
+- selected-theme detail is a historical detail surface with its own same-date precedence
+- both can be correct for their own purpose
+
+### When `ticker_history_derived` can win
+
+`ticker_history_derived` can win when:
+- recent ticker-history-derived rows exist in the movement union
+- the movement workflow is resolving recent boundaries
+- the page is using the movement/debug lineage path rather than the detail-history precedence path
+
+### When captured can still win
+
+Captured rows still win when:
+- no recent derived row is available for that theme/date in the movement boundary path
+- the surface uses detail-history precedence instead of movement precedence
+- the same-date comparison is on a surface where captured remains first priority
+
+## Expected Disagreements That Are Not Bugs
+
+- `Current Market Leadership` vs `Current Top Themes - Current 1W/1M`
+  - leadership ranks by `composite_score` and requires composite-eligible contributors
+  - top-by-window ranks by one window return and only requires that window's contributor threshold
+
+- current Themes tables vs Themes `Theme Movement Snapshots`
+  - current tables use latest preferred-source ticker snapshots, eligibility gates, and capped returns
+  - movement tables use resolved historical boundary rows and movement-window precedence
+
+- Historical Performance `Most Improving Themes` vs `Window-End Leaders`
+  - improving themes are ranked by `momentum_score`
+  - window-end leaders are ranked by latest historical window performance level
+
+- Historical Performance `Rotation Signals` vs `Theme Signals`
+  - rotation buckets are classification rules over the summary
+  - inflection feed adds trend flags, thresholds, and one-signal-per-theme dedupe
+
+- selected-theme detail history vs movement/debug lineage
+  - same recent date can legitimately show different winning provenance because precedence differs by surface
+
+- chart view vs tables on Historical Performance
+  - category/search filtering, indexed mode, rank mode, and rolling smoothing change presentation only
+  - they do not change the underlying movement summary
+
+- Themes category tables vs top theme lists
+  - category tables average across all underlying grouped themes in the selected latest window
+  - they are not a rollup of only the previewed top rows
+
+- selected theme ticker table vs current leaderboard values on Themes
+  - ticker detail is a governed-member current view
+  - leaderboard metrics are eligible/capped aggregates over that governed-member set
+
+## Trust Checklist
+
+When a result looks suspicious, check these in order:
+
+1. Page/view type
+- current-view, boundary-window movement view, historical detail view, or diagnostic/debug view
+
+2. Provenance path
+- current ranking pipeline
+- movement workflow precedence
+- selected-theme detail precedence
+
+3. Resolved boundaries
+- `window_start`
+- `window_end`
+- `effective_window_days`
+- `collapsed_to_available_history`
+
+4. Eligibility basis
+- `eligible_*_count`
+- `eligible_composite_count`
+- `eligible_breadth_pct`
+
+5. Metric basis
+- capped eligible metric vs raw historical snapshot metric
+- current-strength ranking vs start/end delta ranking
+
+6. Identity basis
+- `theme_id` is the stable identity
+- theme name is only a display label and may be ambiguous
+
+7. Surface mismatch sanity check
+- if two sections disagree, first compare their read path and precedence before suspecting a calculation bug
+
+## Non-Obvious But Current Behaviors
+
+- `composite_score` confidence weighting uses `ticker_count`, not `eligible_composite_count`
+- `delta_avg_1m` on current ranking pages means current vs prior preferred-source snapshot, but on Historical Performance it means window end vs window start
+- `new_leaders` and `dropped_leaders` are computed by `theme_id`, but returned labels remain names for compatibility
+- category `top_themes` preview strings are display-only and can still look ambiguous if two different themes share the same name

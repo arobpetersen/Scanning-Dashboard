@@ -52,6 +52,7 @@ from src.suggestions_page_state import (
 )
 from src.streamlit_utils import (
     db_cache_token,
+    extract_selected_row,
     load_scanner_candidate_summary_cached,
     load_theme_health_overview_cached,
     load_theme_rankings_cached,
@@ -435,19 +436,39 @@ if active_suggestions_tab == "Queue":
     if queue.empty:
         st.info("No queue rows for filters.")
     else:
-        render_dataframe(
+        queue_display = queue[["suggestion_id", "status", "priority", "validation_status", "suggestion_type", "source", "proposed_ticker", "existing_theme_name", "proposed_theme_name", "rationale", "created_at", "reviewer_notes"]]
+        queue_event = render_dataframe(
             "suggestions_queue",
-            queue[["suggestion_id", "status", "priority", "validation_status", "suggestion_type", "source", "proposed_ticker", "existing_theme_name", "proposed_theme_name", "rationale", "created_at", "reviewer_notes"]],
+            queue_display,
             width="stretch",
+            on_select="rerun",
+            selection_mode="single-row",
+            key="suggestions_queue_table",
         )
         queue_rows = queue.to_dict("records")
         queue_row_by_id = {int(row["suggestion_id"]): row for row in queue_rows}
+        queue_row_idx = extract_selected_row(queue_event)
+        if queue_row_idx is not None and 0 <= queue_row_idx < len(queue_display):
+            clicked_suggestion_id = int(queue_display.reset_index(drop=True).iloc[int(queue_row_idx)]["suggestion_id"])
+            st.session_state["queue_selected_suggestion_id"] = clicked_suggestion_id
+        valid_suggestion_ids = list(queue_row_by_id.keys())
+        selected_suggestion_id_state = st.session_state.get("queue_selected_suggestion_id")
+        queue_selection_fallback_notice = None
+        if selected_suggestion_id_state is not None and selected_suggestion_id_state not in valid_suggestion_ids:
+            queue_selection_fallback_notice = (
+                f"Previously selected suggestion `#{int(selected_suggestion_id_state)}` is no longer in the current filtered queue. "
+                "Selection moved to the first visible row."
+            )
+        if selected_suggestion_id_state not in valid_suggestion_ids:
+            st.session_state["queue_selected_suggestion_id"] = valid_suggestion_ids[0]
         selected_queue_id = st.selectbox(
             "Selected suggestion",
-            options=list(queue_row_by_id.keys()),
+            options=valid_suggestion_ids,
             format_func=lambda suggestion_id: _queue_selection_label(queue_row_by_id[int(suggestion_id)]),
             key="queue_selected_suggestion_id",
         )
+        if queue_selection_fallback_notice:
+            st.info(queue_selection_fallback_notice)
         selected_row = queue_row_by_id[int(selected_queue_id)]
         _render_queue_detail_panel(selected_row)
 
@@ -859,19 +880,44 @@ if active_suggestions_tab == "Scanner Audit":
                 "metadata_basis",
             ]
         ].copy()
-        render_dataframe("scanner_candidate_display", display, width="stretch", hide_index=True)
+        scanner_event = render_dataframe(
+            "scanner_candidate_display",
+            display,
+            width="stretch",
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="scanner_candidate_display_table",
+        )
 
         if not view.empty:
             scanner_ticker_options = view["ticker"].tolist()
-            st.session_state["scanner_audit_selected_ticker"] = resolve_scanner_audit_ticker(
-                st.session_state.get("scanner_audit_selected_ticker"),
+            scanner_row_idx = extract_selected_row(scanner_event)
+            if scanner_row_idx is not None and 0 <= scanner_row_idx < len(display):
+                st.session_state["scanner_audit_selected_ticker"] = str(display.reset_index(drop=True).iloc[int(scanner_row_idx)]["ticker"])
+            prior_selected_audit_ticker = st.session_state.get("scanner_audit_selected_ticker")
+            resolved_selected_audit_ticker = resolve_scanner_audit_ticker(
+                prior_selected_audit_ticker,
                 scanner_ticker_options,
             )
+            scanner_selection_fallback_notice = None
+            if (
+                prior_selected_audit_ticker is not None
+                and str(prior_selected_audit_ticker) not in scanner_ticker_options
+                and resolved_selected_audit_ticker is not None
+            ):
+                scanner_selection_fallback_notice = (
+                    f"Previously selected ticker `{prior_selected_audit_ticker}` is no longer in the current filtered candidate set. "
+                    f"View re-anchored to `{resolved_selected_audit_ticker}`."
+                )
+            st.session_state["scanner_audit_selected_ticker"] = resolved_selected_audit_ticker
             selected_audit_ticker = st.selectbox(
                 "Selected scanner candidate",
                 options=scanner_ticker_options,
                 key="scanner_audit_selected_ticker",
             )
+            if scanner_selection_fallback_notice:
+                st.info(scanner_selection_fallback_notice)
             selected_audit_row = view[view["ticker"] == selected_audit_ticker].iloc[0]
             st.caption(
                 f"{selected_audit_ticker}: {selected_audit_row['recommendation_reason']} | "

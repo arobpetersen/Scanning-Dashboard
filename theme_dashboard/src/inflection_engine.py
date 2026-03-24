@@ -25,6 +25,7 @@ def _empty() -> dict:
         "signals": pd.DataFrame(
             columns=[
                 "detected_at",
+                "theme_id",
                 "theme",
                 "signal_type",
                 "signal_label",
@@ -43,13 +44,18 @@ def _empty() -> dict:
 
 def _recent_trend_flags(history: pd.DataFrame) -> pd.DataFrame:
     if history.empty:
-        return pd.DataFrame(columns=["theme", "accel_trend_up", "avg1m_trend_up"])
+        return pd.DataFrame(columns=["theme_id", "theme", "accel_trend_up", "avg1m_trend_up"])
+
+    working = history.copy()
+    if "theme_id" not in working.columns:
+        working["theme_id"] = working["theme"].astype(str)
 
     rows: list[dict] = []
-    for theme, grp in history.sort_values("snapshot_time").groupby("theme"):
+    for theme_id, grp in working.sort_values(["snapshot_time", "theme"]).groupby("theme_id"):
         g = grp.tail(4).copy()
+        theme = str(g.iloc[-1]["theme"]) if not g.empty else str(theme_id)
         if len(g) < 3:
-            rows.append({"theme": theme, "accel_trend_up": False, "avg1m_trend_up": False})
+            rows.append({"theme_id": theme_id, "theme": theme, "accel_trend_up": False, "avg1m_trend_up": False})
             continue
 
         comp = g["composite_score"].astype(float).tolist()
@@ -60,6 +66,7 @@ def _recent_trend_flags(history: pd.DataFrame) -> pd.DataFrame:
 
         rows.append(
             {
+                "theme_id": theme_id,
                 "theme": theme,
                 "accel_trend_up": bool(comp_delta_last > 0 and comp_delta_prev >= 0),
                 "avg1m_trend_up": bool(avg1m_delta_last > 0),
@@ -74,6 +81,10 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
     history = momentum["history"]
     if history.empty:
         return _empty()
+
+    history = history.copy()
+    if "theme_id" not in history.columns:
+        history["theme_id"] = history["theme"].astype(str)
 
     snapshot_count = int(history["snapshot_time"].nunique())
     if snapshot_count < 2:
@@ -97,15 +108,22 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
             },
         }
 
+    if "theme_id" not in summary.columns:
+        summary["theme_id"] = summary["theme"].astype(str)
+
     rotation = compute_theme_rotation(summary, top_n, momentum["new_leaders"], momentum["dropped_leaders"])
     trend_flags = _recent_trend_flags(history)
-    summary = summary.merge(trend_flags, on="theme", how="left")
+    summary = summary.merge(
+        trend_flags[["theme_id", "accel_trend_up", "avg1m_trend_up"]],
+        on="theme_id",
+        how="left",
+    )
     summary["accel_trend_up"] = summary["accel_trend_up"].fillna(False)
     summary["avg1m_trend_up"] = summary["avg1m_trend_up"].fillna(False)
 
-    rotate_in = set(rotation["rotating_into"]["theme"].tolist()) if not rotation["rotating_into"].empty else set()
-    rotate_out = set(rotation["rotating_out"]["theme"].tolist()) if not rotation["rotating_out"].empty else set()
-    deterioration = set(rotation["deterioration"]["theme"].tolist()) if not rotation["deterioration"].empty else set()
+    rotate_in = set(rotation["rotating_into"]["theme_id"].tolist()) if not rotation["rotating_into"].empty and "theme_id" in rotation["rotating_into"].columns else set()
+    rotate_out = set(rotation["rotating_out"]["theme_id"].tolist()) if not rotation["rotating_out"].empty and "theme_id" in rotation["rotating_out"].columns else set()
+    deterioration = set(rotation["deterioration"]["theme_id"].tolist()) if not rotation["deterioration"].empty and "theme_id" in rotation["deterioration"].columns else set()
 
     rank_thr = max(5, int(top_n * 0.25))
     detected_at = pd.to_datetime(history["snapshot_time"]).max()
@@ -113,6 +131,7 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
 
     signals: list[dict] = []
     for row in summary.to_dict(orient="records"):
+        theme_id = row.get("theme_id")
         theme = str(row["theme"])
         rc = float(row.get("rank_change", 0))
         ms = float(row.get("momentum_score", 0))
@@ -122,10 +141,11 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
         accel_up = bool(row.get("accel_trend_up", False))
         avg1m_up = bool(row.get("avg1m_trend_up", False))
 
-        if theme in rotate_out and rc <= -rank_thr and (ms < 0 or dc < 0):
+        if theme_id in rotate_out and rc <= -rank_thr and (ms < 0 or dc < 0):
             signals.append(
                 {
                     "detected_at": detected_at,
+                    "theme_id": theme_id,
                     "theme": theme,
                     "signal_type": "rotating_out",
                     "signal_label": "Rotating Out",
@@ -138,10 +158,11 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
                     "priority": SIGNAL_PRIORITY["rotating_out"],
                 }
             )
-        if theme in deterioration and rc < 0 and ms <= -MIN_SIGNAL_MOMENTUM and db < 0:
+        if theme_id in deterioration and rc < 0 and ms <= -MIN_SIGNAL_MOMENTUM and db < 0:
             signals.append(
                 {
                     "detected_at": detected_at,
+                    "theme_id": theme_id,
                     "theme": theme,
                     "signal_type": "leadership_deterioration",
                     "signal_label": "Leadership Deterioration",
@@ -154,10 +175,11 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
                     "priority": SIGNAL_PRIORITY["leadership_deterioration"],
                 }
             )
-        if theme in rotate_in and rc >= rank_thr and (ms >= MIN_SIGNAL_MOMENTUM or dc >= MIN_SIGNAL_COMPOSITE):
+        if theme_id in rotate_in and rc >= rank_thr and (ms >= MIN_SIGNAL_MOMENTUM or dc >= MIN_SIGNAL_COMPOSITE):
             signals.append(
                 {
                     "detected_at": detected_at,
+                    "theme_id": theme_id,
                     "theme": theme,
                     "signal_type": "rotating_into",
                     "signal_label": "Rotating Into Leadership",
@@ -174,6 +196,7 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
             signals.append(
                 {
                     "detected_at": detected_at,
+                    "theme_id": theme_id,
                     "theme": theme,
                     "signal_type": "emerging",
                     "signal_label": "Emerging",
@@ -190,6 +213,7 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
             signals.append(
                 {
                     "detected_at": detected_at,
+                    "theme_id": theme_id,
                     "theme": theme,
                     "signal_type": "accelerating",
                     "signal_label": "Accelerating",
@@ -206,6 +230,7 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
             signals.append(
                 {
                     "detected_at": detected_at,
+                    "theme_id": theme_id,
                     "theme": theme,
                     "signal_type": "weakening",
                     "signal_label": "Weakening",
@@ -228,9 +253,9 @@ def compute_theme_inflections(conn, lookback_days: int, top_n: int = 20) -> dict
     # Noise control: keep highest-priority signal per theme to avoid repetitive overlap in a single run.
     sig_df = pd.DataFrame(signals)
     sig_df = (
-        sig_df.sort_values(["theme", "priority", "momentum_score", "rank_change"], ascending=[True, False, False, False])
-        .drop_duplicates(subset=["theme"], keep="first")
-        .sort_values(["priority", "momentum_score", "rank_change"], ascending=[False, False, False])
+        sig_df.sort_values(["theme_id", "priority", "momentum_score", "rank_change"], ascending=[True, False, False, False])
+        .drop_duplicates(subset=["theme_id"], keep="first")
+        .sort_values(["priority", "momentum_score", "rank_change", "theme"], ascending=[False, False, False, True])
         .reset_index(drop=True)
     )
 

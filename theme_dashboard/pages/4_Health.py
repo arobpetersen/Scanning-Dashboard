@@ -114,6 +114,46 @@ def _add_theme_to_audit_queue(session_state, theme_id: int, theme_name: str) -> 
     return True, label
 
 
+def _remove_theme_from_audit_queue(session_state, theme_id: int, theme_name: str) -> tuple[bool, str]:
+    label = _queue_label(theme_id, theme_name)
+    current = list(get_canonical_multiselect_values(session_state, "health_theme_audit_queue"))
+    if label not in current:
+        return False, label
+    session_state["health_theme_audit_queue"] = [value for value in current if value != label]
+    return True, label
+
+
+def _focus_audit_queue_on_theme(session_state, theme_id: int, theme_name: str) -> str:
+    label = _queue_label(theme_id, theme_name)
+    session_state["health_theme_audit_queue"] = [label]
+    return label
+
+
+def _queue_status_summary(session_state, theme_id: int, theme_name: str) -> tuple[bool, int]:
+    label = _queue_label(theme_id, theme_name)
+    current = list(get_canonical_multiselect_values(session_state, "health_theme_audit_queue"))
+    return label in current, len(current)
+
+
+def _scope_preview(values: list[str], *, limit: int = 5) -> str:
+    cleaned = [str(value).strip() for value in values if str(value).strip()]
+    if not cleaned:
+        return "none"
+    shown = cleaned[:limit]
+    if len(cleaned) > limit:
+        shown.append(f"+{len(cleaned) - limit} more")
+    return ", ".join(shown)
+
+
+def _feedback_level_for_status(status: object) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized in {"success", "completed"}:
+        return "success"
+    if normalized in {"partial", "no_scope", "no_op", "insufficient_after_attempt", "no_tracking_table"}:
+        return "warning"
+    return "error"
+
+
 try:
     init_db()
     with get_conn() as conn:
@@ -132,6 +172,7 @@ try:
 except Exception as exc:
     stop_for_database_error(exc)
 db_token = db_cache_token()
+THEME_HEALTH_FEEDBACK_KEY = "theme_health_feedback"
 
 ops_tab, themes_tab = st.tabs(["Operations", "Theme Health"])
 
@@ -277,6 +318,10 @@ with ops_tab:
             key="governed_onboarding_tickers",
             help="Fetches and persists ticker daily history only for newly governed tickers that still need stored history depth.",
         )
+        st.caption(
+            f"Hydration scope: selected=`{len(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_tickers'))}` | "
+            f"eligible now=`{len(pending_backfill_options)}` | tickers=`{_scope_preview(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_tickers'))}`"
+        )
         if st.button(
             "Hydrate ticker history for onboarding",
             type="primary",
@@ -289,25 +334,32 @@ with ops_tab:
                 with get_conn() as conn:
                     result = run_governed_ticker_onboarding_backfill(conn, selected_onboarding_tickers)
                 updated_rows = result.get("updated_rows") or []
-                updated_summary = ", ".join(
-                    f"{row['ticker']}={row['backfill_status']}" for row in updated_rows[:5]
-                )
-                feedback_message = (
-                    f"Onboarding history hydration finished with status `{result.get('status')}` for "
-                    f"{len(result.get('tickers') or [])} ticker(s). {updated_summary}"
-                )
+                ready_rows = [row for row in updated_rows if str(row.get("history_readiness_status") or "") == "ready"]
+                pending_rows = [row for row in updated_rows if str(row.get("history_readiness_status") or "") != "ready"]
                 current_snapshot_result = result.get("current_snapshot_result") or {}
-                if current_snapshot_result:
-                    feedback_message += (
-                        " Targeted current snapshot hydration: "
+                feedback_bits = [
+                    f"Onboarding history hydration finished with status `{result.get('status')}` for {len(result.get('tickers') or [])} ticker(s).",
+                    f"Ready now=`{len(ready_rows)}` | still pending=`{len(pending_rows)}`.",
+                    f"Backfill states: `{_scope_preview([f'{row['ticker']}={row['backfill_status']}' for row in updated_rows])}`.",
+                    (
+                        "Targeted current snapshot hydration: "
                         f"status=`{current_snapshot_result.get('status') or 'unknown'}` | "
                         f"run_id=`{current_snapshot_result.get('run_id') or 'n/a'}`."
+                    ),
+                ]
+                if pending_rows:
+                    feedback_bits.append(
+                        f"Next step: remaining tickers still need history depth before downstream reconstruction. Pending=`{_scope_preview([str(row.get('ticker')) for row in pending_rows])}`."
                     )
+                else:
+                    feedback_bits.append("Next step: any ready tickers with downstream refresh still flagged can move to affected-theme reconstruction.")
+                feedback_bits.append("Current market/scanner caches were cleared; the onboarding table below reruns against refreshed state.")
+                current_snapshot_result = result.get("current_snapshot_result") or {}
                 prepare_post_mutation_refresh(
                     st.session_state,
                     "governed_onboarding_feedback",
-                    level="success",
-                    message=feedback_message + f" Completed in {time.perf_counter() - started:.1f}s.",
+                    level=_feedback_level_for_status(result.get("status")),
+                    message=" ".join(feedback_bits) + f" Completed in {time.perf_counter() - started:.1f}s.",
                     clear_market=True,
                     clear_scanner_summary=True,
                 )
@@ -337,6 +389,10 @@ with ops_tab:
             key="governed_onboarding_reconstruction_tickers",
             help="Rebuilds reconstructed theme history for themes affected by these newly governed tickers after ticker history is ready.",
         )
+        st.caption(
+            f"Reconstruction scope: selected=`{len(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_reconstruction_tickers'))}` | "
+            f"eligible now=`{len(downstream_options)}` | tickers=`{_scope_preview(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_reconstruction_tickers'))}`"
+        )
         if st.button(
             "Run affected-theme reconstruction",
             disabled=not bool(get_canonical_multiselect_values(st.session_state, "governed_onboarding_reconstruction_tickers")),
@@ -354,19 +410,18 @@ with ops_tab:
                 snapshot_rows_written = int(reconstruction_result.get("snapshot_rows_written") or 0)
                 snapshot_rows_skipped = int(reconstruction_result.get("snapshot_rows_skipped") or 0)
                 failed_tickers = list(reconstruction_result.get("failed_tickers") or [])
-                detail_parts = [
-                    f"snapshot rows written={snapshot_rows_written}",
-                    f"skipped={snapshot_rows_skipped}",
-                ]
+                detail_parts = [f"snapshot rows written={snapshot_rows_written}", f"skipped={snapshot_rows_skipped}"]
                 if failed_tickers:
                     detail_parts.append("failed tickers=" + ", ".join(failed_tickers))
                 prepare_post_mutation_refresh(
                     st.session_state,
                     "governed_onboarding_feedback",
-                    level="success",
+                    level=_feedback_level_for_status(result.get("status")),
                     message=(
                         f"Affected-theme reconstruction finished with status `{result.get('status')}` for "
                         f"{len(result.get('tickers') or [])} ticker(s): " + "; ".join(detail_parts) + ". "
+                        f"Downstream refresh cleared for `{len(result.get('updated_rows') or [])}` ticker(s). "
+                        "Current market/scanner caches were cleared; the onboarding table below reruns against refreshed state. "
                         f"Completed in {time.perf_counter() - started:.1f}s."
                     ),
                     clear_market=True,
@@ -705,6 +760,8 @@ with ops_tab:
     render_dataframe("health_row_counts", counts, width="stretch")
 
 with themes_tab:
+    render_feedback_message(st.session_state, THEME_HEALTH_FEEDBACK_KEY)
+
     c1, c2 = st.columns(2)
     with c1:
         low_threshold = st.number_input("Low constituent threshold", min_value=1, max_value=25, value=RULE_LOW_CONSTITUENT_THRESHOLD)
@@ -880,13 +937,14 @@ with themes_tab:
                         )
                     prepare_post_mutation_refresh(
                         st.session_state,
-                        "governed_onboarding_feedback",
+                        THEME_HEALTH_FEEDBACK_KEY,
                         level="success" if str(rebuild_result.get("status") or "") not in {"no_scope", "no_ticker_history", "no_reconstructed_scope", "no_history_rows", "no_op"} else "warning",
                         message=(
                             f"Queue rebuild result: status={rebuild_result.get('status')} | "
                             f"themes={len(rebuild_result.get('affected_theme_ids', []))} | "
                             f"replaced={int(rebuild_result.get('rows_replaced') or 0)} | "
-                            f"written={int(rebuild_result.get('rows_written') or 0)}."
+                            f"written={int(rebuild_result.get('rows_written') or 0)}. "
+                            "Current market caches were cleared; the audit table reruns against refreshed state."
                         ),
                         clear_market=True,
                     )
@@ -913,14 +971,15 @@ with themes_tab:
                     level = "success" if str(backfill_result.get("status") or "") in {"success", "partial"} else "warning"
                     prepare_post_mutation_refresh(
                         st.session_state,
-                        "governed_onboarding_feedback",
+                        THEME_HEALTH_FEEDBACK_KEY,
                         level=level,
                         message=(
                             f"Queue backfill result: status={backfill_result.get('status')} | "
                             f"themes={len(backfill_result.get('theme_ids', []))} | "
                             f"ticker_history_written={int(backfill_result.get('ticker_history_rows_written') or 0)} | "
                             f"snapshot_rows_written={int(backfill_result.get('snapshot_rows_written') or 0)} | "
-                            f"failed_tickers={len(backfill_result.get('failed_tickers') or [])}."
+                            f"failed_tickers={len(backfill_result.get('failed_tickers') or [])}. "
+                            "Current market caches were cleared; rerun tables should now reflect any refreshed scope."
                         ),
                         clear_market=True,
                     )
@@ -939,7 +998,7 @@ with themes_tab:
                                 update_theme(conn, int(row["theme_id"]), str(row["theme_name"]), str(row["category"] or ""), False)
                         prepare_post_mutation_refresh(
                             st.session_state,
-                            "governed_onboarding_feedback",
+                            THEME_HEALTH_FEEDBACK_KEY,
                             level="success",
                             message=f"Deactivated {len(action_state['deactivate_theme_ids'])} selected empty active theme(s).",
                             clear_market=True,
@@ -959,6 +1018,7 @@ with themes_tab:
             theme_id = int(picked["theme_id"])
             theme_name = str(picked["theme_name"])
             theme_label = f"{theme_name} ({picked['category']})"
+            in_queue, queue_size = _queue_status_summary(st.session_state, theme_id, theme_name)
             with get_conn() as conn:
                 member_rows = theme_member_hygiene_context(conn, theme_id)
                 governed_members = get_theme_members(conn, theme_id)
@@ -979,6 +1039,10 @@ with themes_tab:
             d8.metric("Governed members", len(governed_members_list))
             st.caption(f"Why flagged: `{picked.get('why_flagged') or 'healthy'}`")
             st.caption(f"Next action: `{picked.get('next_action') or 'monitor'}`")
+            st.caption(
+                f"Audit queue status: in_queue=`{'yes' if in_queue else 'no'}` | current_queue_size=`{queue_size}`. "
+                "Use the shortcuts below to add/remove/focus this theme without leaving the detail context."
+            )
             if governed_members_list:
                 preview = ", ".join(governed_members_list[:8])
                 if len(governed_members_list) > 8:
@@ -986,8 +1050,17 @@ with themes_tab:
                 st.caption(f"Current governed members: `{preview}`")
             else:
                 st.caption("Current governed members: `none`")
-            detail_queue_cols = st.columns(3)
-            queue_selected_clicked = detail_queue_cols[0].button("Add selected theme to queue", key=f"health_theme_add_queue_{theme_id}")
+            detail_queue_cols = st.columns(4)
+            queue_selected_clicked = detail_queue_cols[0].button(
+                "Add to queue",
+                key=f"health_theme_add_queue_{theme_id}",
+                disabled=in_queue,
+            )
+            remove_from_queue_clicked = detail_queue_cols[1].button(
+                "Remove from queue",
+                key=f"health_theme_remove_queue_{theme_id}",
+                disabled=not in_queue,
+            )
             recommended_action = str(picked.get("next_action") or "").strip().lower()
             queue_recommended_label = None
             if any(token in recommended_action for token in ["reconstruct", "refresh snapshots"]):
@@ -996,21 +1069,34 @@ with themes_tab:
                 queue_recommended_label = "Queue recommended: deactivate"
             elif "review failing members" in recommended_action or "inspect failures" in recommended_action:
                 queue_recommended_label = "Queue recommended: backfill/rebuild"
-            queue_recommended_clicked = detail_queue_cols[1].button(
+            queue_recommended_clicked = detail_queue_cols[2].button(
                 queue_recommended_label or "Queue recommended action",
                 disabled=queue_recommended_label is None,
                 key=f"health_theme_add_recommended_queue_{theme_id}",
             )
-            open_queue_hint = detail_queue_cols[2]
-            open_queue_hint.caption("Use the audit queue bar above to run actions after adding this theme.")
+            queue_focus_clicked = detail_queue_cols[3].button(
+                "Queue only this theme",
+                key=f"health_theme_focus_queue_{theme_id}",
+            )
+            st.caption("Queue only this theme resets the current audit queue to this theme, which is the fastest path into queue actions above.")
 
             if queue_selected_clicked:
                 added, label = _add_theme_to_audit_queue(st.session_state, theme_id, theme_name)
                 queue_feedback_message(
                     st.session_state,
-                    "governed_onboarding_feedback",
+                    THEME_HEALTH_FEEDBACK_KEY,
                     level="success" if added else "warning",
                     message=f"Added `{label}` to the audit queue." if added else f"`{label}` is already in the audit queue.",
+                )
+                st.rerun()
+
+            if remove_from_queue_clicked:
+                removed, label = _remove_theme_from_audit_queue(st.session_state, theme_id, theme_name)
+                queue_feedback_message(
+                    st.session_state,
+                    THEME_HEALTH_FEEDBACK_KEY,
+                    level="success" if removed else "warning",
+                    message=f"Removed `{label}` from the audit queue." if removed else f"`{label}` is not currently in the audit queue.",
                 )
                 st.rerun()
 
@@ -1018,13 +1104,22 @@ with themes_tab:
                 added, label = _add_theme_to_audit_queue(st.session_state, theme_id, theme_name)
                 queue_feedback_message(
                     st.session_state,
-                    "governed_onboarding_feedback",
+                    THEME_HEALTH_FEEDBACK_KEY,
                     level="success" if added else "warning",
                     message=(
                         f"Queued `{label}` for the recommended follow-up: {queue_recommended_label.replace('Queue recommended: ', '')}."
                         if added
                         else f"`{label}` is already in the audit queue."
                     ),
+                )
+                st.rerun()
+            if queue_focus_clicked:
+                label = _focus_audit_queue_on_theme(st.session_state, theme_id, theme_name)
+                queue_feedback_message(
+                    st.session_state,
+                    THEME_HEALTH_FEEDBACK_KEY,
+                    level="success",
+                    message=f"Focused the audit queue on `{label}`. Queue actions above now apply to this theme only.",
                 )
                 st.rerun()
             if members:
@@ -1102,7 +1197,7 @@ with themes_tab:
                         clear_current_market_view_caches()
                         queue_feedback_message(
                             st.session_state,
-                            "governed_onboarding_feedback",
+                            THEME_HEALTH_FEEDBACK_KEY,
                             level="success",
                             message=f"{success_message}{rebuild_bits}",
                         )
@@ -1130,7 +1225,7 @@ with themes_tab:
                         if status in {"no_scope", "no_ticker_history", "no_reconstructed_scope", "no_history_rows", "no_op"}:
                             queue_feedback_message(
                                 st.session_state,
-                                "governed_onboarding_feedback",
+                                THEME_HEALTH_FEEDBACK_KEY,
                                 level="warning",
                                 message=(
                                     f"Rebuild result for `{rebuild_member}`: {status}. "
@@ -1142,7 +1237,7 @@ with themes_tab:
                         else:
                             queue_feedback_message(
                                 st.session_state,
-                                "governed_onboarding_feedback",
+                                THEME_HEALTH_FEEDBACK_KEY,
                                 level="success",
                                 message=(
                                     f"Rebuilt recent reconstructed history for `{rebuild_member}` "
@@ -1177,7 +1272,7 @@ with themes_tab:
                         st.session_state["health_selected_theme_id"] = theme_id
                         prepare_post_mutation_refresh(
                             st.session_state,
-                            "governed_onboarding_feedback",
+                            THEME_HEALTH_FEEDBACK_KEY,
                             level="success",
                             message=f"Removed {result['removed_ticker']} from {theme_name} and added {result['added_ticker']}.",
                             clear_market=True,
@@ -1226,7 +1321,7 @@ with themes_tab:
                         st.session_state["health_selected_theme_id"] = theme_id
                         prepare_post_mutation_refresh(
                             st.session_state,
-                            "governed_onboarding_feedback",
+                            THEME_HEALTH_FEEDBACK_KEY,
                             level="success",
                             message=f"Updated theme `{intended_name}`.",
                             clear_market=True,

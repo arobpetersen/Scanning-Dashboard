@@ -1011,17 +1011,27 @@ def top_n_membership_changes(conn, lookback_days: int, top_n: int = 20) -> tuple
     end_time = boundary_times.iloc[-1]
     start_top = (
         history[pd.to_datetime(history["snapshot_time"]) == start_time]
-        .sort_values(["composite_score", "theme"], ascending=[False, True])
+        .sort_values(["composite_score", "theme", "theme_id"], ascending=[False, True, True])
         .head(top_n)
     )
     end_top = (
         history[pd.to_datetime(history["snapshot_time"]) == end_time]
-        .sort_values(["composite_score", "theme"], ascending=[False, True])
+        .sort_values(["composite_score", "theme", "theme_id"], ascending=[False, True, True])
         .head(top_n)
     )
-    start_set = set(start_top["theme"].astype(str).tolist()) if not start_top.empty else set()
-    end_set = set(end_top["theme"].astype(str).tolist()) if not end_top.empty else set()
-    return sorted(end_set - start_set), sorted(start_set - end_set)
+    start_map = {
+        str(row["theme_id"]): str(row["theme"])
+        for _, row in start_top[["theme_id", "theme"]].drop_duplicates(subset=["theme_id"]).iterrows()
+    } if not start_top.empty else {}
+    end_map = {
+        str(row["theme_id"]): str(row["theme"])
+        for _, row in end_top[["theme_id", "theme"]].drop_duplicates(subset=["theme_id"]).iterrows()
+    } if not end_top.empty else {}
+    start_set = set(start_map.keys())
+    end_set = set(end_map.keys())
+    entered = [(end_map[theme_id], theme_id) for theme_id in sorted(end_set - start_set, key=lambda value: (end_map[value], value))]
+    dropped = [(start_map[theme_id], theme_id) for theme_id in sorted(start_set - end_set, key=lambda value: (start_map[value], value))]
+    return [label for label, _ in entered], [label for label, _ in dropped]
 
 
 def theme_health_overview(conn, low_constituent_threshold: int, failure_window_days: int = 14) -> pd.DataFrame:

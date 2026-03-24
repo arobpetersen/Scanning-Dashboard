@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 
 from src.database import get_conn, init_db
-from src.leaderboard_utils import build_window_leaderboard
+from src.leaderboard_utils import build_window_leaderboard, disambiguate_theme_labels
 from src.queries import historical_theme_boundary_debug, theme_snapshot_history
 from src.rotation_engine import compute_theme_rotation
 from src.streamlit_utils import (
@@ -59,9 +59,16 @@ def _config_for_columns(columns: list[str]) -> dict:
 def _render_explained_table(title: str, description: str, df: pd.DataFrame, columns: list[str], *, limit: int | None = 10):
     st.write(f"**{title}**")
     st.caption(description)
-    shaped = df.reindex(columns=columns)
+    display_df = disambiguate_theme_labels(df)
+    if "theme_display" in display_df.columns and "theme" in display_df.columns:
+        display_df["theme"] = display_df["theme_display"]
+    shaped = display_df.reindex(columns=columns)
     show_df = shaped if limit is None else shaped.head(limit)
     render_dataframe(f"explained_{title}", show_df, width="stretch", column_config=_config_for_columns(columns))
+
+
+def _display_theme_name_from_row(row, label_by_id: dict[int, str], ids_by_name: dict[str, list[int]]) -> str:
+    return _theme_label_for_display(row.get("theme_id"), row.get("theme"), label_by_id, ids_by_name)
 
 
 def _signal_reason_text(row: pd.Series) -> str:
@@ -71,6 +78,23 @@ def _signal_reason_text(row: pd.Series) -> str:
         f"delta_composite {row.get('delta_composite', 0):+.2f}, "
         f"delta_breadth {row.get('delta_breadth', 0):+.2f}"
     )
+
+
+def _format_theme_list(df: pd.DataFrame, preview_limit: int = 5) -> str:
+    if df.empty or "theme" not in df.columns:
+        return "none"
+    display_df = disambiguate_theme_labels(df)
+    labels = []
+    for label in display_df.get("theme_display", display_df["theme"]).astype(str).tolist():
+        cleaned = label.strip()
+        if cleaned and cleaned not in labels:
+            labels.append(cleaned)
+    if not labels:
+        return "none"
+    shown = labels[:preview_limit]
+    if len(labels) > preview_limit:
+        shown.append(f"+{len(labels) - preview_limit} more")
+    return ", ".join(shown)
 
 
 def _history_depth_quality(window_meta: dict, summary: pd.DataFrame) -> str:
@@ -86,12 +110,68 @@ def _history_depth_quality(window_meta: dict, summary: pd.DataFrame) -> str:
     return "Good"
 
 
-def _open_theme_in_themes(theme_name: str, id_by_name: dict[str, int], label_by_name: dict[str, str], source: str) -> None:
-    if theme_name not in id_by_name:
-        st.warning(f"Unable to open `{theme_name}` in Themes because it is not present in the current theme registry.")
+def _normalize_theme_identifier(value) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    return str(value).strip()
+
+
+def _resolve_theme_id(theme_id, fallback_theme_name: str | None, ids_by_name: dict[str, list[int]]) -> int | None:
+    normalized_id = _normalize_theme_identifier(theme_id)
+    if normalized_id is not None:
+        try:
+            return int(float(normalized_id))
+        except (TypeError, ValueError):
+            pass
+
+    normalized_name = str(fallback_theme_name or "").strip()
+    matching_ids = ids_by_name.get(normalized_name, [])
+    if len(matching_ids) == 1:
+        return int(matching_ids[0])
+    return None
+
+
+def _open_theme_in_themes(theme_id, fallback_theme_name: str | None, label_by_id: dict[int, str], ids_by_name: dict[str, list[int]], source: str) -> None:
+    resolved_id = _resolve_theme_id(theme_id, fallback_theme_name, ids_by_name)
+    if resolved_id is None or resolved_id not in label_by_id:
+        fallback_label = fallback_theme_name or "selected theme"
+        st.warning(f"Unable to open `{fallback_label}` in Themes because its theme id could not be resolved from the current theme registry.")
         return
-    set_theme_selection_state(st.session_state, id_by_name[theme_name], label_by_name[theme_name], source)
+    set_theme_selection_state(st.session_state, resolved_id, label_by_id[resolved_id], source)
     st.switch_page("pages/1_Themes.py")
+
+
+def _theme_option_maps(themes: pd.DataFrame) -> tuple[dict[int, str], dict[str, int], dict[str, list[int]]]:
+    ids_by_name: dict[str, list[int]] = {}
+    base_label_by_id: dict[int, str] = {}
+    base_counts: dict[str, int] = {}
+    for _, row in themes.iterrows():
+        theme_id = int(row["id"])
+        name = str(row["name"])
+        category = str(row["category"])
+        ids_by_name.setdefault(name, []).append(theme_id)
+        base_label = f"{name} ({category})"
+        base_label_by_id[theme_id] = base_label
+        base_counts[base_label] = base_counts.get(base_label, 0) + 1
+
+    label_by_id: dict[int, str] = {}
+    for _, row in themes.iterrows():
+        theme_id = int(row["id"])
+        base_label = base_label_by_id[theme_id]
+        if base_counts.get(base_label, 0) > 1:
+            label_by_id[theme_id] = f"{base_label} [{theme_id}]"
+        else:
+            label_by_id[theme_id] = base_label
+
+    id_by_label = {label: theme_id for theme_id, label in label_by_id.items()}
+    return label_by_id, id_by_label, ids_by_name
+
+
+def _theme_label_for_display(theme_id, fallback_theme_name: str | None, label_by_id: dict[int, str], ids_by_name: dict[str, list[int]]) -> str:
+    resolved_id = _resolve_theme_id(theme_id, fallback_theme_name, ids_by_name)
+    if resolved_id is not None and resolved_id in label_by_id:
+        return label_by_id[resolved_id]
+    return str(fallback_theme_name or resolved_id or "Unknown theme")
 
 
 def _build_overview_leaders(momentum: dict, perf_col: str, top_k: int = 10) -> tuple[pd.DataFrame, str | None]:
@@ -100,11 +180,14 @@ def _build_overview_leaders(momentum: dict, perf_col: str, top_k: int = 10) -> t
 
 def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, message: str | None, key_prefix: str):
     st.markdown(f"**{title}**")
+    st.caption("Ranked by end-of-window performance first, with momentum and rank change only as secondary context. This is not a top-momentum table.")
     if message:
         st.info(message)
         return
 
-    display = leaders.rename(columns={perf_col: "window_perf"})
+    display = disambiguate_theme_labels(leaders.rename(columns={perf_col: "window_perf"}))
+    if "theme_display" in display.columns and "theme" in display.columns:
+        display["theme"] = display["theme_display"]
     cols = ["rank", "theme", "window_perf", "momentum_score", "rank_change"]
     event = render_dataframe(
         f"{key_prefix}_overview",
@@ -119,8 +202,9 @@ def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, mes
 
     row_idx = extract_selected_row(event)
     if row_idx is not None and 0 <= row_idx < len(display):
-        picked = display.iloc[int(row_idx)]["theme"]
-        st.session_state["historical_selected_theme_name"] = picked
+        picked_row = display.iloc[int(row_idx)]
+        st.session_state["historical_selected_theme_id"] = _normalize_theme_identifier(picked_row.get("theme_id"))
+        st.session_state["historical_selected_theme_name"] = str(picked_row.get("theme") or "")
 
 
 st.set_page_config(page_title="Historical Performance", layout="wide")
@@ -137,8 +221,7 @@ try:
 except Exception as exc:
     stop_for_database_error(exc)
 db_token = db_cache_token()
-theme_label_by_name = {str(r["name"]): f"{r['name']} ({r['category']})" for _, r in themes.iterrows()}
-theme_id_by_name = {str(r["name"]): int(r["id"]) for _, r in themes.iterrows()}
+theme_label_by_id, theme_id_by_label, theme_ids_by_name = _theme_option_maps(themes)
 
 overview_1w = load_theme_momentum_cached(db_token, 7, top_n=10)
 overview_1m = load_theme_momentum_cached(db_token, 30, top_n=10)
@@ -208,15 +291,17 @@ w4.metric("History depth quality", history_depth_quality)
 c1, c2 = st.columns([2, 1])
 with c1:
     st.caption(
-        f"Resolved boundary provenance: `{window_meta.get('boundary_provenance_mix') or 'unknown'}` | "
-        f"overall window provenance: `{window_meta.get('provenance_mix') or 'unknown'}`"
+        f"Resolved boundaries: `{pd.to_datetime(window_meta.get('window_start')).strftime('%Y-%m-%d') if window_meta.get('window_start') is not None else '-'}` "
+        f"to `{pd.to_datetime(window_meta.get('window_end')).strftime('%Y-%m-%d') if window_meta.get('window_end') is not None else '-'}` | "
+        f"boundary provenance: `{window_meta.get('boundary_provenance_mix') or 'unknown'}` | "
+        f"window provenance: `{window_meta.get('provenance_mix') or 'unknown'}`"
     )
 with c2:
-    st.caption(f"Themes analyzed: `{int(summary.shape[0])}`")
+    st.caption(f"Themes analyzed: `{int(summary.shape[0])}` | effective days: `{int(window_meta.get('effective_window_days') or 0)}`")
 
 st.caption(
-    "Use this strip to judge window trust before reading the tables below. "
-    "Shallow or mixed windows are still useful for audit, but less trustworthy for strong inference."
+    "Use this strip to judge window trust before reading the tables below. Movement windows resolve boundaries with precedence "
+    "`ticker_history_derived > captured > reconstructed` when recent derived rows are available; otherwise the fallback precedence is `captured > ticker_history_derived > reconstructed`."
 )
 if window_meta.get("collapsed_to_available_history"):
     st.info(
@@ -237,16 +322,19 @@ leaders_tbl = summary.sort_values(["momentum_score", "delta_composite", "rank_ch
 leaders_tbl["rank"] = leaders_tbl.index + 1
 st.caption(
     "Ranks themes by momentum score first, then confidence-adjusted composite improvement, then rank improvement. "
-    "This is a change leaderboard: it highlights themes improving the most over the selected window, not simply the strongest themes right now."
+    "This is a change leaderboard built from start-to-end window deltas, not a strongest-at-end table."
 )
 show_leaderboard_advanced = st.checkbox("Show advanced movement fields", value=False, key="historical_show_leaderboard_advanced")
 leaders_cols = ["rank", "theme", "rank_change", "delta_composite", "momentum_score"]
 if show_leaderboard_advanced:
     leaders_cols.extend(["delta_avg_1m", "delta_breadth"])
-leaders_tbl = leaders_tbl[leaders_cols]
+leaders_display = disambiguate_theme_labels(leaders_tbl)
+if "theme_display" in leaders_display.columns:
+    leaders_display["theme"] = leaders_display["theme_display"]
+leaders_display = leaders_display[leaders_cols]
 leaders_event = render_dataframe(
     "historical_momentum_leaderboard",
-    leaders_tbl,
+    leaders_display,
     width="stretch",
     column_config=_config_for_columns(leaders_tbl.columns.tolist()),
     on_select="rerun",
@@ -255,21 +343,36 @@ leaders_event = render_dataframe(
 )
 leader_idx = extract_selected_row(leaders_event)
 if leader_idx is not None and 0 <= leader_idx < len(leaders_tbl):
-    picked_theme = str(leaders_tbl.iloc[leader_idx]["theme"])
+    picked_row = leaders_tbl.iloc[leader_idx]
+    picked_theme = _display_theme_name_from_row(picked_row, theme_label_by_id, theme_ids_by_name)
     if st.button(f"Open `{picked_theme}` in Themes detail", key="open_historical_momentum_theme"):
-        _open_theme_in_themes(picked_theme, theme_id_by_name, theme_label_by_name, "historical_table")
+        _open_theme_in_themes(picked_row.get("theme_id"), picked_theme, theme_label_by_id, theme_ids_by_name, "historical_table")
 
 st.subheader("Top Momentum Themes")
 st.caption(
     "These are the strongest themes by the page's deterministic momentum model for the selected window. "
-    "Use this as the clearest model-based companion to the improving-themes leaderboard."
+    "Use this as the clearest model-based companion to the improving-themes leaderboard; unlike Window-End Leaders below, this table is sorted by `momentum_score`, not end-of-window return level."
 )
-render_dataframe(
+top_momentum_display = disambiguate_theme_labels(momentum["top_momentum"])
+if "theme_display" in top_momentum_display.columns:
+    top_momentum_display["theme"] = top_momentum_display["theme_display"]
+top_momentum_event = render_dataframe(
     "historical_top_momentum",
-    momentum["top_momentum"][["theme", "momentum_score", "delta_composite", "rank_change", "delta_breadth"]].head(analysis_top_n),
+    top_momentum_display[["theme", "momentum_score", "delta_composite", "rank_change", "delta_breadth"]].head(analysis_top_n),
     width="stretch",
     column_config=_config_for_columns(["theme", "momentum_score", "delta_composite", "rank_change", "delta_breadth"]),
+    on_select="rerun",
+    selection_mode="single-row",
+    key="historical_top_momentum_table",
 )
+top_momentum_idx = extract_selected_row(top_momentum_event)
+if top_momentum_idx is not None and 0 <= top_momentum_idx < len(top_momentum_display.head(analysis_top_n)):
+    picked_row = top_momentum_display.head(analysis_top_n).reset_index(drop=True).iloc[int(top_momentum_idx)]
+    st.session_state["historical_selected_theme_id"] = _normalize_theme_identifier(picked_row.get("theme_id"))
+    st.session_state["historical_selected_theme_name"] = str(picked_row.get("theme") or "")
+    picked_theme = _display_theme_name_from_row(picked_row, theme_label_by_id, theme_ids_by_name)
+    if st.button(f"Open top momentum theme `{picked_theme}` in Themes detail", key="open_historical_top_momentum_theme"):
+        _open_theme_in_themes(picked_row.get("theme_id"), picked_theme, theme_label_by_id, theme_ids_by_name, "historical_top_momentum")
 
 with st.expander("Advanced chart controls", expanded=False):
     fc1, fc2 = st.columns(2)
@@ -290,39 +393,50 @@ if category_filter != "all":
 if search_filter.strip():
     filtered_history = filtered_history[filtered_history["theme"].str.contains(search_filter.strip(), case=False, na=False)]
 
-latest = filtered_history.sort_values("snapshot_time").groupby("theme", as_index=False).tail(1)
-movement_leaders = summary.sort_values(["momentum_score", "delta_composite", "rank_change"], ascending=[False, False, False])["theme"].tolist()
-analysis_leaders = [theme for theme in movement_leaders if theme in latest["theme"].tolist()][:analysis_top_n]
+latest = filtered_history.sort_values(["snapshot_time", "theme"]).groupby("theme_id", as_index=False).tail(1)
+movement_leaders = summary.sort_values(["momentum_score", "delta_composite", "rank_change"], ascending=[False, False, False])[
+    ["theme_id", "theme"]
+].drop_duplicates(subset=["theme_id"])
+analysis_leaders_df = movement_leaders[movement_leaders["theme_id"].isin(latest["theme_id"].tolist())].head(analysis_top_n).copy()
 
-if not analysis_leaders:
+if analysis_leaders_df.empty:
     st.warning("No themes match current filter for this lookback window.")
     st.stop()
 
-default_chart_themes = analysis_leaders[: min(chart_series_count, len(analysis_leaders))]
+analysis_leader_ids = analysis_leaders_df["theme_id"].tolist()
+chart_option_by_id = {
+    int(theme_id): _theme_label_for_display(theme_id, analysis_leaders_df.loc[analysis_leaders_df["theme_id"] == theme_id, "theme"].iloc[0], theme_label_by_id, theme_ids_by_name)
+    for theme_id in analysis_leader_ids
+}
+chart_options = [chart_option_by_id[int(theme_id)] for theme_id in analysis_leader_ids]
+chart_id_by_option = {label: theme_id for theme_id, label in chart_option_by_id.items()}
+default_chart_themes = chart_options[: min(chart_series_count, len(chart_options))]
 with st.expander("Advanced theme selection", expanded=False):
-    watchlist = st.multiselect("Pinned watchlist themes", options=analysis_leaders, default=[])
+    watchlist = st.multiselect("Pinned watchlist themes", options=chart_options, default=[])
     chart_themes = st.multiselect(
         "Themes to display",
-        options=analysis_leaders,
-        default=sorted(set(default_chart_themes + watchlist), key=lambda x: analysis_leaders.index(x))[:12],
+        options=chart_options,
+        default=sorted(set(default_chart_themes + watchlist), key=lambda x: chart_options.index(x))[:12],
     )
 
 if not chart_themes:
     st.warning("Select at least one theme to display in chart.")
     st.stop()
 
-trend = filtered_history[filtered_history["theme"].isin(chart_themes)][["snapshot_time", "theme", metric, "rank"]].copy()
-trend = trend.sort_values(["theme", "snapshot_time"])
+selected_chart_theme_ids = [int(chart_id_by_option[label]) for label in chart_themes]
+trend = filtered_history[filtered_history["theme_id"].isin(selected_chart_theme_ids)][["snapshot_time", "theme_id", "theme", metric, "rank"]].copy()
+trend["theme_label"] = trend.apply(lambda row: _theme_label_for_display(row.get("theme_id"), row.get("theme"), theme_label_by_id, theme_ids_by_name), axis=1)
+trend = trend.sort_values(["theme_id", "snapshot_time", "theme"])
 
-points_per_theme = trend.groupby("theme")["snapshot_time"].nunique()
+points_per_theme = trend.groupby("theme_id")["snapshot_time"].nunique()
 valid_themes = points_per_theme[points_per_theme >= 2].index.tolist()
 if not valid_themes:
     st.warning("Selected themes do not have enough points in this window to plot trends.")
     st.stop()
-if len(valid_themes) < len(chart_themes):
-    dropped = sorted(set(chart_themes) - set(valid_themes))
+if len(valid_themes) < len(selected_chart_theme_ids):
+    dropped = [chart_option_by_id[int(theme_id)] for theme_id in selected_chart_theme_ids if theme_id not in set(valid_themes)]
     st.info(f"Skipping themes with insufficient history: {', '.join(dropped)}")
-    trend = trend[trend["theme"].isin(valid_themes)]
+    trend = trend[trend["theme_id"].isin(valid_themes)]
 
 if len(valid_themes) > 8:
     st.caption("Showing many lines can reduce readability; consider narrowing to roughly 5-8 themes.")
@@ -333,7 +447,7 @@ if display_mode == "rank movement":
 else:
     trend["display_value"] = trend[metric]
     if display_mode == "indexed (100=start)":
-        start_vals = trend.groupby("theme")["display_value"].transform("first")
+        start_vals = trend.groupby("theme_id")["display_value"].transform("first")
         trend["display_value"] = (trend["display_value"] / start_vals.replace(0, pd.NA)) * 100.0
         trend["display_value"] = trend["display_value"].fillna(100.0)
         y_title = f"{metric} indexed"
@@ -346,10 +460,10 @@ if smoothing == "3 period rolling":
 elif smoothing == "5 period rolling":
     window = 5
 if window > 1:
-    trend["display_value"] = trend.groupby("theme")["display_value"].transform(lambda s: s.rolling(window, min_periods=1).mean())
+    trend["display_value"] = trend.groupby("theme_id")["display_value"].transform(lambda s: s.rolling(window, min_periods=1).mean())
 
-leaders_now = summary.sort_values("rank_end").head(3)["theme"].tolist()
-trend["leader_tier"] = trend["theme"].apply(lambda x: "current leader" if x in leaders_now else "other")
+leaders_now = set(summary.sort_values("rank_end").head(3)["theme_id"].tolist()) if "theme_id" in summary.columns else set()
+trend["leader_tier"] = trend["theme_id"].apply(lambda x: "current leader" if x in leaders_now else "other")
 
 y_min = float(trend["display_value"].min())
 y_max = float(trend["display_value"].max())
@@ -369,9 +483,9 @@ chart = (
     .encode(
         x=alt.X("snapshot_time:T", title="Snapshot time"),
         y=alt.Y("display_value:Q", title=y_title, scale=scale),
-        color=alt.Color("theme:N", title="Theme"),
+        color=alt.Color("theme_label:N", title="Theme"),
         strokeWidth=alt.condition(alt.datum.leader_tier == "current leader", alt.value(3), alt.value(1.6)),
-        tooltip=["snapshot_time:T", "theme:N", alt.Tooltip("display_value:Q", format=".2f"), "rank:Q"],
+        tooltip=["snapshot_time:T", "theme_label:N", alt.Tooltip("display_value:Q", format=".2f"), "rank:Q"],
     )
     .properties(height=420)
 )
@@ -385,7 +499,7 @@ else:
 st.altair_chart(chart, width="stretch")
 
 st.caption(
-    f"Analyzed top N={analysis_top_n}; displaying {trend['theme'].nunique()} movement-selected theme lines "
+    f"Analyzed top N={analysis_top_n}; displaying {trend['theme_id'].nunique()} movement-selected theme lines "
     f"from {pd.to_datetime(window_meta.get('window_start')).strftime('%Y-%m-%d') if window_meta.get('window_start') is not None else '-'} "
     f"to {pd.to_datetime(window_meta.get('window_end')).strftime('%Y-%m-%d') if window_meta.get('window_end') is not None else '-'}."
 )
@@ -411,10 +525,14 @@ else:
         "delta_avg_1m",
         "delta_breadth",
     ]
-    signal_df = inflections["signals"][signal_cols].head(30).reset_index(drop=True)
+    signal_df = inflections["signals"][["theme_id", *signal_cols]].head(30).reset_index(drop=True)
+    signal_display = disambiguate_theme_labels(signal_df)
+    if "theme_display" in signal_display.columns:
+        signal_display["theme"] = signal_display["theme_display"]
+    signal_display = signal_display[signal_cols]
     signal_event = render_dataframe(
         "historical_signal_table",
-        signal_df,
+        signal_display,
         width="stretch",
         hide_index=True,
         column_config=_config_for_columns(signal_cols),
@@ -424,13 +542,23 @@ else:
     )
     signal_idx = extract_selected_row(signal_event)
     if signal_idx is not None and 0 <= signal_idx < len(signal_df):
-        picked_theme = str(signal_df.iloc[signal_idx]["theme"])
+        picked_row = signal_df.iloc[signal_idx]
+        picked_theme = _display_theme_name_from_row(picked_row, theme_label_by_id, theme_ids_by_name)
         if st.button(f"Open signal theme `{picked_theme}` in Themes detail", key="open_historical_signal_theme"):
-            _open_theme_in_themes(picked_theme, theme_id_by_name, theme_label_by_name, "historical_signal")
+            _open_theme_in_themes(picked_row.get("theme_id"), picked_theme, theme_label_by_id, theme_ids_by_name, "historical_signal")
     st.caption(f"Showing top {min(30, len(inflections['signals']))} signals by priority and momentum.")
 
 st.subheader("Rotation Signals")
 st.caption("Leadership transition is kept prominent here; overlap-heavy secondary diagnostics have been moved lower.")
+rotation_meta = rotation["rotation_intensity"]
+rt1, rt2, rt3 = st.columns(3)
+rt1.metric("Entered top N", int(rotation_meta.get("entered_top_n") or 0))
+rt2.metric("Exited top N", int(rotation_meta.get("exited_top_n") or 0))
+rt3.metric("Rotation intensity", f"{float(rotation_meta.get('rotation_intensity_score') or 0):.2f}%")
+st.caption(
+    f"Entered: {_format_theme_list(rotation['rotating_into'])} | Exited: {_format_theme_list(rotation['rotating_out'])}. "
+    "Duplicate names get a minimal suffix only when needed so turnover stays visually attributable."
+)
 r1, r2 = st.columns(2)
 with r1:
     _render_explained_table(
@@ -465,9 +593,13 @@ detail_cols = [
     "momentum_score",
 ]
 detail_df = summary[detail_cols].reset_index(drop=True)
+detail_source = summary.reset_index(drop=True)
+detail_display = disambiguate_theme_labels(detail_df)
+if "theme_display" in detail_display.columns:
+    detail_display["theme"] = detail_display["theme_display"]
 detail_event = render_dataframe(
     "historical_detail_table",
-    detail_df,
+    detail_display,
     width="stretch",
     column_config=_config_for_columns(detail_cols),
     on_select="rerun",
@@ -476,9 +608,10 @@ detail_event = render_dataframe(
 )
 detail_idx = extract_selected_row(detail_event)
 if detail_idx is not None and 0 <= detail_idx < len(detail_df):
-    picked_theme = str(detail_df.iloc[detail_idx]["theme"])
+    picked_row = detail_source.iloc[detail_idx]
+    picked_theme = _display_theme_name_from_row(picked_row, theme_label_by_id, theme_ids_by_name)
     if st.button(f"Open detail theme `{picked_theme}` in Themes detail", key="open_historical_detail_theme"):
-        _open_theme_in_themes(picked_theme, theme_id_by_name, theme_label_by_name, "historical_table")
+        _open_theme_in_themes(picked_row.get("theme_id"), picked_theme, theme_label_by_id, theme_ids_by_name, "historical_table")
 
 with st.expander("Advanced historical diagnostics", expanded=False):
     st.caption(
@@ -511,6 +644,9 @@ with st.expander("Advanced historical diagnostics", expanded=False):
         if not rotation["emerging"].empty:
             reasons = rotation["emerging"].head(5).copy()
             reasons["trigger_reason"] = reasons.apply(_signal_reason_text, axis=1)
+            reasons = disambiguate_theme_labels(reasons)
+            if "theme_display" in reasons.columns:
+                reasons["theme"] = reasons["theme_display"]
             with st.expander("Why these themes are marked Emerging"):
                 render_dataframe("historical_emerging_reasons", reasons[["theme", "trigger_reason"]], width="stretch")
         _render_explained_table(
@@ -550,6 +686,9 @@ with st.expander("Advanced historical diagnostics", expanded=False):
         if not momentum["weakening_themes"].empty:
             weak_reasons = momentum["weakening_themes"].head(5).copy()
             weak_reasons["trigger_reason"] = weak_reasons.apply(_signal_reason_text, axis=1)
+            weak_reasons = disambiguate_theme_labels(weak_reasons)
+            if "theme_display" in weak_reasons.columns:
+                weak_reasons["theme"] = weak_reasons["theme_display"]
             with st.expander("Why these themes are marked Weakening"):
                 render_dataframe("historical_weakening_reasons", weak_reasons[["theme", "trigger_reason"]], width="stretch")
 
@@ -559,15 +698,18 @@ st.subheader("Single Theme Historical Snapshot Detail")
 if themes.empty:
     st.info("No themes found.")
 else:
-    options = {f"{r['name']} ({r['category']})": int(r['id']) for _, r in themes.iterrows()}
-    theme_name_default = st.session_state.get("historical_selected_theme_name")
+    options = {label: theme_id for theme_id, label in theme_label_by_id.items()}
+    selected_theme_id_default = _resolve_theme_id(
+        st.session_state.get("historical_selected_theme_id"),
+        st.session_state.get("historical_selected_theme_name"),
+        theme_ids_by_name,
+    )
     labels = list(options.keys())
     default_index = 0
-    if theme_name_default:
-        for i, label in enumerate(labels):
-            if label.startswith(f"{theme_name_default} ("):
-                default_index = i
-                break
+    if selected_theme_id_default is not None:
+        selected_label_default = theme_label_by_id.get(int(selected_theme_id_default))
+        if selected_label_default in options:
+            default_index = labels.index(selected_label_default)
     sel = st.selectbox("Theme", labels, index=default_index)
     st.caption(
         "Historical table basis: resolved historical snapshot window above. "
@@ -576,6 +718,10 @@ else:
     st.caption(
         "If you want current/live constituent rows for this theme, use the Themes page. "
         "This section is for historical theme-level snapshot behavior across time."
+    )
+    st.caption(
+        "Detail history precedence for same-date rows is `captured > ticker_history_derived > reconstructed`. "
+        "The movement/debug workflow above can prefer `ticker_history_derived > captured > reconstructed` for recent boundaries, so recent dates can differ without being a bug."
     )
     with get_conn() as conn:
         single = theme_snapshot_history(conn, options[sel], limit=250, include_recent_ticker_history=True)
@@ -601,11 +747,15 @@ else:
         st.dataframe(single, width="stretch")
         with st.expander("Debug: Historical Source Lineage", expanded=False):
             st.caption(
-                "Use this to verify which layer actually drove the selected theme's resolved historical boundary rows for the current lookback window."
+                "Use this to verify which layer actually drove the selected theme's resolved movement boundary rows for the current lookback window."
             )
             st.caption(
                 f"Resolved boundary window: `{pd.to_datetime(boundary_debug.get('resolved_window_start')).strftime('%Y-%m-%d') if boundary_debug.get('resolved_window_start') is not None else '-'}` "
                 f"to `{pd.to_datetime(boundary_debug.get('resolved_window_end')).strftime('%Y-%m-%d') if boundary_debug.get('resolved_window_end') is not None else '-'}`"
+            )
+            st.caption(
+                f"Movement boundary precedence here is `ticker_history_derived > captured > reconstructed`; requested window=`{int(lookback_days)}`d, "
+                f"effective window=`{int(window_meta.get('effective_window_days') or 0)}`d, collapsed=`{'yes' if bool(window_meta.get('collapsed_to_available_history')) else 'no'}`."
             )
             boundary_summary = boundary_debug.get("boundary_summary", pd.DataFrame())
             if boundary_summary.empty:
@@ -621,9 +771,9 @@ else:
                     "Candidate rows below include same-date source layers that either won precedence (`selected=True`) or were overridden by a higher-precedence row."
                 )
                 st.dataframe(candidate_rows, width="stretch", hide_index=True)
-        selected_theme_name = sel.split(" (", 1)[0]
+        selected_theme_name = str(themes.loc[themes["id"] == options[sel], "name"].iloc[0])
         if st.button(f"Open current/live constituent view for `{selected_theme_name}`", key="open_historical_theme_current_view"):
-            _open_theme_in_themes(selected_theme_name, theme_id_by_name, theme_label_by_name, "historical_detail")
+            _open_theme_in_themes(options[sel], selected_theme_name, theme_label_by_id, theme_ids_by_name, "historical_detail")
 
 with st.expander("Momentum score formula (deterministic)"):
     st.code(

@@ -21,9 +21,11 @@ from src.leaderboard_utils import (
     build_current_leadership_table,
     build_current_performance_table,
     build_window_leaderboard,
+    disambiguate_theme_labels,
 )
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
 from src.momentum_engine import compute_theme_momentum
+from src.rotation_engine import compute_theme_rotation
 from src.queries import (
     latest_ticker_snapshots,
     refresh_history,
@@ -37,6 +39,7 @@ from src.queries import (
     theme_member_hygiene_context,
     theme_ticker_metrics,
     ticker_history_last_n_snapshots,
+    top_n_membership_changes,
     top_theme_movers,
 )
 from src.symbol_hygiene import (
@@ -565,6 +568,170 @@ class TestSuggestionsPageState(unittest.TestCase):
         tech = out[out["category"] == "Tech"]
         self.assertEqual(tech["theme"].tolist(), ["Alpha", "Beta"])
         self.assertIn("Gamma", out[out["category"] == "Gamma"]["theme"].tolist())
+
+    def test_window_leaderboard_keeps_duplicate_theme_names_distinct_by_theme_id(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme_id": 1, "theme": "AI", "category": "Software", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 1, "theme": "AI", "category": "Software", "avg_1w": 9.0, "positive_1m_breadth_pct": 70.0},
+                {"snapshot_time": "2026-03-01", "theme_id": 2, "theme": "AI", "category": "Hardware", "avg_1w": 1.0, "positive_1m_breadth_pct": 35.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 2, "theme": "AI", "category": "Hardware", "avg_1w": 8.0, "positive_1m_breadth_pct": 60.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "AI", "momentum_score": 5.0, "rank_change": 2},
+                {"theme_id": 2, "theme": "AI", "momentum_score": 4.0, "rank_change": 1},
+            ]
+        )
+
+        out, msg = build_window_leaderboard({"history": history, "window_summary": summary}, "avg_1w", top_k=10)
+
+        self.assertIsNone(msg)
+        self.assertEqual(out["theme"].tolist(), ["AI", "AI"])
+        self.assertEqual(out["theme_id"].tolist(), [1, 2])
+
+    def test_category_outputs_keep_duplicate_theme_names_distinct_by_theme_id(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme_id": 1, "theme": "AI", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 1, "theme": "AI", "category": "Tech", "avg_1w": 9.0, "positive_1m_breadth_pct": 80.0},
+                {"snapshot_time": "2026-03-01", "theme_id": 2, "theme": "AI", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 30.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 2, "theme": "AI", "category": "Tech", "avg_1w": 7.0, "positive_1m_breadth_pct": 60.0},
+                {"snapshot_time": "2026-03-01", "theme_id": 3, "theme": "Robotics", "category": "Industrials", "avg_1w": 1.0, "positive_1m_breadth_pct": 20.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 3, "theme": "Robotics", "category": "Industrials", "avg_1w": 6.0, "positive_1m_breadth_pct": 50.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "AI", "momentum_score": 5.0, "rank_change": 2},
+                {"theme_id": 2, "theme": "AI", "momentum_score": 4.0, "rank_change": 1},
+                {"theme_id": 3, "theme": "Robotics", "momentum_score": 3.0, "rank_change": 1},
+            ]
+        )
+
+        category_out, category_msg = build_category_leaderboard({"history": history, "window_summary": summary}, "avg_1w", top_k=10)
+        breakdown_out, breakdown_msg = build_category_theme_breakdown({"history": history, "window_summary": summary}, "avg_1w")
+
+        self.assertIsNone(category_msg)
+        self.assertIsNone(breakdown_msg)
+        self.assertEqual(int(category_out.loc[category_out["category"] == "Tech", "contributing_themes"].iloc[0]), 2)
+        self.assertEqual(sorted(breakdown_out.loc[breakdown_out["category"] == "Tech", "theme_id"].tolist()), [1, 2])
+        self.assertIn("AI (Tech) [#1]", category_out.loc[category_out["category"] == "Tech", "top_themes"].iloc[0])
+        self.assertIn("AI (Tech) [#2]", category_out.loc[category_out["category"] == "Tech", "top_themes"].iloc[0])
+        self.assertEqual(sorted(breakdown_out.loc[breakdown_out["category"] == "Tech", "theme_display"].tolist()), ["AI (Tech) [#1]", "AI (Tech) [#2]"])
+
+    def test_disambiguate_theme_labels_only_changes_collisions(self):
+        df = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "AI", "category": "Software"},
+                {"theme_id": 2, "theme": "AI", "category": "Hardware"},
+                {"theme_id": 3, "theme": "Solar", "category": "Energy"},
+            ]
+        )
+
+        out = disambiguate_theme_labels(df)
+
+        self.assertEqual(out.loc[out["theme_id"] == 1, "theme_display"].iloc[0], "AI (Software)")
+        self.assertEqual(out.loc[out["theme_id"] == 2, "theme_display"].iloc[0], "AI (Hardware)")
+        self.assertEqual(out.loc[out["theme_id"] == 3, "theme_display"].iloc[0], "Solar")
+
+    def test_top_n_membership_changes_uses_theme_id_for_duplicate_name_turnover(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'AI', 'Software', true)")
+        conn.execute("insert into themes values (2, 'AI', 'Hardware', true)")
+        conn.execute("insert into themes values (3, 'Robotics', 'Industrials', true)")
+        conn.execute(
+            """
+            insert into theme_snapshots values
+            (1, '2026-03-01 00:00:00', 1, 5, 1, 1, 1, 50, 10, 'live'),
+            (1, '2026-03-01 00:00:00', 2, 5, 1, 1, 1, 45, 8, 'live'),
+            (1, '2026-03-01 00:00:00', 3, 5, 1, 1, 1, 40, 7, 'live'),
+            (2, '2026-03-08 00:00:00', 1, 5, 1, 1, 1, 40, 6, 'live'),
+            (2, '2026-03-08 00:00:00', 2, 5, 1, 1, 1, 60, 11, 'live'),
+            (2, '2026-03-08 00:00:00', 3, 5, 1, 1, 1, 50, 7, 'live')
+            """
+        )
+
+        entered, dropped = top_n_membership_changes(conn, 7, top_n=1)
+        momentum = compute_theme_momentum(conn, 7, top_n=1)
+        rotation = compute_theme_rotation(momentum["window_summary"], 1, momentum["new_leaders"], momentum["dropped_leaders"])
+
+        self.assertEqual(entered, ["AI"])
+        self.assertEqual(dropped, ["AI"])
+        self.assertEqual(rotation["rotation_intensity"]["entered_top_n"], 1)
+        self.assertEqual(rotation["rotation_intensity"]["exited_top_n"], 1)
+        self.assertEqual(rotation["rotation_intensity"]["rotation_intensity_score"], 200.0)
+        conn.close()
+
+    @patch("src.inflection_engine.compute_theme_momentum")
+    def test_compute_theme_inflections_keeps_duplicate_theme_names_distinct_by_theme_id(self, mock_momentum):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme_id": 1, "theme": "AI", "category": "Software", "composite_score": 5.0, "avg_1m": 1.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 1, "theme": "AI", "category": "Software", "composite_score": 7.0, "avg_1m": 2.0},
+                {"snapshot_time": "2026-03-15", "theme_id": 1, "theme": "AI", "category": "Software", "composite_score": 9.0, "avg_1m": 3.0},
+                {"snapshot_time": "2026-03-22", "theme_id": 1, "theme": "AI", "category": "Software", "composite_score": 11.0, "avg_1m": 4.0},
+                {"snapshot_time": "2026-03-01", "theme_id": 2, "theme": "AI", "category": "Hardware", "composite_score": 8.0, "avg_1m": 4.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 2, "theme": "AI", "category": "Hardware", "composite_score": 7.0, "avg_1m": 3.0},
+                {"snapshot_time": "2026-03-15", "theme_id": 2, "theme": "AI", "category": "Hardware", "composite_score": 6.0, "avg_1m": 2.0},
+                {"snapshot_time": "2026-03-22", "theme_id": 2, "theme": "AI", "category": "Hardware", "composite_score": 5.0, "avg_1m": 1.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "AI",
+                    "rank_start": 6,
+                    "rank_end": 1,
+                    "rank_change": 5,
+                    "delta_composite": 6.0,
+                    "delta_avg_1m": 3.0,
+                    "delta_breadth": 4.0,
+                    "momentum_score": 5.0,
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "AI",
+                    "rank_start": 1,
+                    "rank_end": 6,
+                    "rank_change": -5,
+                    "delta_composite": -3.0,
+                    "delta_avg_1m": -3.0,
+                    "delta_breadth": -4.0,
+                    "momentum_score": -3.0,
+                },
+            ]
+        )
+        mock_momentum.return_value = {
+            "history": history,
+            "window_summary": summary,
+            "new_leaders": ["AI"],
+            "dropped_leaders": ["AI"],
+        }
+
+        out = compute_theme_inflections(object(), 30, top_n=20)
+
+        self.assertEqual(sorted(out["signals"]["theme_id"].tolist()), [1, 2])
+        self.assertEqual(len(out["signals"]), 2)
 
     def test_current_leadership_table_uses_composite_strength_and_quality_context(self):
         rankings = pd.DataFrame(
@@ -1204,7 +1371,7 @@ class TestBoundarySelection(unittest.TestCase):
         self.assertIn('Deactivate selected empty active', content)
         self.assertIn('prepare_post_mutation_refresh(', content)
         self.assertIn('def _add_theme_to_audit_queue(session_state, theme_id: int, theme_name: str)', content)
-        self.assertIn('Add selected theme to queue', content)
+        self.assertIn('"Add to queue"', content)
         self.assertIn('Queue recommended: rebuild', content)
         self.assertIn('Queue recommended: deactivate', content)
         self.assertIn('is already in the audit queue.', content)
@@ -2772,6 +2939,77 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('"Suppressed"', content)
         self.assertIn("prepare_post_mutation_refresh(", content)
 
+    def test_themes_page_source_explains_selected_history_provenance_and_current_metric_semantics(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("Selected-theme history shows preferred-source captured/reconstructed theme history", content)
+        self.assertIn("movement tables above may prefer recent ticker-history-derived boundary rows", content)
+        self.assertIn('c2.metric("Eligible/capped 1W"', content)
+        self.assertIn('c3.metric("Eligible/capped 1M"', content)
+        self.assertIn('c4.metric("Eligible/capped 3M"', content)
+        self.assertIn("These current summary metrics match the current ranking pipeline", content)
+        self.assertIn("Ticker rows below are current governed-member snapshot rows", content)
+        self.assertIn("This theme currently has no governed members, so there are no current member rows to display.", content)
+        self.assertIn("no current governed-member rows are visible in the detail table", content)
+        self.assertIn("Current enriched coverage is partial for this theme", content)
+        self.assertIn("none currently have preferred-source enriched snapshot fields populated", content)
+        self.assertIn("This is a historical end-of-window table", content)
+        self.assertIn("top_themes` previews the strongest underlying themes in that category for the same window, with a minimal suffix only when duplicate names would otherwise look collapsed.", content)
+
+    def test_themes_page_source_guards_inactive_current_quality(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('quality_label = "n/a (inactive theme)" if not bool(current_row.get("is_active")) else current_leadership_quality_label(current_row)', content)
+        self.assertNotIn('build_current_leadership_table(theme_current_row, top_k=1).iloc[0]["leadership_quality"]', content)
+
+    def test_historical_performance_page_source_uses_theme_id_identity_for_open_routing(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "2_Historical_Performance.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('st.session_state["historical_selected_theme_id"]', content)
+        self.assertIn("def _resolve_theme_id(", content)
+        self.assertIn("_open_theme_in_themes(picked_row.get(\"theme_id\"), picked_theme, theme_label_by_id, theme_ids_by_name, \"historical_table\")", content)
+        self.assertIn("_open_theme_in_themes(picked_row.get(\"theme_id\"), picked_theme, theme_label_by_id, theme_ids_by_name, \"historical_signal\")", content)
+        self.assertIn("trend = filtered_history[filtered_history[\"theme_id\"].isin(selected_chart_theme_ids)]", content)
+        self.assertIn('key="historical_top_momentum_table"', content)
+        self.assertIn('st.session_state["historical_selected_theme_id"] = _normalize_theme_identifier(picked_row.get("theme_id"))', content)
+        self.assertIn('key="open_historical_top_momentum_theme"', content)
+
+    def test_historical_performance_page_source_explains_precedence_and_resolved_boundaries(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "2_Historical_Performance.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("Movement windows resolve boundaries with precedence", content)
+        self.assertIn("ticker_history_derived > captured > reconstructed", content)
+        self.assertIn("Detail history precedence for same-date rows is `captured > ticker_history_derived > reconstructed`.", content)
+        self.assertIn("Movement boundary precedence here is `ticker_history_derived > captured > reconstructed`", content)
+        self.assertIn("effective window=`{int(window_meta.get('effective_window_days') or 0)}`d", content)
+        self.assertIn("This is a change leaderboard built from start-to-end window deltas", content)
+        self.assertIn("this table is sorted by `momentum_score`, not end-of-window return level", content)
+        self.assertIn('rt1.metric("Entered top N"', content)
+        self.assertIn("Duplicate names get a minimal suffix only when needed so turnover stays visually attributable.", content)
+        self.assertIn("def _display_theme_name_from_row(", content)
+        self.assertIn('reasons = disambiguate_theme_labels(reasons)', content)
+        self.assertIn('weak_reasons = disambiguate_theme_labels(weak_reasons)', content)
+        self.assertIn('picked_theme = _display_theme_name_from_row(picked_row, theme_label_by_id, theme_ids_by_name)', content)
+
+    def test_suggestions_page_source_uses_clickable_queue_and_scanner_selection(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "3_Suggestions.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('key="suggestions_queue_table"', content)
+        self.assertIn('st.session_state["queue_selected_suggestion_id"] = clicked_suggestion_id', content)
+        self.assertIn('key="queue_selected_suggestion_id"', content)
+        self.assertIn("Previously selected suggestion `#", content)
+        self.assertIn("Selection moved to the first visible row.", content)
+        self.assertIn('key="scanner_candidate_display_table"', content)
+        self.assertIn('st.session_state["scanner_audit_selected_ticker"] = str(display.reset_index(drop=True).iloc[int(scanner_row_idx)]["ticker"])', content)
+        self.assertIn('key="scanner_audit_selected_ticker"', content)
+        self.assertIn("Previously selected ticker `", content)
+        self.assertIn("View re-anchored to `", content)
+
 
 class TestDescriptionFirstResearchRefinements(unittest.TestCase):
     @staticmethod
@@ -4088,6 +4326,31 @@ class TestSuggestionsWorkflow(unittest.TestCase):
         self.assertIn("prepare_post_mutation_refresh(", themes_source)
         self.assertIn("prepare_post_mutation_refresh(", suggestions_source)
         self.assertIn("prepare_post_mutation_refresh(", health_source)
+
+    def test_health_page_source_adds_detail_queue_shortcuts_and_status(self):
+        health_source = (Path(__file__).resolve().parents[1] / "pages" / "4_Health.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _remove_theme_from_audit_queue(", health_source)
+        self.assertIn("def _focus_audit_queue_on_theme(", health_source)
+        self.assertIn("def _queue_status_summary(", health_source)
+        self.assertIn("Audit queue status: in_queue=", health_source)
+        self.assertIn('"Add to queue"', health_source)
+        self.assertIn('"Remove from queue"', health_source)
+        self.assertIn('"Queue only this theme"', health_source)
+        self.assertIn("Focused the audit queue on", health_source)
+
+    def test_health_page_source_clarifies_operational_action_feedback(self):
+        health_source = (Path(__file__).resolve().parents[1] / "pages" / "4_Health.py").read_text(encoding="utf-8")
+
+        self.assertIn("Hydration scope: selected=", health_source)
+        self.assertIn("Reconstruction scope: selected=", health_source)
+        self.assertIn("Ready now=`", health_source)
+        self.assertIn("Targeted current snapshot hydration:", health_source)
+        self.assertIn("Current market/scanner caches were cleared; the onboarding table below reruns against refreshed state.", health_source)
+        self.assertIn("Downstream refresh cleared for", health_source)
+        self.assertIn('THEME_HEALTH_FEEDBACK_KEY = "theme_health_feedback"', health_source)
+        self.assertIn("render_feedback_message(st.session_state, THEME_HEALTH_FEEDBACK_KEY)", health_source)
+        self.assertIn('prepare_post_mutation_refresh(\n                        st.session_state,\n                        THEME_HEALTH_FEEDBACK_KEY,', health_source)
 
     def test_fetch_data_source_no_longer_uses_datetime_utcnow(self):
         fetch_data_source = (Path(__file__).resolve().parents[1] / "src" / "fetch_data.py").read_text(encoding="utf-8")
