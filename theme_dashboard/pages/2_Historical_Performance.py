@@ -4,14 +4,17 @@ import streamlit as st
 
 from src.database import get_conn, init_db
 from src.leaderboard_utils import build_window_leaderboard, disambiguate_theme_labels
-from src.queries import historical_theme_boundary_debug, theme_snapshot_history
+from src.queries import baseline_status, historical_theme_boundary_debug, theme_snapshot_history
 from src.rotation_engine import compute_theme_rotation
 from src.streamlit_utils import (
+    clear_current_market_view_caches,
     db_cache_token,
     extract_selected_row,
     load_theme_inflections_cached,
     load_theme_momentum_cached,
+    queue_feedback_message,
     render_dataframe,
+    render_feedback_message,
     reset_perf_timings,
     show_perf_summary,
     stop_for_database_error,
@@ -218,10 +221,13 @@ try:
     with get_conn() as conn:
         seed_if_needed(conn)
         themes = list_themes(conn, active_only=False)
+        baseline = baseline_status(conn)
 except Exception as exc:
     stop_for_database_error(exc)
 db_token = db_cache_token()
 theme_label_by_id, theme_id_by_label, theme_ids_by_name = _theme_option_maps(themes)
+
+render_feedback_message(st.session_state, "historical_refresh_feedback")
 
 overview_1w = load_theme_momentum_cached(db_token, 7, top_n=10)
 overview_1m = load_theme_momentum_cached(db_token, 30, top_n=10)
@@ -259,6 +265,41 @@ st.caption(
 momentum = load_theme_momentum_cached(db_token, int(lookback_days), top_n=analysis_top_n)
 with get_conn() as conn:
     total_theme_snapshot_sets = int(conn.execute("SELECT COUNT(DISTINCT snapshot_time) FROM theme_snapshots").fetchone()[0] or 0)
+
+baseline_row = baseline.iloc[0] if not baseline.empty else None
+historical_fresh_c1, historical_fresh_c2, historical_fresh_c3, historical_fresh_c4 = st.columns([1.2, 1.2, 1.2, 1.1])
+historical_fresh_c1.metric(
+    "Latest preferred theme snapshot",
+    str(pd.to_datetime(baseline_row.get("latest_theme_snapshot_time")).strftime("%Y-%m-%d")) if baseline_row is not None and baseline_row.get("latest_theme_snapshot_time") is not None else "-",
+)
+historical_fresh_c2.metric(
+    "Visible window start",
+    str(pd.to_datetime(momentum.get("meta", {}).get("window_start")).strftime("%Y-%m-%d")) if momentum.get("meta", {}).get("window_start") is not None else "-",
+)
+historical_fresh_c3.metric(
+    "Visible window end",
+    str(pd.to_datetime(momentum.get("meta", {}).get("window_end")).strftime("%Y-%m-%d")) if momentum.get("meta", {}).get("window_end") is not None else "-",
+)
+with historical_fresh_c4:
+    if st.button("Reload latest DB state", key="historical_force_refresh"):
+        clear_current_market_view_caches()
+        queue_feedback_message(
+            st.session_state,
+            "historical_refresh_feedback",
+            level="success",
+            message=(
+                "Cleared cached Themes/Historical analytics and reran this page against the latest DB state. "
+                "This recomputes historical movement, leaderboard, and inflection tables in-memory from stored data only; it does not run upstream refreshes or rebuild snapshots."
+            ),
+        )
+        st.rerun()
+st.caption(
+    "Historical Performance tables are driven by the resolved boundary window shown above, not simply the newest raw snapshot in the database."
+)
+st.caption(
+    "Reload latest DB state clears cached page analytics and rereads the database. "
+    "It does not fetch market data, rerun refresh_runs, or rebuild historical snapshots."
+)
 
 history = momentum["history"]
 if history.empty:

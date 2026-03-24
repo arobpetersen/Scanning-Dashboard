@@ -77,8 +77,9 @@ Current ranking minimum threshold:
 - current top-by-window requires the corresponding `eligible_1w_count` or `eligible_1m_count` or `eligible_3m_count` to meet the threshold
 
 Leadership quality label from `current_leadership_quality_label()`:
-- `Broad leader` if breadth >= 60 and contributor count >= 8
-- `Thin / filtered` if contributor count <= threshold + 1 or breadth < 45
+- define `participation_ratio = eligible_contributor_count / max(ticker_count, 1)`
+- `Thin / filtered` if `eligible_contributor_count <= 2` or (`eligible_contributor_count <= 3` and `participation_ratio < 0.40`)
+- `Broad leader` if `eligible_contributor_count >= 4` and `participation_ratio >= 0.50` and `breadth_1m >= 60`
 - otherwise `Narrow leader`
 
 ## Themes Page
@@ -124,6 +125,7 @@ Semantics:
 - `avg_*` values are eligible-only and capped
 - `breadth_1m` is renamed from `positive_1m_breadth_pct`
 - `eligible_contributor_count = eligible_composite_count`
+- optional Themes daily-delta view compares current `composite_score` and current `avg_1m` against the prior daily movement endpoint from the cached 1M movement history; default table ranking/sorting does not change
 
 ### Current Top Themes By Window
 
@@ -169,6 +171,7 @@ Filters and gates:
 Semantics:
 - `performance` is the capped current eligible mean for that window
 - `composite_score` is still shown as context, but is not the primary ranking key here
+- when the Themes daily-delta toggle is enabled, the page adds a display-only `avg_1m` comparison column and inline deltas versus the prior daily movement endpoint; ranking remains unchanged
 
 ### Theme Movement Snapshots
 
@@ -241,6 +244,7 @@ Semantics:
 - identity is `theme_id` where available
 - visible labels remain theme names
 - `performance` is historical latest-row window performance, not current-view eligible/capped performance
+- latest-day historical append/materialization operates on non-suppressed governed tickers only; suppressed tickers can still retain older stored raw/history rows, but new append scope is suppression-aware
 
 ### Selected Theme Detail Panel
 

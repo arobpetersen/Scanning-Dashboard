@@ -13,8 +13,18 @@ HISTORICAL_LOOKBACK_BUFFER_DAYS = 120
 SUPPRESSION_REBUILD_LOOKBACK_DAYS = 45
 
 
-def _manual_suppression_filter_sql(conn, ticker_expr: str) -> str:
-    if not table_exists(conn, "symbol_refresh_status") or not table_has_column(conn, "symbol_refresh_status", "manual_suppressed"):
+def _suppressed_ticker_filter_sql(conn, ticker_expr: str) -> str:
+    if not table_exists(conn, "symbol_refresh_status"):
+        return ""
+    if table_has_column(conn, "symbol_refresh_status", "status"):
+        return (
+            " AND NOT EXISTS ("
+            "SELECT 1 FROM symbol_refresh_status s "
+            f"WHERE upper(trim(s.ticker)) = upper(trim({ticker_expr})) "
+            "AND COALESCE(s.status, 'active') = 'refresh_suppressed'"
+            ")"
+        )
+    if not table_has_column(conn, "symbol_refresh_status", "manual_suppressed"):
         return ""
     return (
         " AND NOT EXISTS ("
@@ -65,9 +75,9 @@ def _scope_membership(conn, tickers: list[str] | None = None, theme_ids: list[in
         placeholders = ", ".join(["?"] * len(theme_ids))
         clauses.append(f"m.theme_id IN ({placeholders})")
         params.extend(theme_ids)
-    manual_clause = _manual_suppression_filter_sql(conn, "m.ticker")
-    if manual_clause:
-        clauses.append(manual_clause.replace(" AND ", "", 1))
+    suppression_clause = _suppressed_ticker_filter_sql(conn, "m.ticker")
+    if suppression_clause:
+        clauses.append(suppression_clause.replace(" AND ", "", 1))
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     return conn.execute(
@@ -149,6 +159,21 @@ def _finalize_reconstruction_run(conn, run_id: int, **fields) -> None:
     )
 
 
+def _update_reconstruction_run_progress(conn, run_id: int, **fields) -> None:
+    if not fields:
+        return
+    assignments = ", ".join(f"{column} = ?" for column in fields)
+    conn.execute(
+        f"""
+        UPDATE historical_reconstruction_runs
+        SET {assignments}
+        WHERE run_id = ?
+          AND status = 'running'
+        """,
+        [*fields.values(), run_id],
+    )
+
+
 def reconstruct_theme_history_range(
     conn,
     *,
@@ -201,6 +226,16 @@ def reconstruct_theme_history_range(
     failed_tickers: list[str] = []
     ticker_history_rows_written = 0
     ticker_history_rows_skipped = 0
+    _update_reconstruction_run_progress(
+        conn,
+        run_id,
+        ticker_count=len(scoped_tickers),
+        theme_count=len(scoped_theme_ids),
+        ticker_history_rows_written=0,
+        ticker_history_rows_skipped=0,
+        snapshot_rows_written=0,
+        snapshot_rows_skipped=0,
+    )
 
     try:
         for ticker in scoped_tickers:
@@ -224,6 +259,13 @@ def reconstruct_theme_history_range(
                 ticker_history_frames.append(history)
             except Exception:
                 failed_tickers.append(ticker)
+            _update_reconstruction_run_progress(
+                conn,
+                run_id,
+                ticker_history_rows_written=ticker_history_rows_written,
+                ticker_history_rows_skipped=ticker_history_rows_skipped,
+                failed_tickers=",".join(failed_tickers) if failed_tickers else None,
+            )
 
         history_df = pd.concat(ticker_history_frames, ignore_index=True) if ticker_history_frames else pd.DataFrame()
         perf_df = _compute_daily_perf(history_df, requested_start, requested_end)
@@ -338,6 +380,12 @@ def reconstruct_theme_history_range(
                     ],
                 )
                 rows_written += 1
+            _update_reconstruction_run_progress(
+                conn,
+                run_id,
+                snapshot_rows_written=rows_written,
+                snapshot_rows_skipped=rows_skipped,
+            )
 
         _finalize_reconstruction_run(
             conn,

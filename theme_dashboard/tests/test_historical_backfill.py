@@ -602,6 +602,54 @@ class TestHistoricalBackfill(unittest.TestCase):
         self.assertEqual(stored, [(1,)])
         conn.close()
 
+    def test_daily_historical_append_scope_excludes_refresh_suppressed_tickers(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'Biotech', 'Health', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'GOOD')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'BBIG')")
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, consecutive_failure_count, rolling_failure_count, updated_at
+            ) values ('BBIG', 'refresh_suppressed', 1, 1, CURRENT_TIMESTAMP)
+            """
+        )
+
+        result = reconstruct_theme_history_range(
+            conn,
+            provider_name="mock",
+            start_date="2026-02-10",
+            end_date="2026-02-10",
+            provenance_source_label="daily_historical_append",
+            run_kind="daily_historical_append",
+            replace_existing=True,
+        )
+        run_row = conn.execute(
+            """
+            select ticker_count, theme_count, ticker_history_rows_written, snapshot_rows_written
+            from historical_reconstruction_runs
+            where run_id = ?
+            """,
+            [int(result["run_id"])],
+        ).fetchone()
+        written_tickers = conn.execute(
+            """
+            select distinct ticker
+            from ticker_daily_history
+            where run_id = ?
+            order by ticker
+            """,
+            [int(result["run_id"])],
+        ).fetchall()
+
+        self.assertEqual(str(result["status"]), "success")
+        self.assertEqual(int(run_row[0]), 1)
+        self.assertEqual(int(run_row[1]), 1)
+        self.assertGreaterEqual(int(run_row[2]), 1)
+        self.assertGreaterEqual(int(run_row[3]), 1)
+        self.assertEqual(written_tickers, [("GOOD",)])
+        conn.close()
+
     def test_targeted_recent_rebuild_replaces_only_reconstructed_rows_in_scope(self):
         conn = self._conn()
         conn.execute("insert into themes(id, name, category, is_active) values (1, 'Meme Stocks', 'Spec', true)")

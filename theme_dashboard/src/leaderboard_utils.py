@@ -4,7 +4,6 @@ import pandas as pd
 
 from .config import CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS
 
-
 def disambiguate_theme_labels(
     df: pd.DataFrame,
     *,
@@ -48,12 +47,20 @@ def disambiguate_theme_labels(
 def current_leadership_quality_label(row: pd.Series) -> str:
     breadth = row.get("eligible_breadth_pct", row.get("positive_1m_breadth_pct"))
     breadth_value = float(breadth) if breadth is not None and not pd.isna(breadth) else None
-    ticker_count = int(row.get("eligible_contributor_count", row.get("eligible_composite_count", row.get("ticker_count") or 0)) or 0)
+    eligible_contributor_count = int(
+        row.get("eligible_contributor_count", row.get("eligible_composite_count", row.get("ticker_count") or 0)) or 0
+    )
+    governed_ticker_count = int(row.get("ticker_count") or 0)
+    participation_ratio = (
+        float(eligible_contributor_count) / float(max(governed_ticker_count, 1))
+        if eligible_contributor_count > 0
+        else 0.0
+    )
 
-    if breadth_value is not None and breadth_value >= 60 and ticker_count >= 8:
-        return "Broad leader"
-    if ticker_count <= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS + 1 or (breadth_value is not None and breadth_value < 45):
+    if eligible_contributor_count <= 2 or (eligible_contributor_count <= 3 and participation_ratio < 0.40):
         return "Thin / filtered"
+    if eligible_contributor_count >= 4 and participation_ratio >= 0.50 and breadth_value is not None and breadth_value >= 60:
+        return "Broad leader"
     return "Narrow leader"
 
 
