@@ -10,8 +10,9 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import pandas as pd
 
-from src.fetch_data import RefreshBlockedError, mark_refresh_run_interrupted, running_refresh_runs, run_refresh
+from src.fetch_data import RefreshBlockedError, mark_refresh_run_interrupted, mark_stale_running_runs, running_refresh_runs, run_refresh
 from src.database import get_conn, get_db_connection
+from src.db_introspection import table_exists, table_has_column
 from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
 from src.leaderboard_utils import (
@@ -26,6 +27,8 @@ from src.momentum_engine import compute_theme_momentum
 from src.queries import (
     latest_ticker_snapshots,
     refresh_history,
+    snapshot_counts,
+    source_audit_status,
     ticker_lookup_memberships,
     ticker_lookup_summary,
     theme_health_overview,
@@ -48,6 +51,13 @@ from src.symbol_hygiene import (
     sync_symbol_hygiene_staged_action,
     sort_symbol_hygiene_queue,
     symbol_hygiene_queue,
+)
+from src.theme_health_audit import (
+    apply_theme_health_audit_preset,
+    enrich_theme_health_for_audit,
+    sort_theme_health_audit,
+    theme_health_action_eligibility,
+    theme_health_audit_counts,
 )
 from src.suggestions_service import (
     bulk_update_filtered_status,
@@ -87,8 +97,9 @@ from src.suggestions_page_state import (
     sync_suggested_theme_checkbox_state,
 )
 from src.suggestions_service import recent_applied_suggestions
-from src.theme_service import add_ticker, get_theme_members, refresh_active_ticker_universe, remove_ticker, replace_ticker_in_theme, seed_if_needed
+from src.theme_service import add_ticker, clear_manual_ticker_suppression, get_theme_members, list_themes, refresh_active_ticker_universe, remove_ticker, replace_ticker_in_theme, seed_if_needed, set_manual_ticker_suppression, theme_membership_export, ticker_manual_suppression_state
 from src.theme_service import set_ticker_theme_assignments
+from src.ticker_onboarding import governed_ticker_onboarding_counts, list_governed_ticker_onboarding
 from src.provider_live import LiveProvider
 from src.scanner_research import (
     _description_theme_generation_draft,
@@ -1078,6 +1089,127 @@ class TestBoundarySelection(unittest.TestCase):
 
         self.assertEqual(str(out.iloc[0]["latest_snapshot_time"]), "2026-03-10 22:00:00")
         conn.close()
+
+    def test_theme_health_overview_counts_normalized_members_and_failures(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean, updated_at timestamp)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table theme_snapshots(run_id bigint, snapshot_time timestamp, theme_id bigint, ticker_count bigint, avg_1w double, avg_1m double, avg_3m double, positive_1w_breadth_pct double, positive_1m_breadth_pct double, positive_3m_breadth_pct double, composite_score double, snapshot_source varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, provider varchar)")
+        conn.execute("create table refresh_failures(run_id bigint, ticker varchar, error_message varchar, failure_category varchar, created_at timestamp)")
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true, '2026-03-20 10:00:00')")
+        conn.execute("insert into theme_membership values (1, 'DOCN')")
+        conn.execute("insert into theme_membership values (1, 'docn')")
+        conn.execute("insert into refresh_runs values (10, 'live')")
+        conn.execute("insert into refresh_failures values (10, 'DOCN', 'timeout', 'TIMEOUT', '2026-03-21 10:00:00')")
+
+        out = theme_health_overview(conn, low_constituent_threshold=3, failure_window_days=14)
+
+        self.assertEqual(int(out.iloc[0]["constituent_count"]), 1)
+        self.assertEqual(int(out.iloc[0]["live_failure_count_recent"]), 1)
+        conn.close()
+
+    def test_theme_health_audit_enrichment_derives_flags_counts_and_actions(self):
+        now = datetime.now(UTC).replace(tzinfo=None)
+        health = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme_name": "Empty Active",
+                    "category": "AI",
+                    "is_active": True,
+                    "updated_at": now - pd.Timedelta(hours=10),
+                    "constituent_count": 0,
+                    "low_count_flag": False,
+                    "empty_theme_flag": True,
+                    "live_failure_count_recent": 0,
+                    "latest_snapshot_time": None,
+                },
+                {
+                    "theme_id": 2,
+                    "theme_name": "Stale Failure",
+                    "category": "Energy",
+                    "is_active": True,
+                    "updated_at": now - pd.Timedelta(days=10),
+                    "constituent_count": 2,
+                    "low_count_flag": True,
+                    "empty_theme_flag": False,
+                    "live_failure_count_recent": 4,
+                    "latest_snapshot_time": now - pd.Timedelta(days=3),
+                },
+                {
+                    "theme_id": 3,
+                    "theme_name": "Inactive Members",
+                    "category": "Software",
+                    "is_active": False,
+                    "updated_at": now - pd.Timedelta(hours=5),
+                    "constituent_count": 3,
+                    "low_count_flag": False,
+                    "empty_theme_flag": False,
+                    "live_failure_count_recent": 0,
+                    "latest_snapshot_time": now - pd.Timedelta(hours=2),
+                },
+            ]
+        )
+
+        audit = enrich_theme_health_for_audit(health, stale_hours=24)
+        counts = theme_health_audit_counts(audit)
+        stale_view = apply_theme_health_audit_preset(audit, "Stale")
+        sorted_view = sort_theme_health_audit(audit, "Most failures")
+
+        self.assertEqual(counts.empty_themes, 1)
+        self.assertEqual(counts.low_count_themes, 1)
+        self.assertEqual(counts.recent_failure_themes, 1)
+        self.assertEqual(counts.active_zero_member_themes, 1)
+        self.assertEqual(counts.inactive_with_members, 1)
+        self.assertEqual(str(audit.iloc[0]["why_flagged"]), "empty active theme; no recent snapshot")
+        self.assertEqual(str(audit.iloc[0]["next_action"]), "review assignments or deactivate")
+        self.assertEqual(stale_view["theme_name"].tolist(), ["Empty Active", "Stale Failure"])
+        self.assertEqual(str(sorted_view.iloc[0]["theme_name"]), "Stale Failure")
+
+    def test_theme_health_action_eligibility_scopes_rebuild_backfill_and_deactivate(self):
+        selection = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme_name": "Empty Active", "is_active": True, "constituent_count": 0},
+                {"theme_id": 2, "theme_name": "Stale Failure", "is_active": True, "constituent_count": 2},
+                {"theme_id": 3, "theme_name": "Inactive Members", "is_active": False, "constituent_count": 3},
+            ]
+        )
+
+        out = theme_health_action_eligibility(selection)
+
+        self.assertEqual(int(out["selected_count"]), 3)
+        self.assertEqual(out["rebuild_theme_ids"], [2, 3])
+        self.assertEqual(out["backfill_theme_ids"], [2, 3])
+        self.assertEqual(out["deactivate_theme_ids"], [1])
+
+    def test_health_page_theme_health_uses_audit_presets_and_explanatory_columns(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "4_Health.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('preset = st.radio("Audit preset", AUDIT_PRESETS, horizontal=True, index=0)', content)
+        self.assertIn('view = apply_theme_health_audit_preset(audit, preset)', content)
+        self.assertIn('"why_flagged"', content)
+        self.assertIn('"next_action"', content)
+        self.assertIn('st.caption(f"Why flagged: `{picked.get(\'why_flagged\') or \'healthy\'}`")', content)
+        self.assertIn('st.caption(f"Next action: `{picked.get(\'next_action\') or \'monitor\'}`")', content)
+        self.assertIn('theme_export_df = theme_membership_export(conn)', content)
+        self.assertIn('st.download_button(', content)
+        self.assertIn('file_name="theme_membership_audit_export.csv"', content)
+        self.assertIn('st.multiselect(', content)
+        self.assertIn('"Audit queue selection"', content)
+        self.assertIn('action_state = theme_health_action_eligibility(selected_queue)', content)
+        self.assertIn('Rebuild recent selected', content)
+        self.assertIn('Backfill + reconstruct selected', content)
+        self.assertIn('Deactivate selected empty active', content)
+        self.assertIn('prepare_post_mutation_refresh(', content)
+        self.assertIn('def _add_theme_to_audit_queue(session_state, theme_id: int, theme_name: str)', content)
+        self.assertIn('Add selected theme to queue', content)
+        self.assertIn('Queue recommended: rebuild', content)
+        self.assertIn('Queue recommended: deactivate', content)
+        self.assertIn('is already in the audit queue.', content)
+        self.assertIn('Confirm deactivation of selected empty active themes', content)
+        self.assertIn('Confirm deactivation before running this action.', content)
 
     def test_theme_member_hygiene_context_sorts_recent_failures_first(self):
         conn = duckdb.connect(":memory:")
@@ -2148,6 +2280,25 @@ class TestTickerAssignmentEditing(unittest.TestCase):
         self.assertEqual(params, [1006, 1006])
         self.assertEqual(members["ticker"].tolist(), ["DOCN"])
 
+    def test_theme_membership_export_returns_normalized_member_counts_and_lists(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("insert into themes values (1, 'AI - Agentic', 'AI', true)")
+        conn.execute("insert into themes values (2, 'Empty Theme', 'Custom', false)")
+        conn.execute("insert into theme_membership values (1, ' docn ')")
+        conn.execute("insert into theme_membership values (1, 'DOCN')")
+        conn.execute("insert into theme_membership values (1, 'twlo')")
+
+        out = theme_membership_export(conn)
+
+        self.assertEqual(out["theme_name"].tolist(), ["AI - Agentic", "Empty Theme"])
+        self.assertEqual(int(out.iloc[0]["governed_member_count"]), 2)
+        self.assertEqual(str(out.iloc[0]["governed_members"]), "DOCN, TWLO")
+        self.assertEqual(int(out.iloc[1]["governed_member_count"]), 0)
+        self.assertEqual(str(out.iloc[1]["governed_members"]), "")
+        conn.close()
+
     def test_manage_theme_member_source_matches_ticker_lookup_normalized_membership(self):
         conn = duckdb.connect(":memory:")
         conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
@@ -2254,7 +2405,8 @@ class TestThemesPageRemovalFlow(unittest.TestCase):
         members_result.df.return_value = pd.DataFrame({"ticker": ["TWLO"]})
         conn.execute.side_effect = [delete_result, members_result]
 
-        result = remove_ticker(conn, 1006, " docn ")
+        with patch("src.theme_service._manual_suppression_enabled", return_value=False):
+            result = remove_ticker(conn, 1006, " docn ")
 
         delete_sql, delete_params = conn.execute.call_args_list[0][0]
         members_sql, members_params = conn.execute.call_args_list[1][0]
@@ -2285,6 +2437,25 @@ class TestThemesPageRemovalFlow(unittest.TestCase):
         self.assertIn('st.warning(f"No membership row was removed for {remove_result[\'ticker\']} in {selected[\'name\']} [{selected_id}].")', content)
         self.assertNotIn('st.session_state[remove_select_key] = next_remove_ticker', content)
         self.assertNotIn('st.session_state.pop(remove_select_key, None)\n                        else:', content)
+
+    def test_health_page_uses_safe_snapshot_metric_helper(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "4_Health.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("def _first_metric_value(df: pd.DataFrame, column: str) -> int:", content)
+        self.assertIn('c1.metric("Ticker snapshots", _first_metric_value(snaps, "ticker_snapshot_rows"))', content)
+        self.assertIn('c2.metric("Theme snapshots", _first_metric_value(snaps, "theme_snapshot_rows"))', content)
+        self.assertIn('c3.metric("Runs w/theme snapshots", _first_metric_value(snaps, "runs_with_theme_snapshots"))', content)
+        self.assertNotIn('snaps.iloc[0]["ticker_snapshot_rows"]', content)
+
+    def test_suggestions_page_guards_missing_existing_theme_selection(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "3_Suggestions.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("if selected_existing_theme is not None:", content)
+        self.assertIn("Create a theme first, or wait for theme seeding to finish", content)
+        self.assertIn('raise ValueError("Select an existing theme before creating this suggestion.")', content)
+        self.assertNotIn('current_members = get_theme_members(conn, int(selected_existing_theme["id"]))["ticker"].tolist()\n\n    if suggestion_type == "add_ticker_to_theme":', content)
 
 
 class TestStreamlitHealthMutationState(unittest.TestCase):
@@ -2401,6 +2572,205 @@ class TestRefreshUniverseSemantics(unittest.TestCase):
 
         self.assertEqual(out, ["NVDA"])
         conn.close()
+
+
+class TestManualTickerSuppression(unittest.TestCase):
+    def test_manual_ticker_suppression_round_trip_persists_reason_and_restores(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                manual_suppressed boolean default false,
+                manual_suppression_reason varchar,
+                manual_suppressed_at timestamp,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        set_result = set_manual_ticker_suppression(conn, " docn ", "moved to pink sheets")
+        state = ticker_manual_suppression_state(conn, "DOCN")
+
+        self.assertTrue(bool(set_result["changed"]))
+        self.assertTrue(bool(state["manual_suppressed"]))
+        self.assertEqual(state["manual_suppression_reason"], "moved to pink sheets")
+        self.assertIsNotNone(state["manual_suppressed_at"])
+
+        clear_result = clear_manual_ticker_suppression(conn, "DOCN")
+        restored = ticker_manual_suppression_state(conn, " docn ")
+
+        self.assertTrue(bool(clear_result["changed"]))
+        self.assertFalse(bool(restored["manual_suppressed"]))
+        self.assertIsNone(restored["manual_suppression_reason"])
+        self.assertIsNone(restored["manual_suppressed_at"])
+        conn.close()
+
+    def test_manual_suppression_excludes_governed_views_but_preserves_raw_lookup_context(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean, updated_at timestamp)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table theme_snapshots(run_id bigint, theme_id bigint, snapshot_time timestamp, ticker_count bigint, avg_1w double, avg_1m double, avg_3m double, positive_1m_breadth_pct double, composite_score double, snapshot_source varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp, provider varchar)")
+        conn.execute("create table refresh_failures(run_id bigint, ticker varchar, error_message varchar, failure_category varchar, created_at timestamp)")
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                manual_suppressed boolean default false,
+                manual_suppression_reason varchar,
+                manual_suppressed_at timestamp,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'AI - Agentic', 'AI', true, '2026-03-22 10:00:00')")
+        conn.execute("insert into themes values (2, 'Cloud Software', 'Software', true, '2026-03-22 10:00:00')")
+        conn.execute("insert into theme_membership values (1, ' DOCN ')")
+        conn.execute("insert into theme_membership values (2, 'DOCN')")
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-22 11:00:00', 'live')")
+        conn.execute("insert into theme_snapshots values (1, 1, '2026-03-22 11:00:00', 1, 1, 1, 1, 50, 55, 'live')")
+        conn.execute("insert into refresh_failures values (1, 'DOCN', 'temporary', 'transient', '2026-03-22 11:30:00')")
+        conn.execute("insert into refresh_run_tickers values (1, 'DOCN')")
+        conn.execute(
+            "insert into ticker_snapshots values (1, 'DOCN', 40, 1, 2, 3, 1000, 2000, null, null, null, '2026-03-22 10:59:00', 'live')"
+        )
+
+        set_manual_ticker_suppression(conn, "DOCN", "pink sheets / out of universe")
+
+        summary = ticker_lookup_summary(conn, "DOCN")
+        memberships = ticker_lookup_memberships(conn, "DOCN")
+        members = get_theme_members(conn, 1)
+        theme_detail = theme_ticker_metrics(conn, 1)
+        health = theme_health_overview(conn, low_constituent_threshold=2, failure_window_days=14)
+
+        self.assertTrue(bool(summary.iloc[0]["manually_suppressed"]))
+        self.assertEqual(summary.iloc[0]["lookup_status"], "Suppressed operationally")
+        self.assertFalse(bool(summary.iloc[0]["exists_in_theme_membership"]))
+        self.assertEqual(int(summary.iloc[0]["assigned_theme_count"]), 2)
+        self.assertEqual(summary.iloc[0]["manual_suppression_reason"], "pink sheets / out of universe")
+        self.assertEqual(sorted(memberships["theme_name"].tolist()), ["AI - Agentic", "Cloud Software"])
+        self.assertTrue(members.empty)
+        self.assertTrue(theme_detail.empty)
+        self.assertEqual(int(health.loc[health["theme_id"] == 1, "constituent_count"].iloc[0]), 0)
+        conn.close()
+
+    def test_manual_suppression_excludes_onboarding_and_refresh_universe_until_cleared(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                manual_suppressed boolean default false,
+                manual_suppression_reason varchar,
+                manual_suppressed_at timestamp,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table governed_ticker_onboarding(
+                ticker varchar primary key,
+                added_at timestamp,
+                onboarding_source varchar,
+                history_readiness_status varchar,
+                backfill_status varchar,
+                last_backfill_attempt_at timestamp,
+                last_backfill_error varchar,
+                downstream_refresh_needed boolean,
+                history_row_count bigint,
+                history_target_days bigint,
+                history_market_data_source varchar,
+                history_latest_trading_date date,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'AI - Agentic', 'AI', true)")
+        conn.execute("insert into theme_membership values (1, ' DOCN ')")
+        conn.execute("insert into governed_ticker_onboarding values ('DOCN', '2026-03-22 11:00:00', 'manual_add', 'ready', 'completed', null, null, true, 61, 30, 'live', '2026-03-21', '2026-03-22 11:00:00')")
+
+        active_before = refresh_active_ticker_universe(conn)
+        onboarding_before = list_governed_ticker_onboarding(conn, limit=10)
+        counts_before = governed_ticker_onboarding_counts(conn)
+
+        self.assertEqual(active_before, [" DOCN "])
+        self.assertEqual(onboarding_before["ticker"].tolist(), ["DOCN"])
+        self.assertEqual(int(counts_before["cnt"].sum()), 1)
+
+        set_manual_ticker_suppression(conn, "DOCN", "manual cleanup")
+
+        active_after = refresh_active_ticker_universe(conn)
+        onboarding_after = list_governed_ticker_onboarding(conn, limit=10)
+        counts_after = governed_ticker_onboarding_counts(conn)
+
+        self.assertEqual(active_after, [])
+        self.assertTrue(onboarding_after.empty)
+        self.assertEqual(int(counts_after["cnt"].sum()) if not counts_after.empty else 0, 0)
+
+        clear_manual_ticker_suppression(conn, "DOCN")
+
+        active_restored = refresh_active_ticker_universe(conn)
+        onboarding_restored = list_governed_ticker_onboarding(conn, limit=10)
+
+        self.assertEqual(active_restored, [" DOCN "])
+        self.assertEqual(onboarding_restored["ticker"].tolist(), ["DOCN"])
+        conn.close()
+
+    def test_ticker_lookup_page_source_includes_operational_suppression_controls(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("**Operational suppression**", content)
+        self.assertIn("set_manual_ticker_suppression(conn, lookup_ticker, suppression_reason)", content)
+        self.assertIn("clear_manual_ticker_suppression(conn, lookup_ticker)", content)
+        self.assertIn('"Suppressed"', content)
+        self.assertIn("prepare_post_mutation_refresh(", content)
 
 
 class TestDescriptionFirstResearchRefinements(unittest.TestCase):
@@ -4750,6 +5120,217 @@ class TestThemeSeedBackfill(unittest.TestCase):
             [("Energy", "XOM")],
         )
         bootstrap_conn.close()
+
+    @patch("src.theme_service.load_seed_file")
+    def test_seed_if_needed_recovers_when_required_fetchone_returns_none(self, mock_load_seed):
+        mock_load_seed.return_value = [
+            {"name": "AI", "category": "Tech", "tickers": ["NVDA"]},
+        ]
+
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create sequence if not exists themes_id_seq")
+        bootstrap_conn.execute("create table themes(id bigint primary key default nextval('themes_id_seq'), name varchar unique, category varchar, is_active boolean default true, created_at timestamp default current_timestamp, updated_at timestamp default current_timestamp)")
+        bootstrap_conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+
+        class EmptyResult:
+            def fetchone(self):
+                return None
+
+        class NoneRowConn:
+            def execute(self, sql, params=None):
+                return EmptyResult()
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            changed = seed_if_needed(NoneRowConn())
+
+        seeded = bootstrap_conn.execute("select name, category from themes").fetchall()
+        members = bootstrap_conn.execute("select ticker from theme_membership").fetchall()
+
+        self.assertTrue(changed)
+        self.assertEqual(seeded, [("AI", "Tech")])
+        self.assertEqual(members, [("NVDA",)])
+        bootstrap_conn.close()
+
+
+class TestDuckDbReadRecovery(unittest.TestCase):
+    def test_table_exists_recovers_with_bootstrap_connection_when_shared_connection_has_bad_result_state(self):
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create table symbol_refresh_status(ticker varchar)")
+
+        class BadResultConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InvalidInputException("Invalid Input Error: No open result set")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            exists = table_exists(BadResultConn(), "symbol_refresh_status")
+
+        self.assertTrue(exists)
+        bootstrap_conn.close()
+
+    def test_table_has_column_recovers_with_bootstrap_connection_when_shared_connection_hits_internal_exception(self):
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create table refresh_runs(run_id bigint, provider varchar)")
+
+        class PoisonedConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InternalException("INTERNAL Error: Attempted to dereference unique_ptr that is NULL!")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            has_provider = table_has_column(PoisonedConn(), "refresh_runs", "provider")
+
+        self.assertTrue(has_provider)
+        bootstrap_conn.close()
+
+    def test_list_themes_recovers_with_bootstrap_connection_when_shared_connection_has_bad_result_state(self):
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create sequence if not exists themes_id_seq")
+        bootstrap_conn.execute("create table themes(id bigint primary key default nextval('themes_id_seq'), name varchar unique, category varchar, is_active boolean default true, created_at timestamp default current_timestamp, updated_at timestamp default current_timestamp)")
+        bootstrap_conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+        bootstrap_conn.execute("create table symbol_refresh_status(ticker varchar primary key, manual_suppressed boolean default false)")
+        bootstrap_conn.execute("insert into themes(name, category, is_active) values ('AI', 'Tech', true)")
+        theme_id = int(bootstrap_conn.execute("select id from themes where name = 'AI'").fetchone()[0])
+        bootstrap_conn.execute("insert into theme_membership(theme_id, ticker) values (?, 'NVDA')", [theme_id])
+
+        class FlakyListThemesConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InvalidInputException("Invalid Input Error: No open result set")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            themes = list_themes(FlakyListThemesConn(), active_only=False)
+
+        self.assertEqual(themes[["name", "category", "ticker_count"]].to_dict("records"), [{"name": "AI", "category": "Tech", "ticker_count": 1}])
+        bootstrap_conn.close()
+
+    def test_mark_stale_running_runs_recovers_when_shared_connection_fetchone_returns_none(self):
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint,
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar,
+                ticker_count bigint,
+                success_count bigint,
+                failure_count bigint,
+                scope_type varchar,
+                scope_theme_name varchar,
+                error_message varchar
+            )
+            """
+        )
+        bootstrap_conn.execute(
+            """
+            insert into refresh_runs(
+                run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count, scope_type, scope_theme_name, error_message
+            )
+            values (91, 'live', '2026-03-10 20:00:00', null, 'running', 1, 0, 0, 'active_themes', null, null)
+            """
+        )
+
+        class EmptyResult:
+            def fetchone(self):
+                return None
+
+        class NoneRowConn:
+            def execute(self, sql, params=None):
+                return EmptyResult()
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            stale_marked = mark_stale_running_runs(NoneRowConn(), stale_minutes=1)
+
+        row = bootstrap_conn.execute("select status, error_message from refresh_runs where run_id = 91").fetchone()
+        self.assertEqual(stale_marked, 1)
+        self.assertEqual(row[0], "failed")
+        self.assertIn("Run marked stale after exceeding 1 minutes.", row[1])
+        bootstrap_conn.close()
+
+    def test_source_audit_status_recovers_with_bootstrap_connection_when_shared_connection_has_bad_result_state(self):
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create table refresh_runs(run_id bigint, provider varchar, finished_at timestamp, status varchar)")
+        bootstrap_conn.execute("create table theme_snapshots(run_id bigint, snapshot_time timestamp, theme_id bigint, snapshot_source varchar)")
+        bootstrap_conn.execute("create table ticker_snapshots(run_id bigint, ticker varchar, snapshot_source varchar)")
+        bootstrap_conn.execute("insert into refresh_runs values (7, 'live', '2026-03-20 16:00:00', 'success')")
+        bootstrap_conn.execute("insert into theme_snapshots values (7, '2026-03-20 16:00:00', 101, 'live')")
+        bootstrap_conn.execute("insert into ticker_snapshots values (7, 'NVDA', 'live')")
+
+        class BadResultConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InvalidInputException("Invalid Input Error: No open result set")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            audit = source_audit_status(BadResultConn(), recent_limit=10)
+
+        self.assertEqual(audit.iloc[0]["preferred_theme_source"], "live")
+        self.assertEqual(audit.iloc[0]["preferred_ticker_source"], "live")
+        self.assertEqual(audit.iloc[0]["latest_theme_view_sources"], "live")
+        self.assertEqual(audit.iloc[0]["latest_ticker_view_sources"], "live")
+        self.assertTrue(bool(audit.iloc[0]["theme_current_live_only"]))
+        self.assertTrue(bool(audit.iloc[0]["ticker_current_live_only"]))
+        bootstrap_conn.close()
+
+    def test_snapshot_counts_defaults_to_zero_row_when_query_returns_empty_dataframe(self):
+        class EmptyDfResult:
+            def df(self):
+                return pd.DataFrame()
+
+        class EmptyDfConn:
+            def execute(self, sql, params=None):
+                return EmptyDfResult()
+
+        counts = snapshot_counts(EmptyDfConn())
+
+        self.assertEqual(
+            counts.iloc[0][["ticker_snapshot_rows", "theme_snapshot_rows", "runs_with_theme_snapshots"]].to_dict(),
+            {
+                "ticker_snapshot_rows": 0,
+                "theme_snapshot_rows": 0,
+                "runs_with_theme_snapshots": 0,
+            },
+        )
 
 
 if __name__ == "__main__":

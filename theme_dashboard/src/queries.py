@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import duckdb
 import pandas as pd
 
 from .config import (
@@ -26,6 +27,74 @@ CORE_TABLES = [
     "symbol_refresh_status",
     "theme_suggestions",
 ]
+
+
+class QueryResultStateError(RuntimeError):
+    """Raised when a required query result row is unexpectedly missing."""
+
+
+def _is_duckdb_result_state_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return any(
+        token in message
+        for token in {
+            "no open result set",
+            "closed pending query result",
+            "unsuccessful or closed pending query result",
+            "result closed",
+        }
+    )
+
+
+def _is_duckdb_internal_poisoned_state(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return any(
+        token in message
+        for token in {
+            "attempted to dereference unique_ptr that is null",
+            "internal error",
+        }
+    )
+
+
+def _with_bootstrap_recovery(loader):
+    try:
+        return loader()
+    except (duckdb.InvalidInputException, duckdb.InternalException) as exc:
+        if not (_is_duckdb_result_state_error(exc) or _is_duckdb_internal_poisoned_state(exc)):
+            raise
+        from .database import get_bootstrap_conn
+
+        with get_bootstrap_conn() as bootstrap_conn:
+            return loader(bootstrap_conn)
+    except QueryResultStateError:
+        from .database import get_bootstrap_conn
+
+        with get_bootstrap_conn() as bootstrap_conn:
+            return loader(bootstrap_conn)
+
+
+def _fetchone_required(result, context: str):
+    row = result.fetchone()
+    if row is None:
+        raise QueryResultStateError(f"Query returned no row: {context}")
+    return row
+
+
+def _manual_suppression_enabled(conn) -> bool:
+    return table_exists(conn, "symbol_refresh_status") and table_has_column(conn, "symbol_refresh_status", "manual_suppressed")
+
+
+def _manual_suppression_filter_sql(conn, ticker_expr: str) -> str:
+    if not _manual_suppression_enabled(conn):
+        return ""
+    return (
+        " AND NOT EXISTS ("
+        "SELECT 1 FROM symbol_refresh_status sr "
+        f"WHERE upper(trim(sr.ticker)) = upper(trim({ticker_expr})) "
+        "AND COALESCE(sr.manual_suppressed, FALSE)"
+        ")"
+    )
 
 
 def _theme_snapshot_source_expr(conn) -> str:
@@ -490,12 +559,14 @@ def preferred_ticker_snapshot_source(conn) -> str | None:
 
 def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
     preferred_source = preferred_ticker_snapshot_source(conn)
+    manual_filter = _manual_suppression_filter_sql(conn, "m.ticker")
     if not preferred_source:
         return conn.execute(
-            """
+            f"""
             SELECT upper(trim(ticker)) AS ticker
-            FROM theme_membership
+            FROM theme_membership m
             WHERE theme_id BETWEEN ? AND ?
+            {manual_filter}
             GROUP BY upper(trim(ticker))
             ORDER BY upper(trim(ticker))
             """,
@@ -525,8 +596,9 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
         WITH governed_members AS (
             SELECT
                 upper(trim(ticker)) AS ticker
-            FROM theme_membership
+            FROM theme_membership m
             WHERE theme_id BETWEEN ? AND ?
+            {manual_filter}
             GROUP BY upper(trim(ticker))
         ),
         completed_snapshots AS (
@@ -592,41 +664,44 @@ def theme_snapshot_history(
     *,
     include_recent_ticker_history: bool = False,
 ) -> pd.DataFrame:
-    history = _historical_theme_snapshot_union(
-        conn,
-        include_recent_ticker_history=include_recent_ticker_history,
-        theme_id=int(theme_id),
-    )
-    if history.empty:
-        return pd.DataFrame()
-    view = history.copy()
-    if view.empty:
-        return view
-    return (
-        view[
-            [
-                "run_id",
-                "snapshot_time",
-                "ticker_count",
-                "avg_1w",
-                "avg_1m",
-                "avg_3m",
-                "positive_1w_breadth_pct",
-                "positive_1m_breadth_pct",
-                "positive_3m_breadth_pct",
-                "composite_score",
-                "snapshot_source",
-                "provenance_class",
-                "provenance_source_label",
+    def _load(active_conn=conn) -> pd.DataFrame:
+        history = _historical_theme_snapshot_union(
+            active_conn,
+            include_recent_ticker_history=include_recent_ticker_history,
+            theme_id=int(theme_id),
+        )
+        if history.empty:
+            return pd.DataFrame()
+        view = history.copy()
+        if view.empty:
+            return view
+        return (
+            view[
+                [
+                    "run_id",
+                    "snapshot_time",
+                    "ticker_count",
+                    "avg_1w",
+                    "avg_1m",
+                    "avg_3m",
+                    "positive_1w_breadth_pct",
+                    "positive_1m_breadth_pct",
+                    "positive_3m_breadth_pct",
+                    "composite_score",
+                    "snapshot_source",
+                    "provenance_class",
+                    "provenance_source_label",
+                ]
             ]
-        ]
-        .sort_values(["snapshot_time", "run_id"], ascending=[False, False])
-        .head(limit)
-        .reset_index(drop=True)
-    )
+            .sort_values(["snapshot_time", "run_id"], ascending=[False, False])
+            .head(limit)
+            .reset_index(drop=True)
+        )
+
+    return _with_bootstrap_recovery(_load)
 
 
-def historical_theme_boundary_debug(conn, theme_id: int, lookback_days: int) -> dict[str, object]:
+def _historical_theme_boundary_debug_core(conn, theme_id: int, lookback_days: int) -> dict[str, object]:
     boundary_history = _recent_movement_theme_snapshot_union(conn)
     if boundary_history.empty:
         return {
@@ -874,6 +949,13 @@ def historical_theme_boundary_debug(conn, theme_id: int, lookback_days: int) -> 
     }
 
 
+def historical_theme_boundary_debug(conn, theme_id: int, lookback_days: int) -> dict[str, object]:
+    def _load(active_conn=conn) -> dict[str, object]:
+        return _historical_theme_boundary_debug_core(active_conn, theme_id, lookback_days)
+
+    return _with_bootstrap_recovery(_load)
+
+
 def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
     boundary_history = _recent_movement_theme_snapshot_union(conn)
     if boundary_history.empty:
@@ -946,12 +1028,14 @@ def theme_health_overview(conn, low_constituent_threshold: int, failure_window_d
     preferred_source = preferred_theme_snapshot_source(conn)
     theme_source_filter = preferred_source or "__no_source__"
     theme_source_expr = _theme_snapshot_source_expr(conn)
+    updated_at_expr = "t.updated_at" if table_has_column(conn, "themes", "updated_at") else "NULL"
+    member_join_filter = _manual_suppression_filter_sql(conn, "m.ticker")
     return conn.execute(
         f"""
         WITH member_counts AS (
-            SELECT t.id AS theme_id, COUNT(m.ticker) AS constituent_count
+            SELECT t.id AS theme_id, COUNT(DISTINCT upper(trim(m.ticker))) AS constituent_count
             FROM themes t
-            LEFT JOIN theme_membership m ON t.id = m.theme_id
+            LEFT JOIN theme_membership m ON t.id = m.theme_id{member_join_filter}
             GROUP BY t.id
         ),
         latest_snap AS (
@@ -961,19 +1045,28 @@ def theme_health_overview(conn, low_constituent_threshold: int, failure_window_d
             GROUP BY theme_id
         ),
         live_failures_by_theme AS (
-            SELECT m.theme_id, COUNT(*) AS live_failure_count_recent
-            FROM refresh_failures f
-            JOIN refresh_runs r ON r.run_id = f.run_id
-            JOIN theme_membership m ON m.ticker = f.ticker
-            WHERE r.provider = 'live'
-              AND f.created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
-            GROUP BY m.theme_id
+            SELECT theme_id, COUNT(*) AS live_failure_count_recent
+            FROM (
+                SELECT DISTINCT
+                    m.theme_id,
+                    f.run_id,
+                    upper(trim(f.ticker)) AS failure_ticker,
+                    f.created_at
+                FROM refresh_failures f
+                JOIN refresh_runs r ON r.run_id = f.run_id
+                JOIN theme_membership m ON upper(trim(m.ticker)) = upper(trim(f.ticker))
+                WHERE r.provider = 'live'
+                  AND f.created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+                  {_manual_suppression_filter_sql(conn, 'm.ticker')}
+            ) deduped_failures
+            GROUP BY theme_id
         )
         SELECT
             t.id AS theme_id,
             t.name AS theme_name,
             t.category,
             t.is_active,
+            {updated_at_expr} AS updated_at,
             mc.constituent_count,
             (mc.constituent_count > 0 AND mc.constituent_count < ?) AS low_count_flag,
             (mc.constituent_count = 0) AS empty_theme_flag,
@@ -999,14 +1092,27 @@ def theme_health_overview(conn, low_constituent_threshold: int, failure_window_d
 
 
 def snapshot_counts(conn) -> pd.DataFrame:
-    return conn.execute(
-        """
-        SELECT
-          (SELECT COUNT(*) FROM ticker_snapshots) AS ticker_snapshot_rows,
-          (SELECT COUNT(*) FROM theme_snapshots) AS theme_snapshot_rows,
-          (SELECT COUNT(DISTINCT run_id) FROM theme_snapshots) AS runs_with_theme_snapshots
-        """
-    ).df()
+    counts = _with_bootstrap_recovery(
+        lambda active_conn=conn: active_conn.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM ticker_snapshots) AS ticker_snapshot_rows,
+              (SELECT COUNT(*) FROM theme_snapshots) AS theme_snapshot_rows,
+              (SELECT COUNT(DISTINCT run_id) FROM theme_snapshots) AS runs_with_theme_snapshots
+            """
+        ).df()
+    )
+    if not counts.empty:
+        return counts
+    return pd.DataFrame(
+        [
+            {
+                "ticker_snapshot_rows": 0,
+                "theme_snapshot_rows": 0,
+                "runs_with_theme_snapshots": 0,
+            }
+        ]
+    )
 
 
 def row_counts(conn) -> pd.DataFrame:
@@ -1120,6 +1226,9 @@ def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     ticker_source_expr = _ticker_snapshot_source_expr(conn)
+    manual_suppressed_expr = "COALESCE(manual_suppressed, FALSE)" if _manual_suppression_enabled(conn) else "FALSE"
+    manual_reason_expr = "manual_suppression_reason" if table_has_column(conn, "symbol_refresh_status", "manual_suppression_reason") else "NULL"
+    manual_at_expr = "manual_suppressed_at" if table_has_column(conn, "symbol_refresh_status", "manual_suppressed_at") else "NULL"
     return conn.execute(
         f"""
         WITH membership AS (
@@ -1157,25 +1266,33 @@ def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
             WHERE ticker = ?
         ),
         symbol_seen AS (
-            SELECT COUNT(*) AS symbol_status_count
+            SELECT
+                COUNT(*) AS symbol_status_count,
+                MAX(CASE WHEN {manual_suppressed_expr} THEN 1 ELSE 0 END) AS manual_suppressed_flag,
+                MAX(CASE WHEN {manual_suppressed_expr} THEN {manual_reason_expr} ELSE NULL END) AS manual_suppression_reason,
+                MAX(CASE WHEN {manual_suppressed_expr} THEN {manual_at_expr} ELSE NULL END) AS manual_suppressed_at
             FROM symbol_refresh_status
-            WHERE ticker = ?
+            WHERE upper(trim(ticker)) = ?
         )
         SELECT
             ? AS ticker,
-            CAST(m.membership_count > 0 AS BOOLEAN) AS exists_in_theme_membership,
+            CAST(m.membership_count > 0 AND COALESCE(ss.manual_suppressed_flag, 0) = 0 AS BOOLEAN) AS exists_in_theme_membership,
             CAST(s.snapshot_count > 0 AS BOOLEAN) AS exists_in_ticker_snapshots,
             CAST(r.refresh_run_count > 0 AS BOOLEAN) AS exists_in_refresh_run_tickers,
             CAST(ss.symbol_status_count > 0 AS BOOLEAN) AS exists_in_symbol_refresh_status,
             COALESCE(m.membership_count, 0) AS assigned_theme_count,
             COALESCE(m.active_membership_count, 0) AS active_assigned_theme_count,
             COALESCE(m.inactive_membership_count, 0) AS inactive_assigned_theme_count,
+            CAST(COALESCE(ss.manual_suppressed_flag, 0) > 0 AS BOOLEAN) AS manually_suppressed,
+            ss.manual_suppression_reason,
+            ss.manual_suppressed_at,
             ls.latest_snapshot_time,
             ls.latest_snapshot_source,
             ls.latest_price,
             ls.latest_market_cap,
             ls.latest_avg_volume,
             CASE
+              WHEN COALESCE(ss.manual_suppressed_flag, 0) > 0 THEN 'Suppressed operationally'
               WHEN COALESCE(m.membership_count, 0) > 0 THEN 'In DB and assigned'
               WHEN COALESCE(s.snapshot_count, 0) > 0 THEN 'Seen in snapshots only'
               WHEN COALESCE(r.refresh_run_count, 0) > 0 OR COALESCE(ss.symbol_status_count, 0) > 0 THEN 'In DB but unassigned'
@@ -1215,21 +1332,30 @@ def ticker_lookup_memberships(conn, ticker: str) -> pd.DataFrame:
 def theme_member_hygiene_context(conn, theme_id: int) -> pd.DataFrame:
     return conn.execute(
         """
+        WITH governed_members AS (
+            SELECT
+                upper(trim(ticker)) AS ticker
+            FROM theme_membership m
+            WHERE theme_id BETWEEN ? AND ?
+            """
+            + _manual_suppression_filter_sql(conn, "m.ticker")
+            + """
+            GROUP BY upper(trim(ticker))
+        )
         SELECT
-            m.ticker,
+            gm.ticker,
             s.last_failure_category,
             s.last_failure_at,
             s.consecutive_failure_count,
             s.status AS symbol_hygiene_status
-        FROM theme_membership m
-        LEFT JOIN symbol_refresh_status s ON s.ticker = m.ticker
-        WHERE m.theme_id = ?
+        FROM governed_members gm
+        LEFT JOIN symbol_refresh_status s ON upper(trim(s.ticker)) = gm.ticker
         ORDER BY
             CASE WHEN s.last_failure_at IS NULL THEN 1 ELSE 0 END,
             s.last_failure_at DESC,
-            m.ticker
+            gm.ticker
         """,
-        [theme_id],
+        [int(theme_id), int(theme_id)],
     ).df()
 
 
@@ -1612,76 +1738,85 @@ def baseline_status(conn, recent_limit: int = 50) -> pd.DataFrame:
 
 
 def source_audit_status(conn, recent_limit: int = 50) -> pd.DataFrame:
-    preferred_theme = preferred_theme_snapshot_source(conn)
-    preferred_ticker = preferred_ticker_snapshot_source(conn)
+    def _load(active_conn=conn) -> pd.DataFrame:
+        preferred_theme = preferred_theme_snapshot_source(active_conn)
+        preferred_ticker = preferred_ticker_snapshot_source(active_conn)
 
-    recent_theme_sources = conn.execute(
-        """
-        SELECT COALESCE(STRING_AGG(snapshot_source, ', ' ORDER BY snapshot_source), '')
-        FROM (
-            SELECT DISTINCT snapshot_source
-            FROM (
-                SELECT snapshot_source
-                FROM theme_snapshots
-                ORDER BY snapshot_time DESC, run_id DESC
-                LIMIT ?
-            )
+        recent_theme_sources = _fetchone_required(
+            active_conn.execute(
+                """
+                SELECT COALESCE(STRING_AGG(snapshot_source, ', ' ORDER BY snapshot_source), '')
+                FROM (
+                    SELECT DISTINCT snapshot_source
+                    FROM (
+                        SELECT snapshot_source
+                        FROM theme_snapshots
+                        ORDER BY snapshot_time DESC, run_id DESC
+                        LIMIT ?
+                    )
+                )
+                """,
+                [recent_limit],
+            ),
+            "recent theme snapshot sources",
+        )[0]
+        recent_ticker_sources = _fetchone_required(
+            active_conn.execute(
+                """
+                SELECT COALESCE(STRING_AGG(snapshot_source, ', ' ORDER BY snapshot_source), '')
+                FROM (
+                    SELECT DISTINCT snapshot_source
+                    FROM (
+                        SELECT s.snapshot_source
+                        FROM ticker_snapshots s
+                        JOIN refresh_runs r ON r.run_id = s.run_id
+                        WHERE r.status IN ('success', 'partial')
+                        ORDER BY s.run_id DESC
+                        LIMIT ?
+                    )
+                )
+                """,
+                [recent_limit],
+            ),
+            "recent ticker snapshot sources",
+        )[0]
+
+        latest_theme_view = latest_theme_snapshots(active_conn)
+        latest_ticker_view = latest_ticker_snapshots(active_conn)
+        latest_theme_view_sources = ", ".join(sorted(set(latest_theme_view["snapshot_source"].dropna().astype(str).tolist()))) if not latest_theme_view.empty and "snapshot_source" in latest_theme_view.columns else ""
+        latest_ticker_view_sources = ", ".join(sorted(set(latest_ticker_view["snapshot_source"].dropna().astype(str).tolist()))) if not latest_ticker_view.empty and "snapshot_source" in latest_ticker_view.columns else ""
+
+        def _mixed(text: str) -> bool:
+            return bool(text and "," in text)
+
+        theme_view_live_only = bool(preferred_theme == "live" and latest_theme_view_sources == "live")
+        ticker_view_live_only = bool(preferred_ticker == "live" and latest_ticker_view_sources == "live")
+        active_contamination = bool(
+            (preferred_theme == "live" and latest_theme_view_sources and latest_theme_view_sources != "live")
+            or (preferred_ticker == "live" and latest_ticker_view_sources and latest_ticker_view_sources != "live")
         )
-        """,
-        [recent_limit],
-    ).fetchone()[0]
-    recent_ticker_sources = conn.execute(
-        """
-        SELECT COALESCE(STRING_AGG(snapshot_source, ', ' ORDER BY snapshot_source), '')
-        FROM (
-            SELECT DISTINCT snapshot_source
-            FROM (
-                SELECT s.snapshot_source
-                FROM ticker_snapshots s
-                JOIN refresh_runs r ON r.run_id = s.run_id
-                WHERE r.status IN ('success', 'partial')
-                ORDER BY s.run_id DESC
-                LIMIT ?
-            )
+        historical_residue_only = bool(
+            not active_contamination
+            and ((_mixed(recent_theme_sources) and preferred_theme == "live") or (_mixed(recent_ticker_sources) and preferred_ticker == "live"))
         )
-        """,
-        [recent_limit],
-    ).fetchone()[0]
 
-    latest_theme_view = latest_theme_snapshots(conn)
-    latest_ticker_view = latest_ticker_snapshots(conn)
-    latest_theme_view_sources = ", ".join(sorted(set(latest_theme_view["snapshot_source"].dropna().astype(str).tolist()))) if not latest_theme_view.empty and "snapshot_source" in latest_theme_view.columns else ""
-    latest_ticker_view_sources = ", ".join(sorted(set(latest_ticker_view["snapshot_source"].dropna().astype(str).tolist()))) if not latest_ticker_view.empty and "snapshot_source" in latest_ticker_view.columns else ""
+        return pd.DataFrame(
+            [
+                {
+                    "preferred_theme_source": preferred_theme,
+                    "preferred_ticker_source": preferred_ticker,
+                    "recent_theme_sources": recent_theme_sources or "",
+                    "recent_ticker_sources": recent_ticker_sources or "",
+                    "latest_theme_view_sources": latest_theme_view_sources or "",
+                    "latest_ticker_view_sources": latest_ticker_view_sources or "",
+                    "theme_history_mixed": _mixed(recent_theme_sources or ""),
+                    "ticker_history_mixed": _mixed(recent_ticker_sources or ""),
+                    "theme_current_live_only": theme_view_live_only,
+                    "ticker_current_live_only": ticker_view_live_only,
+                    "active_contamination": active_contamination,
+                    "historical_residue_only": historical_residue_only,
+                }
+            ]
+        )
 
-    def _mixed(text: str) -> bool:
-        return bool(text and "," in text)
-
-    theme_view_live_only = bool(preferred_theme == "live" and latest_theme_view_sources == "live")
-    ticker_view_live_only = bool(preferred_ticker == "live" and latest_ticker_view_sources == "live")
-    active_contamination = bool(
-        (preferred_theme == "live" and latest_theme_view_sources and latest_theme_view_sources != "live")
-        or (preferred_ticker == "live" and latest_ticker_view_sources and latest_ticker_view_sources != "live")
-    )
-    historical_residue_only = bool(
-        not active_contamination
-        and ((_mixed(recent_theme_sources) and preferred_theme == "live") or (_mixed(recent_ticker_sources) and preferred_ticker == "live"))
-    )
-
-    return pd.DataFrame(
-        [
-            {
-                "preferred_theme_source": preferred_theme,
-                "preferred_ticker_source": preferred_ticker,
-                "recent_theme_sources": recent_theme_sources or "",
-                "recent_ticker_sources": recent_ticker_sources or "",
-                "latest_theme_view_sources": latest_theme_view_sources or "",
-                "latest_ticker_view_sources": latest_ticker_view_sources or "",
-                "theme_history_mixed": _mixed(recent_theme_sources or ""),
-                "ticker_history_mixed": _mixed(recent_ticker_sources or ""),
-                "theme_current_live_only": theme_view_live_only,
-                "ticker_current_live_only": ticker_view_live_only,
-                "active_contamination": active_contamination,
-                "historical_residue_only": historical_residue_only,
-            }
-        ]
-    )
+    return _with_bootstrap_recovery(_load)

@@ -4,6 +4,7 @@ import duckdb
 import pandas as pd
 
 from .config import SEED_PATH
+from .db_introspection import table_exists, table_has_column
 from .seed_loader import load_seed_file
 from .ticker_onboarding import record_new_governed_ticker_onboarding
 
@@ -39,6 +40,131 @@ def _theme_membership_theme_params(theme_id: int) -> list[int]:
     return [normalized_theme_id, normalized_theme_id]
 
 
+def _manual_suppression_enabled(conn) -> bool:
+    return table_exists(conn, "symbol_refresh_status") and table_has_column(conn, "symbol_refresh_status", "manual_suppressed")
+
+
+def _manual_suppression_filter_sql(conn, ticker_expr: str) -> str:
+    if not _manual_suppression_enabled(conn):
+        return ""
+    return (
+        " AND NOT EXISTS ("
+        "SELECT 1 FROM symbol_refresh_status s "
+        f"WHERE upper(trim(s.ticker)) = upper(trim({ticker_expr})) "
+        "AND COALESCE(s.manual_suppressed, FALSE)"
+        ")"
+    )
+
+
+def _ensure_symbol_refresh_row(conn, ticker: str) -> None:
+    if not table_exists(conn, "symbol_refresh_status"):
+        return
+    normalized_ticker = _normalize_ticker(ticker)
+    conn.execute(
+        """
+        INSERT INTO symbol_refresh_status(ticker, status, updated_at)
+        VALUES (?, 'active', CURRENT_TIMESTAMP)
+        ON CONFLICT(ticker) DO NOTHING
+        """,
+        [normalized_ticker],
+    )
+
+
+def ticker_manual_suppression_state(conn, ticker: str) -> dict[str, object]:
+    normalized_ticker = _normalize_ticker(ticker)
+    if not _manual_suppression_enabled(conn):
+        return {
+            "ticker": normalized_ticker,
+            "manual_suppressed": False,
+            "manual_suppression_reason": None,
+            "manual_suppressed_at": None,
+        }
+    row = conn.execute(
+        """
+        SELECT
+            COALESCE(manual_suppressed, FALSE) AS manual_suppressed,
+            manual_suppression_reason,
+            manual_suppressed_at
+        FROM symbol_refresh_status
+        WHERE upper(trim(ticker)) = ?
+        QUALIFY ROW_NUMBER() OVER (ORDER BY updated_at DESC NULLS LAST) = 1
+        """,
+        [normalized_ticker],
+    ).fetchone()
+    if not row:
+        return {
+            "ticker": normalized_ticker,
+            "manual_suppressed": False,
+            "manual_suppression_reason": None,
+            "manual_suppressed_at": None,
+        }
+    return {
+        "ticker": normalized_ticker,
+        "manual_suppressed": bool(row[0]),
+        "manual_suppression_reason": row[1],
+        "manual_suppressed_at": row[2],
+    }
+
+
+def set_manual_ticker_suppression(conn, ticker: str, reason: str) -> dict[str, object]:
+    normalized_ticker = _normalize_ticker(ticker)
+    suppression_reason = str(reason or "").strip()
+    if not suppression_reason:
+        raise ValueError("Suppression reason is required.")
+    current = ticker_manual_suppression_state(conn, normalized_ticker)
+    if bool(current.get("manual_suppressed")) and str(current.get("manual_suppression_reason") or "") == suppression_reason:
+        return {**current, "changed": False}
+    _ensure_symbol_refresh_row(conn, normalized_ticker)
+    now = pd.Timestamp.utcnow().to_pydatetime().replace(tzinfo=None)
+    conn.execute(
+        """
+        UPDATE symbol_refresh_status
+        SET status = 'refresh_suppressed',
+            manual_suppressed = TRUE,
+            manual_suppression_reason = ?,
+            manual_suppressed_at = ?,
+            suppression_reason = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE upper(trim(ticker)) = ?
+        """,
+        [suppression_reason, now, suppression_reason, normalized_ticker],
+    )
+    return {
+        "ticker": normalized_ticker,
+        "manual_suppressed": True,
+        "manual_suppression_reason": suppression_reason,
+        "manual_suppressed_at": now,
+        "changed": True,
+    }
+
+
+def clear_manual_ticker_suppression(conn, ticker: str) -> dict[str, object]:
+    normalized_ticker = _normalize_ticker(ticker)
+    current = ticker_manual_suppression_state(conn, normalized_ticker)
+    if not bool(current.get("manual_suppressed")):
+        return {**current, "changed": False}
+    _ensure_symbol_refresh_row(conn, normalized_ticker)
+    conn.execute(
+        """
+        UPDATE symbol_refresh_status
+        SET status = 'active',
+            manual_suppressed = FALSE,
+            manual_suppression_reason = NULL,
+            manual_suppressed_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE upper(trim(ticker)) = ?
+        """,
+        [normalized_ticker],
+    )
+    return {
+        "ticker": normalized_ticker,
+        "manual_suppressed": False,
+        "manual_suppression_reason": None,
+        "manual_suppressed_at": None,
+        "changed": True,
+    }
+
+
 def _is_duckdb_result_state_error(exc: Exception) -> bool:
     message = str(exc or "").lower()
     return any(
@@ -47,8 +173,32 @@ def _is_duckdb_result_state_error(exc: Exception) -> bool:
             "no open result set",
             "closed pending query result",
             "unsuccessful or closed pending query result",
+            "result closed",
         }
     )
+
+
+class SeedQueryResultStateError(RuntimeError):
+    """Raised when a required seed query returns no row from a shared connection."""
+
+
+def _fetchone_required(result, context: str):
+    row = result.fetchone()
+    if row is None:
+        raise SeedQueryResultStateError(f"Seed query returned no row: {context}")
+    return row
+
+
+def _query_df_with_bootstrap_recovery(loader) -> pd.DataFrame:
+    try:
+        return loader()
+    except duckdb.InvalidInputException as exc:
+        if not _is_duckdb_result_state_error(exc):
+            raise
+        from .database import get_bootstrap_conn
+
+        with get_bootstrap_conn() as bootstrap_conn:
+            return loader(bootstrap_conn)
 
 
 def _seed_if_needed_core(conn) -> bool:
@@ -74,8 +224,8 @@ def _seed_if_needed_core(conn) -> bool:
     if not prepared_themes:
         return False
 
-    themes_count = int(conn.execute("SELECT COUNT(*) FROM themes").fetchone()[0])
-    membership_count = int(conn.execute("SELECT COUNT(*) FROM theme_membership").fetchone()[0])
+    themes_count = int(_fetchone_required(conn.execute("SELECT COUNT(*) FROM themes"), "themes count")[0])
+    membership_count = int(_fetchone_required(conn.execute("SELECT COUNT(*) FROM theme_membership"), "theme membership count")[0])
     seed_theme_names = {name for name, _, _ in prepared_themes}
 
     existing_theme_names = {row[0] for row in conn.execute("SELECT name FROM themes").fetchall()}
@@ -100,10 +250,13 @@ def _seed_if_needed_core(conn) -> bool:
                     )
                     changed = True
             else:
-                theme_id = conn.execute(
-                    "INSERT INTO themes(name, category, is_active) VALUES (?, ?, TRUE) RETURNING id",
-                    [name, category],
-                ).fetchone()[0]
+                theme_id = _fetchone_required(
+                    conn.execute(
+                        "INSERT INTO themes(name, category, is_active) VALUES (?, ?, TRUE) RETURNING id",
+                        [name, category],
+                    ),
+                    f"insert theme id for {name}",
+                )[0]
                 changed = True
 
             if name not in membership_seed_themes:
@@ -139,36 +292,84 @@ def seed_if_needed(conn) -> bool:
 
         with get_bootstrap_conn() as bootstrap_conn:
             return _seed_if_needed_core(bootstrap_conn)
+    except SeedQueryResultStateError:
+        from .database import get_bootstrap_conn
+
+        with get_bootstrap_conn() as bootstrap_conn:
+            return _seed_if_needed_core(bootstrap_conn)
 
 
 def list_themes(conn, active_only: bool = False) -> pd.DataFrame:
-    where = "WHERE t.is_active = TRUE" if active_only else ""
-    return conn.execute(
-        f"""
-        SELECT t.id, t.name, t.category, t.is_active,
-               COUNT(m.ticker) AS ticker_count,
-               t.created_at, t.updated_at
-        FROM themes t
-        LEFT JOIN theme_membership m ON t.id = m.theme_id
-        {where}
-        GROUP BY t.id, t.name, t.category, t.is_active, t.created_at, t.updated_at
-        ORDER BY t.name
-        """
-    ).df()
+    def _load(active_conn=conn) -> pd.DataFrame:
+        where = "WHERE t.is_active = TRUE" if active_only else ""
+        sql = f"""
+            SELECT t.id, t.name, t.category, t.is_active,
+                   COUNT(m.ticker) AS ticker_count,
+                   t.created_at, t.updated_at
+            FROM themes t
+            LEFT JOIN theme_membership m ON t.id = m.theme_id{_manual_suppression_filter_sql(active_conn, 'm.ticker')}
+            {where}
+            GROUP BY t.id, t.name, t.category, t.is_active, t.created_at, t.updated_at
+            ORDER BY t.name
+            """
+        return active_conn.execute(sql).df()
+
+    return _query_df_with_bootstrap_recovery(_load)
+
+
+def theme_membership_export(conn) -> pd.DataFrame:
+    def _load(active_conn=conn) -> pd.DataFrame:
+        manual_filter = _manual_suppression_filter_sql(active_conn, "m.ticker")
+        return active_conn.execute(
+            f"""
+            WITH normalized_members AS (
+                SELECT DISTINCT
+                    m.theme_id,
+                    upper(trim(m.ticker)) AS normalized_ticker
+                FROM theme_membership m
+                WHERE TRUE
+                {manual_filter}
+            ),
+            member_lists AS (
+                SELECT
+                    theme_id,
+                    COUNT(*) AS governed_member_count,
+                    string_agg(normalized_ticker, ', ' ORDER BY normalized_ticker) AS governed_members
+                FROM normalized_members
+                GROUP BY theme_id
+            )
+            SELECT
+                t.id AS theme_id,
+                t.name AS theme_name,
+                t.category,
+                t.is_active,
+                COALESCE(ml.governed_member_count, 0) AS governed_member_count,
+                COALESCE(ml.governed_members, '') AS governed_members
+            FROM themes t
+            LEFT JOIN member_lists ml ON ml.theme_id = t.id
+            ORDER BY t.name, t.id
+            """
+        ).df()
+
+    return _query_df_with_bootstrap_recovery(_load)
 
 
 def get_theme_members(conn, theme_id: int) -> pd.DataFrame:
-    return conn.execute(
-        f"""
-        SELECT
-            upper(trim(ticker)) AS ticker
-        FROM theme_membership
-        WHERE {_theme_membership_theme_predicate()}
-        GROUP BY upper(trim(ticker))
-        ORDER BY upper(trim(ticker))
-        """,
-        _theme_membership_theme_params(theme_id),
-    ).df()
+    def _load(active_conn=conn) -> pd.DataFrame:
+        return active_conn.execute(
+            f"""
+            SELECT
+                upper(trim(ticker)) AS ticker
+            FROM theme_membership m
+            WHERE {_theme_membership_theme_predicate()}
+            {_manual_suppression_filter_sql(active_conn, 'm.ticker')}
+            GROUP BY upper(trim(ticker))
+            ORDER BY upper(trim(ticker))
+            """,
+            _theme_membership_theme_params(theme_id),
+        ).df()
+
+    return _query_df_with_bootstrap_recovery(_load)
 
 
 def create_theme(conn, name: str, category: str, is_active: bool) -> None:
@@ -217,7 +418,7 @@ def add_ticker(conn, theme_id: int, ticker: str, *, onboarding_source: str = "go
     added_to_theme = existed_in_theme is None
     onboarding_created = False
     onboarding_state = None
-    if added_to_theme and existing_any == 0:
+    if added_to_theme and existing_any == 0 and not bool(ticker_manual_suppression_state(conn, normalized_ticker).get("manual_suppressed")):
         onboarding_state = record_new_governed_ticker_onboarding(
             conn,
             normalized_ticker,
@@ -283,7 +484,7 @@ def replace_ticker_in_theme(conn, theme_id: int, current_ticker: str, replacemen
             "INSERT INTO theme_membership(theme_id, ticker) VALUES (?, ?)",
             [theme_id, replacement],
         )
-        if replacement_existing_any == 0:
+        if replacement_existing_any == 0 and not bool(ticker_manual_suppression_state(conn, replacement).get("manual_suppressed")):
             record_new_governed_ticker_onboarding(conn, replacement, onboarding_source="ticker_replacement")
         conn.execute("COMMIT")
     except Exception:
@@ -341,7 +542,7 @@ def set_ticker_theme_assignments(conn, ticker: str, theme_ids: list[int]) -> dic
                 f"DELETE FROM theme_membership WHERE {_theme_membership_theme_predicate()} AND upper(trim(ticker)) = ?",
                 [*_theme_membership_theme_params(theme_id), normalized_ticker],
             )
-        if was_ungoverned and to_add:
+        if was_ungoverned and to_add and not bool(ticker_manual_suppression_state(conn, normalized_ticker).get("manual_suppressed")):
             onboarding_state = record_new_governed_ticker_onboarding(conn, normalized_ticker, onboarding_source="theme_assignment_update")
         conn.execute("COMMIT")
     except Exception:
@@ -361,11 +562,12 @@ def set_ticker_theme_assignments(conn, ticker: str, theme_ids: list[int]) -> dic
 
 def active_ticker_universe(conn) -> list[str]:
     rows = conn.execute(
-        """
+        f"""
         SELECT DISTINCT m.ticker
         FROM theme_membership m
         JOIN themes t ON t.id = m.theme_id
         WHERE t.is_active = TRUE
+        {_manual_suppression_filter_sql(conn, 'm.ticker')}
         ORDER BY m.ticker
         """
     ).fetchall()
@@ -374,13 +576,14 @@ def active_ticker_universe(conn) -> list[str]:
 
 def refresh_active_ticker_universe(conn) -> list[str]:
     rows = conn.execute(
-        """
+        f"""
         SELECT DISTINCT m.ticker
         FROM theme_membership m
         JOIN themes t ON t.id = m.theme_id
         LEFT JOIN symbol_refresh_status s ON s.ticker = m.ticker
         WHERE t.is_active = TRUE
           AND COALESCE(s.status, 'active') <> 'refresh_suppressed'
+          {_manual_suppression_filter_sql(conn, 'm.ticker')}
         ORDER BY m.ticker
         """
     ).fetchall()

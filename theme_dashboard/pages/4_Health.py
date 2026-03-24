@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import time
 
 import pandas as pd
@@ -20,6 +20,7 @@ from src.failure_classification import categorize_failure_message
 from src.fetch_data import mark_refresh_run_interrupted, mark_stale_running_runs
 from src.historical_backfill import (
     SUPPRESSION_REBUILD_LOOKBACK_DAYS,
+    reconstruct_theme_history_range,
     rebuild_recent_reconstructed_history,
 )
 from src.metric_formatting import short_timestamp
@@ -35,6 +36,7 @@ from src.queries import (
     theme_member_hygiene_context,
 )
 from src.streamlit_utils import (
+    clear_current_market_view_caches,
     db_cache_token,
     extract_selected_row,
     get_canonical_multiselect_values,
@@ -47,6 +49,15 @@ from src.streamlit_utils import (
     show_perf_summary,
     sync_valid_multiselect_state,
     stop_for_database_error,
+)
+from src.theme_health_audit import (
+    AUDIT_PRESETS,
+    AUDIT_SORT_OPTIONS,
+    apply_theme_health_audit_preset,
+    enrich_theme_health_for_audit,
+    sort_theme_health_audit,
+    theme_health_action_eligibility,
+    theme_health_audit_counts,
 )
 from src.suggestions_service import suggestion_status_counts
 from src.symbol_hygiene import (
@@ -63,7 +74,7 @@ from src.symbol_hygiene import (
     symbol_hygiene_queue,
 )
 from src.theme_selection import set_theme_selection_state
-from src.theme_service import get_theme_members, replace_ticker_in_theme, seed_if_needed, update_theme
+from src.theme_service import get_theme_members, replace_ticker_in_theme, seed_if_needed, theme_membership_export, update_theme
 from src.ticker_onboarding import (
     governed_ticker_onboarding_counts,
     list_governed_ticker_onboarding,
@@ -78,6 +89,29 @@ reset_perf_timings("health")
 
 def _display_placeholder(value) -> str:
     return "-" if value is None or value != value else str(value)
+
+
+def _queue_label(theme_id: int, theme_name: str) -> str:
+    return f"{str(theme_name)} [{int(theme_id)}]"
+
+
+def _first_metric_value(df: pd.DataFrame, column: str) -> int:
+    if df is None or getattr(df, "empty", True) or column not in df.columns:
+        return 0
+    try:
+        return int(df.iloc[0].get(column) or 0)
+    except (TypeError, ValueError, IndexError):
+        return 0
+
+
+def _add_theme_to_audit_queue(session_state, theme_id: int, theme_name: str) -> tuple[bool, str]:
+    label = _queue_label(theme_id, theme_name)
+    current = list(get_canonical_multiselect_values(session_state, "health_theme_audit_queue"))
+    if label in current:
+        return False, label
+    current.append(label)
+    session_state["health_theme_audit_queue"] = current
+    return True, label
 
 
 try:
@@ -113,9 +147,9 @@ with ops_tab:
         st.warning(f"Marked {stale_marked} stale run(s) failed on page load.")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ticker snapshots", int(snaps.iloc[0]["ticker_snapshot_rows"]))
-    c2.metric("Theme snapshots", int(snaps.iloc[0]["theme_snapshot_rows"]))
-    c3.metric("Runs w/theme snapshots", int(snaps.iloc[0]["runs_with_theme_snapshots"]))
+    c1.metric("Ticker snapshots", _first_metric_value(snaps, "ticker_snapshot_rows"))
+    c2.metric("Theme snapshots", _first_metric_value(snaps, "theme_snapshot_rows"))
+    c3.metric("Runs w/theme snapshots", _first_metric_value(snaps, "runs_with_theme_snapshots"))
     c4.metric("Pending suggestions", int(sugg_counts[sugg_counts["status"] == "pending"]["cnt"].sum()) if not sugg_counts.empty else 0)
 
     if not baseline.empty:
@@ -682,49 +716,82 @@ with themes_tab:
     if health.empty:
         st.info("No theme health data.")
     else:
-        f1, f2, f3 = st.columns(3)
-        with f1:
-            active_filter = st.selectbox("Active status", ["all", "active", "inactive"], index=0)
-        with f2:
-            low_filter = st.selectbox("Low-count flag", ["all", "only low-count", "exclude low-count"], index=0)
-        with f3:
-            empty_filter = st.selectbox("Empty flag", ["all", "only empty", "exclude empty"], index=0)
+        audit = enrich_theme_health_for_audit(health, stale_hours=STALE_DATA_HOURS)
+        audit_counts = theme_health_audit_counts(audit)
 
-        view = health.copy()
-        if active_filter == "active":
-            view = view[view["is_active"] == True]
-        elif active_filter == "inactive":
-            view = view[view["is_active"] == False]
-        if low_filter == "only low-count":
-            view = view[view["low_count_flag"] == True]
-        elif low_filter == "exclude low-count":
-            view = view[view["low_count_flag"] == False]
-        if empty_filter == "only empty":
-            view = view[view["empty_theme_flag"] == True]
-        elif empty_filter == "exclude empty":
-            view = view[view["empty_theme_flag"] == False]
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Empty themes", audit_counts.empty_themes)
+        a2.metric("Low-count themes", audit_counts.low_count_themes)
+        a3.metric("Stale / no snapshot", audit_counts.stale_themes)
+        a4.metric("Recent failure themes", audit_counts.recent_failure_themes)
+        a5, a6, a7 = st.columns(3)
+        a5.metric("Active with zero members", audit_counts.active_zero_member_themes)
+        a6.metric("Inactive with members", audit_counts.inactive_with_members)
+        a7.metric("Recently changed", audit_counts.recently_changed_themes)
+        st.caption(
+            "Primary empty definition: zero governed members. Missing or stale snapshots are tracked separately so audit triage can distinguish structural membership problems from market-history gaps."
+        )
+        with get_conn() as conn:
+            theme_export_df = theme_membership_export(conn)
+        export_csv = theme_export_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Download themes membership CSV",
+            data=export_csv,
+            file_name="theme_membership_audit_export.csv",
+            mime="text/csv",
+            help="Exports all themes with category, active status, normalized governed member count, and governed member list.",
+            key="theme_health_membership_export",
+        )
+
+        f1, f2, f3, f4 = st.columns([1.8, 1.4, 1.3, 1.1])
+        with f1:
+            preset = st.radio("Audit preset", AUDIT_PRESETS, horizontal=True, index=0)
+        with f2:
+            audit_sort = st.selectbox("Sort", AUDIT_SORT_OPTIONS, index=0)
+        with f3:
+            search_text = st.text_input("Search", placeholder="theme, category, reason")
+        with f4:
+            flagged_only = st.checkbox("Only flagged", value=False)
+
+        view = apply_theme_health_audit_preset(audit, preset)
+        if str(search_text or "").strip():
+            query = str(search_text).strip().casefold()
+            view = view[
+                view["theme_name"].astype(str).str.casefold().str.contains(query, na=False)
+                | view["category"].astype(str).str.casefold().str.contains(query, na=False)
+                | view["why_flagged"].astype(str).str.casefold().str.contains(query, na=False)
+                | view["next_action"].astype(str).str.casefold().str.contains(query, na=False)
+            ]
+        if flagged_only:
+            view = view[view["why_flagged"] != "healthy"]
+        view = sort_theme_health_audit(view, audit_sort)
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Themes", int(view.shape[0]))
-        m2.metric("Needs attention", int((view["health_status"] == "needs_attention").sum()))
-        m3.metric("Watch", int((view["health_status"] == "watch").sum()))
-        m4.metric("Healthy", int((view["health_status"] == "healthy").sum()))
+        m1.metric("Themes in audit view", int(view.shape[0]))
+        m2.metric("Needs attention", int((view["audit_status"] == "needs_attention").sum()))
+        m3.metric("Watch", int((view["audit_status"] == "watch").sum()))
+        m4.metric("Healthy", int((view["audit_status"] == "healthy").sum()))
 
         health_view = view[[
             "theme_name",
             "category",
             "is_active",
             "constituent_count",
-            "low_count_flag",
             "empty_theme_flag",
+            "low_count_flag",
+            "stale_theme_flag",
             "live_failure_count_recent",
             "latest_snapshot_time",
-            "health_status",
+            "why_flagged",
+            "next_action",
+            "audit_status",
         ]].copy()
         health_view["latest_snapshot_time"] = health_view["latest_snapshot_time"].apply(
             lambda v: short_timestamp(v) or "—"
         )
-        st.caption("`latest_snapshot_time` uses the preferred current-view theme source, matching live-preferred Health diagnostics.")
+        st.caption(
+            "`latest_snapshot_time` uses the preferred current-view theme source. `why_flagged` explains the audit signal; `next_action` is the recommended operator follow-up."
+        )
         health_event = render_dataframe(
             "health_theme_table",
             health_view,
@@ -746,21 +813,220 @@ with themes_tab:
             if not matching.empty:
                 picked = matching.iloc[0]
 
+        queue_options = [_queue_label(int(row["theme_id"]), str(row["theme_name"])) for _, row in view_reset.iterrows()]
+        selected_queue_labels = sync_valid_multiselect_state(
+            st.session_state,
+            "health_theme_audit_queue",
+            queue_options,
+            default=[],
+        )
+        st.multiselect(
+            "Audit queue selection",
+            options=queue_options,
+            key="health_theme_audit_queue",
+            help="Select one or more themes from the current audit view for queue actions.",
+        )
+        selected_queue_ids = [
+            int(label.rsplit("[", 1)[1].rstrip("]"))
+            for label in get_canonical_multiselect_values(st.session_state, "health_theme_audit_queue")
+            if label in queue_options and "[" in label and label.endswith("]")
+        ]
+        selected_queue = view_reset[view_reset["theme_id"].isin(selected_queue_ids)].copy()
+        action_state = theme_health_action_eligibility(selected_queue)
+        if action_state["selected_count"]:
+            st.caption(
+                f"Queue selected: `{int(action_state['selected_count'])}` theme(s) | "
+                f"rebuild-ready=`{len(action_state['rebuild_theme_ids'])}` | "
+                f"backfill-ready=`{len(action_state['backfill_theme_ids'])}` | "
+                f"deactivate-ready=`{len(action_state['deactivate_theme_ids'])}`"
+            )
+            q1, q2, q3, q4 = st.columns(4)
+            rebuild_clicked = q1.button(
+                f"Rebuild recent selected ({SUPPRESSION_REBUILD_LOOKBACK_DAYS}d)",
+                disabled=not bool(action_state["rebuild_theme_ids"]),
+                help="Rebuilds recent reconstructed history for the selected themes using stored ticker history.",
+                key="health_theme_queue_rebuild",
+            )
+            backfill_clicked = q2.button(
+                "Backfill + reconstruct selected",
+                disabled=not bool(action_state["backfill_theme_ids"]) or not bool(massive_api_key()),
+                help="Fetches recent live ticker history and rebuilds selected themes. Requires live API configuration.",
+                key="health_theme_queue_backfill",
+            )
+            deactivate_clicked = q3.button(
+                "Deactivate selected empty active",
+                disabled=not bool(action_state["deactivate_theme_ids"]),
+                help="Only deactivates selected themes that are active and currently have zero governed members.",
+                key="health_theme_queue_deactivate",
+            )
+            clear_queue_clicked = q4.button(
+                "Clear queue",
+                key="health_theme_queue_clear",
+            )
+            deactivate_confirmed = st.checkbox(
+                "Confirm deactivation of selected empty active themes",
+                value=False,
+                disabled=not bool(action_state["deactivate_theme_ids"]),
+                key="health_theme_queue_deactivate_confirm",
+                help="Required before the deactivate action will run.",
+            )
+
+            if rebuild_clicked:
+                try:
+                    with get_conn() as conn:
+                        rebuild_result = rebuild_recent_reconstructed_history(
+                            conn,
+                            theme_ids=[int(theme_id) for theme_id in action_state["rebuild_theme_ids"]],
+                        )
+                    prepare_post_mutation_refresh(
+                        st.session_state,
+                        "governed_onboarding_feedback",
+                        level="success" if str(rebuild_result.get("status") or "") not in {"no_scope", "no_ticker_history", "no_reconstructed_scope", "no_history_rows", "no_op"} else "warning",
+                        message=(
+                            f"Queue rebuild result: status={rebuild_result.get('status')} | "
+                            f"themes={len(rebuild_result.get('affected_theme_ids', []))} | "
+                            f"replaced={int(rebuild_result.get('rows_replaced') or 0)} | "
+                            f"written={int(rebuild_result.get('rows_written') or 0)}."
+                        ),
+                        clear_market=True,
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not rebuild selected themes. {exc}")
+
+            if backfill_clicked:
+                try:
+                    end_date = datetime.now(timezone.utc).replace(tzinfo=None).date()
+                    start_date = end_date - timedelta(days=45)
+                    with get_conn() as conn:
+                        backfill_result = reconstruct_theme_history_range(
+                            conn,
+                            provider_name=DEFAULT_PROVIDER,
+                            start_date=start_date,
+                            end_date=end_date,
+                            theme_ids=[int(theme_id) for theme_id in action_state["backfill_theme_ids"]],
+                            provenance_source_label="theme_health_queue_backfill",
+                            run_kind="theme_health_queue_backfill",
+                            replace_existing=False,
+                            persist_ticker_history=True,
+                        )
+                    level = "success" if str(backfill_result.get("status") or "") in {"success", "partial"} else "warning"
+                    prepare_post_mutation_refresh(
+                        st.session_state,
+                        "governed_onboarding_feedback",
+                        level=level,
+                        message=(
+                            f"Queue backfill result: status={backfill_result.get('status')} | "
+                            f"themes={len(backfill_result.get('theme_ids', []))} | "
+                            f"ticker_history_written={int(backfill_result.get('ticker_history_rows_written') or 0)} | "
+                            f"snapshot_rows_written={int(backfill_result.get('snapshot_rows_written') or 0)} | "
+                            f"failed_tickers={len(backfill_result.get('failed_tickers') or [])}."
+                        ),
+                        clear_market=True,
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not backfill selected themes. {exc}")
+
+            if deactivate_clicked:
+                if not deactivate_confirmed:
+                    st.warning("Confirm deactivation before running this action.")
+                else:
+                    try:
+                        with get_conn() as conn:
+                            target_rows = selected_queue[selected_queue["theme_id"].isin(action_state["deactivate_theme_ids"])].copy()
+                            for _, row in target_rows.iterrows():
+                                update_theme(conn, int(row["theme_id"]), str(row["theme_name"]), str(row["category"] or ""), False)
+                        prepare_post_mutation_refresh(
+                            st.session_state,
+                            "governed_onboarding_feedback",
+                            level="success",
+                            message=f"Deactivated {len(action_state['deactivate_theme_ids'])} selected empty active theme(s).",
+                            clear_market=True,
+                            clear_scanner_summary=True,
+                            clear_research=True,
+                        )
+                        st.session_state["health_theme_queue_deactivate_confirm"] = False
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not deactivate selected themes. {exc}")
+
+            if clear_queue_clicked:
+                st.session_state["health_theme_audit_queue"] = []
+                st.rerun()
+
         if picked is not None:
             theme_id = int(picked["theme_id"])
             theme_name = str(picked["theme_name"])
             theme_label = f"{theme_name} ({picked['category']})"
             with get_conn() as conn:
                 member_rows = theme_member_hygiene_context(conn, theme_id)
+                governed_members = get_theme_members(conn, theme_id)
             members = member_rows["ticker"].tolist() if not member_rows.empty else []
+            governed_members_list = governed_members["ticker"].tolist() if not governed_members.empty else []
 
             st.subheader("Selected theme detail")
-            st.caption("Edit only theme-owned fields here. Membership inspection is read-only in this panel; use Themes page management for broader changes.")
+            st.caption("Compact audit detail for the selected theme. Use this to confirm why the theme is flagged and the next best operator step.")
             d1, d2, d3, d4 = st.columns(4)
             d1.metric("Theme", theme_name)
             d2.metric("Category", str(picked["category"] or "Uncategorized"))
             d3.metric("Active", "Yes" if bool(picked["is_active"]) else "No")
             d4.metric("Ticker count", int(picked["constituent_count"] or 0))
+            d5, d6, d7, d8 = st.columns(4)
+            d5.metric("Latest snapshot", short_timestamp(picked.get("latest_snapshot_time")) or "none")
+            d6.metric("Recent failures", int(picked.get("live_failure_count_recent") or 0))
+            d7.metric("Audit status", str(picked.get("audit_status") or "healthy").replace("_", " ").title())
+            d8.metric("Governed members", len(governed_members_list))
+            st.caption(f"Why flagged: `{picked.get('why_flagged') or 'healthy'}`")
+            st.caption(f"Next action: `{picked.get('next_action') or 'monitor'}`")
+            if governed_members_list:
+                preview = ", ".join(governed_members_list[:8])
+                if len(governed_members_list) > 8:
+                    preview = f"{preview}, +{len(governed_members_list) - 8} more"
+                st.caption(f"Current governed members: `{preview}`")
+            else:
+                st.caption("Current governed members: `none`")
+            detail_queue_cols = st.columns(3)
+            queue_selected_clicked = detail_queue_cols[0].button("Add selected theme to queue", key=f"health_theme_add_queue_{theme_id}")
+            recommended_action = str(picked.get("next_action") or "").strip().lower()
+            queue_recommended_label = None
+            if any(token in recommended_action for token in ["reconstruct", "refresh snapshots"]):
+                queue_recommended_label = "Queue recommended: rebuild"
+            elif "deactivate" in recommended_action:
+                queue_recommended_label = "Queue recommended: deactivate"
+            elif "review failing members" in recommended_action or "inspect failures" in recommended_action:
+                queue_recommended_label = "Queue recommended: backfill/rebuild"
+            queue_recommended_clicked = detail_queue_cols[1].button(
+                queue_recommended_label or "Queue recommended action",
+                disabled=queue_recommended_label is None,
+                key=f"health_theme_add_recommended_queue_{theme_id}",
+            )
+            open_queue_hint = detail_queue_cols[2]
+            open_queue_hint.caption("Use the audit queue bar above to run actions after adding this theme.")
+
+            if queue_selected_clicked:
+                added, label = _add_theme_to_audit_queue(st.session_state, theme_id, theme_name)
+                queue_feedback_message(
+                    st.session_state,
+                    "governed_onboarding_feedback",
+                    level="success" if added else "warning",
+                    message=f"Added `{label}` to the audit queue." if added else f"`{label}` is already in the audit queue.",
+                )
+                st.rerun()
+
+            if queue_recommended_clicked and queue_recommended_label is not None:
+                added, label = _add_theme_to_audit_queue(st.session_state, theme_id, theme_name)
+                queue_feedback_message(
+                    st.session_state,
+                    "governed_onboarding_feedback",
+                    level="success" if added else "warning",
+                    message=(
+                        f"Queued `{label}` for the recommended follow-up: {queue_recommended_label.replace('Queue recommended: ', '')}."
+                        if added
+                        else f"`{label}` is already in the audit queue."
+                    ),
+                )
+                st.rerun()
             if members:
                 failed_count = int(member_rows["last_failure_at"].notna().sum()) if "last_failure_at" in member_rows.columns else 0
                 st.metric("Members with recent failures", failed_count)

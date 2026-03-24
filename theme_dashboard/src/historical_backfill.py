@@ -5,11 +5,24 @@ from datetime import UTC, date, datetime, timedelta
 import pandas as pd
 
 from .fetch_data import get_provider
+from .db_introspection import table_exists, table_has_column
 from .rankings import _compute_theme_metrics
 from .ticker_history import persist_ticker_daily_history
 
 HISTORICAL_LOOKBACK_BUFFER_DAYS = 120
 SUPPRESSION_REBUILD_LOOKBACK_DAYS = 45
+
+
+def _manual_suppression_filter_sql(conn, ticker_expr: str) -> str:
+    if not table_exists(conn, "symbol_refresh_status") or not table_has_column(conn, "symbol_refresh_status", "manual_suppressed"):
+        return ""
+    return (
+        " AND NOT EXISTS ("
+        "SELECT 1 FROM symbol_refresh_status s "
+        f"WHERE upper(trim(s.ticker)) = upper(trim({ticker_expr})) "
+        "AND COALESCE(s.manual_suppressed, FALSE)"
+        ")"
+    )
 
 
 def _normalize_date(value: date | datetime | str) -> date:
@@ -52,6 +65,9 @@ def _scope_membership(conn, tickers: list[str] | None = None, theme_ids: list[in
         placeholders = ", ".join(["?"] * len(theme_ids))
         clauses.append(f"m.theme_id IN ({placeholders})")
         params.extend(theme_ids)
+    manual_clause = _manual_suppression_filter_sql(conn, "m.ticker")
+    if manual_clause:
+        clauses.append(manual_clause.replace(" AND ", "", 1))
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     return conn.execute(

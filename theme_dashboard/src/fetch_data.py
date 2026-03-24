@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable
 
+import duckdb
 import pandas as pd
 
 from .config import LIVE_FETCH_REFERENCE_ON_REFRESH, LIVE_RATE_LIMIT_STOP_THRESHOLD, REFRESH_STALE_TIMEOUT_MINUTES
@@ -26,8 +27,48 @@ class LiveProviderNotConfiguredError(RuntimeError):
     """Raised when a live refresh is requested without required live credentials."""
 
 
+class FetchDataQueryResultStateError(RuntimeError):
+    """Raised when a required refresh helper query returns no row."""
+
+
 def _utc_now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _is_duckdb_result_state_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return any(
+        token in message
+        for token in {
+            "no open result set",
+            "closed pending query result",
+            "unsuccessful or closed pending query result",
+        }
+    )
+
+
+def _with_bootstrap_recovery(loader):
+    try:
+        return loader()
+    except duckdb.InvalidInputException as exc:
+        if not _is_duckdb_result_state_error(exc):
+            raise
+        from .database import get_bootstrap_conn
+
+        with get_bootstrap_conn() as bootstrap_conn:
+            return loader(bootstrap_conn)
+    except FetchDataQueryResultStateError:
+        from .database import get_bootstrap_conn
+
+        with get_bootstrap_conn() as bootstrap_conn:
+            return loader(bootstrap_conn)
+
+
+def _fetchone_required(result, context: str):
+    row = result.fetchone()
+    if row is None:
+        raise FetchDataQueryResultStateError(f"Refresh helper query returned no row: {context}")
+    return row
 
 
 def get_provider(provider_name: str):
@@ -41,33 +82,45 @@ def get_provider(provider_name: str):
 
 def mark_stale_running_runs(conn, stale_minutes: int = REFRESH_STALE_TIMEOUT_MINUTES) -> int:
     stale_before = _utc_now_naive() - timedelta(minutes=stale_minutes)
-    stale_count = conn.execute(
-        "SELECT COUNT(*) FROM refresh_runs WHERE status = 'running' AND started_at < ?",
-        [stale_before],
-    ).fetchone()[0]
-    if stale_count:
-        conn.execute(
-            """
-            UPDATE refresh_runs
-            SET status = 'failed',
-                finished_at = CURRENT_TIMESTAMP,
-                error_message = COALESCE(error_message, ?)
-            WHERE status = 'running' AND started_at < ?
-            """,
-            [f"Run marked stale after exceeding {stale_minutes} minutes.", stale_before],
+
+    def _mark(active_conn=conn) -> int:
+        stale_count = int(
+            _fetchone_required(
+                active_conn.execute(
+                    "SELECT COUNT(*) FROM refresh_runs WHERE status = 'running' AND started_at < ?",
+                    [stale_before],
+                ),
+                "stale running refresh count",
+            )[0]
+            or 0
         )
-    return int(stale_count)
+        if stale_count:
+            active_conn.execute(
+                """
+                UPDATE refresh_runs
+                SET status = 'failed',
+                    finished_at = CURRENT_TIMESTAMP,
+                    error_message = COALESCE(error_message, ?)
+                WHERE status = 'running' AND started_at < ?
+                """,
+                [f"Run marked stale after exceeding {stale_minutes} minutes.", stale_before],
+            )
+        return stale_count
+
+    return _with_bootstrap_recovery(_mark)
 
 
 def running_refresh_runs(conn, stale_minutes: int = REFRESH_STALE_TIMEOUT_MINUTES) -> pd.DataFrame:
-    running = conn.execute(
-        """
-        SELECT run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count, scope_type, scope_theme_name, error_message
-        FROM refresh_runs
-        WHERE status = 'running'
-        ORDER BY run_id DESC
-        """
-    ).df()
+    running = _with_bootstrap_recovery(
+        lambda active_conn=conn: active_conn.execute(
+            """
+            SELECT run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count, scope_type, scope_theme_name, error_message
+            FROM refresh_runs
+            WHERE status = 'running'
+            ORDER BY run_id DESC
+            """
+        ).df()
+    )
     if running.empty:
         return running
 
@@ -81,31 +134,37 @@ def running_refresh_runs(conn, stale_minutes: int = REFRESH_STALE_TIMEOUT_MINUTE
 
 def mark_refresh_run_interrupted(conn, run_id: int, *, note: str | None = None) -> bool:
     normalized_run_id = int(run_id)
-    updated = conn.execute(
-        """
-        UPDATE refresh_runs
-        SET status = 'interrupted',
-            finished_at = CURRENT_TIMESTAMP,
-            error_message = COALESCE(?, error_message, 'Run manually marked interrupted by operator.')
-        WHERE run_id = ?
-          AND status = 'running'
-        RETURNING run_id
-        """,
-        [note, normalized_run_id],
-    ).fetchone()
+
+    def _mark(active_conn=conn):
+        return active_conn.execute(
+            """
+            UPDATE refresh_runs
+            SET status = 'interrupted',
+                finished_at = CURRENT_TIMESTAMP,
+                error_message = COALESCE(?, error_message, 'Run manually marked interrupted by operator.')
+            WHERE run_id = ?
+              AND status = 'running'
+            RETURNING run_id
+            """,
+            [note, normalized_run_id],
+        ).fetchone()
+
+    updated = _with_bootstrap_recovery(_mark)
     return updated is not None
 
 
 def _current_running_run(conn):
-    return conn.execute(
-        """
-        SELECT run_id, provider, started_at, ticker_count, success_count, failure_count
-        FROM refresh_runs
-        WHERE status = 'running'
-        ORDER BY run_id DESC
-        LIMIT 1
-        """
-    ).fetchone()
+    return _with_bootstrap_recovery(
+        lambda active_conn=conn: active_conn.execute(
+            """
+            SELECT run_id, provider, started_at, ticker_count, success_count, failure_count
+            FROM refresh_runs
+            WHERE status = 'running'
+            ORDER BY run_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    )
 
 
 def _is_rate_limit_error(message: str) -> bool:

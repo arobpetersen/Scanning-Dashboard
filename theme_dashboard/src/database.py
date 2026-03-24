@@ -421,6 +421,9 @@ CREATE TABLE IF NOT EXISTS symbol_refresh_status (
     suggested_status VARCHAR,
     suggested_reason VARCHAR,
     suppression_reason VARCHAR,
+    manual_suppressed BOOLEAN NOT NULL DEFAULT FALSE,
+    manual_suppression_reason VARCHAR,
+    manual_suppressed_at TIMESTAMP,
     last_failure_category VARCHAR,
     consecutive_failure_count BIGINT NOT NULL DEFAULT 0,
     rolling_failure_count BIGINT NOT NULL DEFAULT 0,
@@ -553,6 +556,9 @@ def init_db() -> None:
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS suggested_status VARCHAR")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS suggested_reason VARCHAR")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS suppression_reason VARCHAR")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS manual_suppressed BOOLEAN DEFAULT FALSE")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS manual_suppression_reason VARCHAR")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS manual_suppressed_at TIMESTAMP")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS last_failure_category VARCHAR")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS consecutive_failure_count BIGINT DEFAULT 0")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS rolling_failure_count BIGINT DEFAULT 0")
@@ -563,6 +569,10 @@ def init_db() -> None:
         _best_effort_init_update(
             conn,
             "UPDATE symbol_refresh_status SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE symbol_refresh_status SET manual_suppressed = COALESCE(manual_suppressed, FALSE) WHERE manual_suppressed IS NULL",
         )
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS source_context_json VARCHAR")

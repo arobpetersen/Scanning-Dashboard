@@ -40,13 +40,16 @@ from src.theme_selection import (
 from src.theme_service import (
     add_ticker,
     active_ticker_universe,
+    clear_manual_ticker_suppression,
     create_theme,
     delete_theme,
     get_theme_members,
     list_themes,
     remove_ticker,
+    set_manual_ticker_suppression,
     set_ticker_theme_assignments,
     seed_if_needed,
+    ticker_manual_suppression_state,
     update_theme,
 )
 
@@ -594,17 +597,19 @@ with manage_tab:
         with get_conn() as conn:
             lookup = ticker_lookup_summary(conn, lookup_ticker)
             memberships = ticker_lookup_memberships(conn, lookup_ticker)
+            suppression_state = ticker_manual_suppression_state(conn, lookup_ticker)
 
         if lookup.empty:
             st.warning("Ticker lookup did not return any rows.")
         else:
             row = lookup.iloc[0]
             st.write(f"**Status:** `{row['lookup_status']}` for `{lookup_ticker}`")
-            l1, l2, l3, l4 = st.columns(4)
+            l1, l2, l3, l4, l5 = st.columns(5)
             l1.metric("Assigned themes", int(row.get("assigned_theme_count") or 0))
             l2.metric("In governed membership", "yes" if bool(row.get("exists_in_theme_membership")) else "no")
             l3.metric("In snapshots", "yes" if bool(row.get("exists_in_ticker_snapshots")) else "no")
             l4.metric("Seen elsewhere", "yes" if bool(row.get("exists_in_refresh_run_tickers") or row.get("exists_in_symbol_refresh_status")) else "no")
+            l5.metric("Suppressed", "yes" if bool(row.get("manually_suppressed")) else "no")
             active_assignment_count = int(row.get("active_assigned_theme_count") or 0)
             inactive_assignment_count = int(row.get("inactive_assigned_theme_count") or 0)
             if int(row.get("assigned_theme_count") or 0):
@@ -612,9 +617,16 @@ with manage_tab:
                 if inactive_assignment_count:
                     assignment_bits.append(f"inactive=`{inactive_assignment_count}`")
                 st.caption("Governed membership assignment breakdown: " + " | ".join(assignment_bits))
+            if bool(row.get("manually_suppressed")):
+                st.caption(
+                    "This ticker remains visible in raw lookup context but is excluded operationally from governed-membership-driven workflows."
+                )
 
             detail = {
                 "ticker": lookup_ticker,
+                "suppressed": "yes" if bool(row.get("manually_suppressed")) else "no",
+                "suppression_reason": row.get("manual_suppression_reason") or display_or_dash(None),
+                "suppressed_at": short_timestamp(row.get("manual_suppressed_at")) or display_or_dash(None),
                 "latest_snapshot_time": short_timestamp(row.get("latest_snapshot_time")) or display_or_dash(None),
                 "latest_snapshot_source": row.get("latest_snapshot_source") or "n/a",
                 "latest_price": format_price(row.get("latest_price")) or display_or_dash(None),
@@ -624,7 +636,10 @@ with manage_tab:
             render_dataframe("ticker_lookup_detail", [detail], width="stretch", hide_index=True)
 
             if not memberships.empty:
-                st.caption("Assigned themes from governed membership")
+                caption = "Raw assigned themes"
+                if bool(row.get("manually_suppressed")):
+                    caption += " (suppressed tickers remain assigned here for edit/history context)"
+                st.caption(caption)
                 render_dataframe(
                     "ticker_lookup_memberships",
                     memberships[["theme_name", "category", "is_active"]],
@@ -749,6 +764,56 @@ with manage_tab:
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Ticker save failed: {exc}")
+
+            st.markdown("**Operational suppression**")
+            st.caption(
+                "Manual suppression excludes this ticker from governed-membership-driven workflows without deleting raw assignment or historical presence."
+            )
+            with st.form("ticker_suppression_form"):
+                suppress_ticker = st.checkbox(
+                    "Suppress ticker from governed workflows",
+                    value=bool(suppression_state.get("manual_suppressed")),
+                )
+                suppression_reason = st.text_input(
+                    "Suppression reason",
+                    value=str(suppression_state.get("manual_suppression_reason") or ""),
+                    help="Required when suppressing. Example: moved to pink sheets / OTC, bad symbol, manual cleanup.",
+                )
+                suppression_submitted = st.form_submit_button("Save suppression override")
+
+            if suppression_submitted:
+                try:
+                    with get_conn() as conn:
+                        if suppress_ticker:
+                            suppression_result = set_manual_ticker_suppression(conn, lookup_ticker, suppression_reason)
+                            changed = bool(suppression_result.get("changed"))
+                            level = "success" if changed else "warning"
+                            message = (
+                                f"Suppressed `{lookup_ticker}` from governed workflows. Reason: {suppression_result.get('manual_suppression_reason')}"
+                                if changed
+                                else f"`{lookup_ticker}` is already suppressed with the same reason."
+                            )
+                        else:
+                            suppression_result = clear_manual_ticker_suppression(conn, lookup_ticker)
+                            changed = bool(suppression_result.get("changed"))
+                            level = "success" if changed else "warning"
+                            message = (
+                                f"Removed manual suppression for `{lookup_ticker}`."
+                                if changed
+                                else f"`{lookup_ticker}` was not manually suppressed."
+                            )
+                    prepare_post_mutation_refresh(
+                        st.session_state,
+                        "manage_ticker_feedback",
+                        level=level,
+                        message=message,
+                        clear_market=True,
+                        clear_scanner_summary=True,
+                        clear_research=True,
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Suppression update failed: {exc}")
 
     st.divider()
     st.markdown("**Manual recent ticker-history backfill**")

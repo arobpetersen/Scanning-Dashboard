@@ -5,10 +5,22 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 
 from .config import DEFAULT_PROVIDER
-from .db_introspection import table_exists
+from .db_introspection import table_exists, table_has_column
 
 ONBOARDING_HISTORY_TARGET_DAYS = 30
 ONBOARDING_BACKFILL_WINDOW_DAYS = 90
+
+
+def _manual_suppression_filter_sql(conn, ticker_expr: str) -> str:
+    if not table_exists(conn, "symbol_refresh_status") or not table_has_column(conn, "symbol_refresh_status", "manual_suppressed"):
+        return ""
+    return (
+        " AND NOT EXISTS ("
+        "SELECT 1 FROM symbol_refresh_status s "
+        f"WHERE upper(trim(s.ticker)) = upper(trim({ticker_expr})) "
+        "AND COALESCE(s.manual_suppressed, FALSE)"
+        ")"
+    )
 
 
 def _normalize_ticker(ticker: str) -> str:
@@ -161,6 +173,10 @@ def list_governed_ticker_onboarding(conn, limit: int = 100) -> pd.DataFrame:
                 STRING_AGG(t.name, ', ' ORDER BY t.name) AS governed_themes
             FROM theme_membership m
             JOIN themes t ON t.id = m.theme_id
+            WHERE 1=1
+        """
+        + _manual_suppression_filter_sql(conn, "m.ticker")
+        + """
             GROUP BY upper(trim(m.ticker))
         )
         SELECT
@@ -181,6 +197,7 @@ def list_governed_ticker_onboarding(conn, limit: int = 100) -> pd.DataFrame:
             o.updated_at
         FROM governed_ticker_onboarding o
         LEFT JOIN membership m ON m.ticker = upper(trim(o.ticker))
+        WHERE COALESCE(m.governed_assignment_count, 0) > 0
         ORDER BY o.added_at DESC, o.ticker
         LIMIT ?
         """,
@@ -193,13 +210,22 @@ def governed_ticker_onboarding_counts(conn) -> pd.DataFrame:
         return pd.DataFrame()
     return conn.execute(
         """
+        WITH visible_tickers AS (
+            SELECT DISTINCT upper(trim(m.ticker)) AS ticker
+            FROM theme_membership m
+            WHERE 1=1
+        """
+        + _manual_suppression_filter_sql(conn, "m.ticker")
+        + """
+        )
         SELECT
-            history_readiness_status,
-            backfill_status,
+            o.history_readiness_status,
+            o.backfill_status,
             COUNT(*) AS cnt
-        FROM governed_ticker_onboarding
-        GROUP BY history_readiness_status, backfill_status
-        ORDER BY history_readiness_status, backfill_status
+        FROM governed_ticker_onboarding o
+        JOIN visible_tickers v ON v.ticker = upper(trim(o.ticker))
+        GROUP BY o.history_readiness_status, o.backfill_status
+        ORDER BY o.history_readiness_status, o.backfill_status
         """
     ).df()
 

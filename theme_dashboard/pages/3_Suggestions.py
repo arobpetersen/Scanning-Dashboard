@@ -327,11 +327,20 @@ if active_suggestions_tab == "Manual":
     proposed_theme_name = None
     proposed_ticker = None
     current_members: list[str] = []
+    has_theme_options = bool(theme_options)
 
     if suggestion_type in {"add_ticker_to_theme", "remove_ticker_from_theme", "rename_theme", "move_ticker_between_themes", "review_theme"}:
-        selected_existing_theme = st.selectbox("Existing theme", options=theme_options, format_func=lambda t: f"{t['name']} [{t['id']}]", key="manual_existing")
-        with get_conn() as conn:
-            current_members = get_theme_members(conn, int(selected_existing_theme["id"]))["ticker"].tolist()
+        selected_existing_theme = st.selectbox(
+            "Existing theme",
+            options=theme_options,
+            format_func=lambda t: f"{t['name']} [{t['id']}]",
+            key="manual_existing",
+        )
+        if selected_existing_theme is not None:
+            with get_conn() as conn:
+                current_members = get_theme_members(conn, int(selected_existing_theme["id"]))["ticker"].tolist()
+        else:
+            st.caption("Create a theme first, or wait for theme seeding to finish, before using theme-linked manual suggestions.")
 
     if suggestion_type == "add_ticker_to_theme":
         proposed_ticker = st.text_input("Ticker to add", value="")
@@ -340,7 +349,12 @@ if active_suggestions_tab == "Manual":
     if suggestion_type == "move_ticker_between_themes":
         if current_members:
             proposed_ticker = st.selectbox("Ticker to move", options=current_members)
-        selected_target_theme = st.selectbox("Target theme", options=theme_options, format_func=lambda t: f"{t['name']} [{t['id']}]", key="manual_target")
+        selected_target_theme = st.selectbox(
+            "Target theme",
+            options=theme_options,
+            format_func=lambda t: f"{t['name']} [{t['id']}]",
+            key="manual_target",
+        )
     if suggestion_type in {"create_theme", "rename_theme"}:
         proposed_theme_name = st.text_input("Proposed theme name", value="")
     if suggestion_type == "review_theme":
@@ -348,6 +362,17 @@ if active_suggestions_tab == "Manual":
 
     if st.button("Create manual suggestion"):
         try:
+            requires_existing_theme = suggestion_type in {
+                "add_ticker_to_theme",
+                "remove_ticker_from_theme",
+                "rename_theme",
+                "move_ticker_between_themes",
+                "review_theme",
+            }
+            if requires_existing_theme and selected_existing_theme is None:
+                raise ValueError("Select an existing theme before creating this suggestion.")
+            if suggestion_type == "move_ticker_between_themes" and selected_target_theme is None:
+                raise ValueError("Select a target theme before creating this suggestion.")
             payload = SuggestionPayload(
                 suggestion_type=suggestion_type,
                 source=source,
