@@ -63,7 +63,6 @@ st.title("Themes")
 reset_perf_timings("themes")
 
 DAILY_HISTORICAL_APPEND_STALE_MINUTES = 45
-
 try:
     init_db()
     with get_conn() as conn:
@@ -136,13 +135,29 @@ def _active_daily_historical_append_runs() -> pd.DataFrame:
 
 def _resolve_prior_daily_endpoint(history: pd.DataFrame) -> tuple[pd.DataFrame, object | None, object | None]:
     if history.empty or "theme_id" not in history.columns or "snapshot_time" not in history.columns:
-        return pd.DataFrame(columns=["theme_id", "prior_composite_score", "prior_avg_1m"]), None, None
+        return pd.DataFrame(
+            columns=[
+                "theme_id",
+                "prior_composite_score",
+                "prior_avg_1w",
+                "prior_avg_1m",
+                "prior_breadth_1m",
+            ]
+        ), None, None
 
     dated = history.copy()
     dated["snapshot_date"] = pd.to_datetime(dated["snapshot_time"], errors="coerce").dt.date
     available_dates = sorted([value for value in dated["snapshot_date"].dropna().unique().tolist()], reverse=True)
     if len(available_dates) < 2:
-        return pd.DataFrame(columns=["theme_id", "prior_composite_score", "prior_avg_1m"]), available_dates[0] if available_dates else None, None
+        return pd.DataFrame(
+            columns=[
+                "theme_id",
+                "prior_composite_score",
+                "prior_avg_1w",
+                "prior_avg_1m",
+                "prior_breadth_1m",
+            ]
+        ), available_dates[0] if available_dates else None, None
 
     latest_date = available_dates[0]
     prior_date = available_dates[1]
@@ -151,50 +166,88 @@ def _resolve_prior_daily_endpoint(history: pd.DataFrame) -> tuple[pd.DataFrame, 
         .sort_values(["theme_id", "snapshot_time"])
         .groupby("theme_id", as_index=False)
         .tail(1)
-        .rename(columns={"composite_score": "prior_composite_score", "avg_1m": "prior_avg_1m"})
+        .rename(
+            columns={
+                "composite_score": "prior_composite_score",
+                "avg_1w": "prior_avg_1w",
+                "avg_1m": "prior_avg_1m",
+                "positive_1m_breadth_pct": "prior_breadth_1m",
+            }
+        )
     )
-    return prior_rows[["theme_id", "prior_composite_score", "prior_avg_1m"]], latest_date, prior_date
+    return prior_rows[
+        [
+            "theme_id",
+            "prior_composite_score",
+            "prior_avg_1w",
+            "prior_avg_1m",
+            "prior_breadth_1m",
+        ]
+    ], latest_date, prior_date
 
 
-def _format_daily_delta_value(value, prior_value) -> str:
+def _format_daily_delta_value(value, prior_value, *, is_percent: bool = False) -> str:
     if value is None or pd.isna(value):
         return "-"
-    rendered = f"{float(value):.2f}"
+    suffix = "%" if is_percent else ""
+    rendered = f"{float(value):.2f}{suffix}"
     if prior_value is None or pd.isna(prior_value):
         return rendered
     delta = float(value) - float(prior_value)
-    return f"{rendered} ({delta:+.2f})"
+    return f"{rendered} ({delta:+.2f}{suffix})"
 
 
 def _apply_daily_delta_display(
-    leaderboard_df: pd.DataFrame,
+    display_df: pd.DataFrame,
     prior_lookup: pd.DataFrame,
     *,
-    avg_1m_source: pd.DataFrame | None = None,
+    value_map: dict[str, str],
+    percent_cols: set[str] | None = None,
 ) -> pd.DataFrame:
-    if leaderboard_df.empty:
-        return leaderboard_df
+    if display_df.empty:
+        return display_df
 
-    display_df = leaderboard_df.copy()
-    if avg_1m_source is not None and "avg_1m" not in display_df.columns:
-        display_df = display_df.merge(avg_1m_source[["theme_id", "avg_1m"]], on="theme_id", how="left")
+    out = display_df.copy()
     if not prior_lookup.empty:
-        display_df = display_df.merge(prior_lookup, on="theme_id", how="left")
+        out = out.merge(prior_lookup, on="theme_id", how="left")
     else:
-        display_df["prior_composite_score"] = pd.NA
-        display_df["prior_avg_1m"] = pd.NA
+        for prior_col in value_map.values():
+            out[prior_col] = pd.NA
 
-    if "composite_score" in display_df.columns:
-        display_df["composite_score"] = display_df.apply(
-            lambda row: _format_daily_delta_value(row.get("composite_score"), row.get("prior_composite_score")),
+    percent_cols = percent_cols or set()
+    for value_col, prior_col in value_map.items():
+        if value_col not in out.columns:
+            continue
+        out[value_col] = out.apply(
+            lambda row: _format_daily_delta_value(
+                row.get(value_col),
+                row.get(prior_col),
+                is_percent=value_col in percent_cols,
+            ),
             axis=1,
         )
-    if "avg_1m" in display_df.columns:
-        display_df["avg_1m"] = display_df.apply(
-            lambda row: _format_daily_delta_value(row.get("avg_1m"), row.get("prior_avg_1m")),
-            axis=1,
-        )
-    return display_df.drop(columns=[col for col in ["prior_composite_score", "prior_avg_1m"] if col in display_df.columns])
+
+    return out.drop(columns=[col for col in set(value_map.values()) if col in out.columns])
+
+
+def _format_plain_value(value, *, is_percent: bool = False):
+    if value is None or pd.isna(value):
+        return "-"
+    if isinstance(value, str):
+        return value
+    suffix = "%" if is_percent else ""
+    return f"{float(value):.2f}{suffix}"
+
+
+def _apply_plain_value_formatting(display_df: pd.DataFrame, *, percent_cols: set[str]) -> pd.DataFrame:
+    if display_df.empty:
+        return display_df
+    out = display_df.copy()
+    for col in percent_cols:
+        if col not in out.columns:
+            continue
+        out[col] = out[col].apply(lambda value: _format_plain_value(value, is_percent=True))
+    return out
 
 
 def _build_historical_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tuple[object, str | None]:
@@ -226,14 +279,39 @@ def _apply_dropdown_selection(id_by_label: dict[str, int]) -> None:
         _set_theme_selection(int(id_by_label[str(label)]), str(label), "manual_dropdown")
 
 
-def _render_leaderboard(title: str, key_prefix: str, leaderboard_df, label_by_id: dict[int, str], show_advanced: bool):
+def _render_leaderboard(
+    title: str,
+    key_prefix: str,
+    leaderboard_df,
+    label_by_id: dict[int, str],
+    show_advanced: bool,
+    *,
+    show_daily_deltas: bool = False,
+    prior_lookup: pd.DataFrame | None = None,
+    performance_prior_col: str | None = None,
+):
     st.markdown(f"**{title}**")
     st.caption(
         "Ranked by performance first, then momentum score, then rank improvement. "
         "This is a historical end-of-window table, so `performance` is the selected boundary-window snapshot metric, not a current eligible/capped rank metric. "
         "Breadth is contextual only and does not determine rank."
     )
-    display_df = _display_theme_table(leaderboard_df)
+    display_base = leaderboard_df
+    if show_daily_deltas:
+        value_map = {}
+        if performance_prior_col:
+            value_map["performance"] = performance_prior_col
+        if value_map:
+            display_base = _apply_daily_delta_display(
+                leaderboard_df,
+                prior_lookup if prior_lookup is not None else pd.DataFrame(),
+                value_map=value_map,
+                percent_cols={"performance"},
+            )
+    display_df = _apply_plain_value_formatting(
+        _display_theme_table(display_base),
+        percent_cols={"performance", "breadth_1m"},
+    )
     visible_cols = ["rank", "theme", "category", "performance", "momentum_score"]
     if show_advanced:
         visible_cols.extend(["rank_change", "breadth_1m"])
@@ -318,26 +396,40 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, sh
     )
     prior_daily_lookup = prior_lookup if prior_lookup is not None else pd.DataFrame()
     display_df = _display_theme_table(
-        _apply_daily_delta_display(leadership_df, prior_daily_lookup) if show_daily_deltas else leadership_df
+        _apply_daily_delta_display(
+            leadership_df,
+            prior_daily_lookup,
+            value_map={
+                "composite_score": "prior_composite_score",
+                "avg_1w": "prior_avg_1w",
+                "avg_1m": "prior_avg_1m",
+            },
+            percent_cols={"avg_1w", "avg_1m"},
+        )
+        if show_daily_deltas
+        else leadership_df
     )
+    display_df = _apply_plain_value_formatting(
+        display_df,
+        percent_cols={"avg_1w", "avg_1m", "avg_3m", "breadth_1m", "eligible_breadth_pct"},
+    )
+    visible_cols = [
+        "rank",
+        "theme",
+        "category",
+        "composite_score",
+        "avg_1w",
+        "avg_1m",
+        "avg_3m",
+        "breadth_1m",
+        "ticker_count",
+        "eligible_contributor_count",
+        "eligible_breadth_pct",
+        "leadership_quality",
+    ]
     event = render_dataframe(
         "current_leadership",
-        display_df[
-            [
-                "rank",
-                "theme",
-                "category",
-                "composite_score",
-                "avg_1w",
-                "avg_1m",
-                "avg_3m",
-                "breadth_1m",
-                "ticker_count",
-                "eligible_contributor_count",
-                "eligible_breadth_pct",
-                "leadership_quality",
-            ]
-        ],
+        display_df[visible_cols],
         width="stretch",
         hide_index=True,
         on_select="rerun",
@@ -366,7 +458,7 @@ def _render_current_performance(
     *,
     show_daily_deltas: bool = False,
     prior_lookup: pd.DataFrame | None = None,
-    current_theme_metrics: pd.DataFrame | None = None,
+    metric_col: str,
 ) -> None:
     st.markdown(f"**{title}**")
     st.caption(
@@ -375,7 +467,16 @@ def _render_current_performance(
     )
     prior_daily_lookup = prior_lookup if prior_lookup is not None else pd.DataFrame()
     display_base = (
-        _apply_daily_delta_display(leaderboard_df, prior_daily_lookup, avg_1m_source=current_theme_metrics)
+        _apply_daily_delta_display(
+            leaderboard_df,
+            prior_daily_lookup,
+            value_map={
+                "composite_score": "prior_composite_score",
+                "avg_1w": "prior_avg_1w",
+                "avg_1m": "prior_avg_1m",
+            },
+            percent_cols={"avg_1w", "avg_1m"},
+        )
         if show_daily_deltas
         else leaderboard_df
     )
@@ -386,14 +487,30 @@ def _render_current_performance(
         "category",
         "performance",
         "composite_score",
-        "breadth_1m",
-        "ticker_count",
-        "eligible_contributor_count",
-        "eligible_breadth_pct",
-        "leadership_quality",
     ]
-    if show_daily_deltas and "avg_1m" in display_df.columns:
-        visible_cols.insert(4, "avg_1m")
+    if show_daily_deltas:
+        extra_cols: list[str] = []
+        if "avg_1w" in display_df.columns and metric_col != "avg_1w":
+            extra_cols.append("avg_1w")
+        if "avg_1m" in display_df.columns and metric_col != "avg_1m":
+            extra_cols.append("avg_1m")
+        insert_at = len(visible_cols)
+        for col in extra_cols:
+            visible_cols.insert(insert_at, col)
+            insert_at += 1
+    display_df = _apply_plain_value_formatting(
+        display_df,
+        percent_cols={"performance", "avg_1w", "avg_1m", "breadth_1m", "eligible_breadth_pct"},
+    )
+    visible_cols.extend(
+        [
+            "breadth_1m",
+            "ticker_count",
+            "eligible_contributor_count",
+            "eligible_breadth_pct",
+            "leadership_quality",
+        ]
+    )
     event = render_dataframe(
         f"{key_prefix}_current",
         display_df[visible_cols],
@@ -591,28 +708,24 @@ with explore_tab:
     leadership_df = build_current_leadership_table(current_rankings, top_k=12)
     current_1w_df = build_current_performance_table(current_theme_metrics, "avg_1w", top_k=10)
     current_1m_df = build_current_performance_table(current_theme_metrics, "avg_1m", top_k=10)
-    daily_delta_lookup, delta_latest_date, delta_prior_date = _resolve_prior_daily_endpoint(momentum_1m.get("history", pd.DataFrame()))
-    show_daily_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas")
-    if show_daily_deltas:
-        if delta_prior_date is not None:
-            st.caption(
-                f"Daily deltas compare current Themes metrics against the prior daily movement endpoint `{delta_prior_date}`. "
-                f"The latest movement-history endpoint available for this comparison is `{delta_latest_date}`."
-            )
-        else:
-            st.caption(
-                "Daily deltas need at least two distinct daily movement endpoints. "
-                "Current values remain shown, and missing prior-day comparisons are left blank."
-            )
+    current_delta_lookup, current_delta_latest_date, current_delta_prior_date = _resolve_prior_daily_endpoint(momentum_1m.get("history", pd.DataFrame()))
+    movement_1w_delta_lookup, movement_1w_latest_date, movement_1w_prior_date = _resolve_prior_daily_endpoint(momentum_1w.get("history", pd.DataFrame()))
+    movement_1m_delta_lookup, movement_1m_latest_date, movement_1m_prior_date = _resolve_prior_daily_endpoint(momentum_1m.get("history", pd.DataFrame()))
 
     if leadership_df.empty:
         st.info("No active theme leadership data is available yet.")
     else:
+        show_leadership_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_leadership")
+        if show_leadership_deltas:
+            if current_delta_prior_date is not None:
+                st.caption(f"Current Market Leadership deltas compare against the prior daily movement endpoint `{current_delta_prior_date}`.")
+            else:
+                st.caption("Current Market Leadership deltas need two distinct daily endpoints; missing prior-day comparisons are left blank.")
         _render_current_leadership(
             leadership_df,
             label_by_id,
-            show_daily_deltas=show_daily_deltas,
-            prior_lookup=daily_delta_lookup,
+            show_daily_deltas=show_leadership_deltas,
+            prior_lookup=current_delta_lookup,
         )
 
     st.divider()
@@ -620,6 +733,12 @@ with explore_tab:
     st.caption("These are current live/preferred-source theme rankings, hardened for constituent eligibility, outlier control, and minimum contributor count. They answer strongest-now by one window, not strongest historical movement.")
     current_c1, current_c2 = st.columns(2)
     with current_c1:
+        show_current_1w_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_current_1w")
+        if show_current_1w_deltas:
+            if current_delta_prior_date is not None:
+                st.caption(f"Current 1W deltas compare against the prior daily movement endpoint `{current_delta_prior_date}`.")
+            else:
+                st.caption("Current 1W deltas need two distinct daily endpoints; missing prior-day comparisons are left blank.")
         if current_1w_df.empty:
             st.warning("Top Themes - Current 1W: No themes currently meet the eligible-contributor threshold.")
         else:
@@ -628,11 +747,17 @@ with explore_tab:
                 "current_top_1w",
                 current_1w_df,
                 label_by_id,
-                show_daily_deltas=show_daily_deltas,
-                prior_lookup=daily_delta_lookup,
-                current_theme_metrics=current_theme_metrics,
+                show_daily_deltas=show_current_1w_deltas,
+                prior_lookup=current_delta_lookup,
+                metric_col="avg_1w",
             )
     with current_c2:
+        show_current_1m_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_current_1m")
+        if show_current_1m_deltas:
+            if current_delta_prior_date is not None:
+                st.caption(f"Current 1M deltas compare against the prior daily movement endpoint `{current_delta_prior_date}`.")
+            else:
+                st.caption("Current 1M deltas need two distinct daily endpoints; missing prior-day comparisons are left blank.")
         if current_1m_df.empty:
             st.warning("Top Themes - Current 1M: No themes currently meet the eligible-contributor threshold.")
         else:
@@ -641,9 +766,9 @@ with explore_tab:
                 "current_top_1m",
                 current_1m_df,
                 label_by_id,
-                show_daily_deltas=show_daily_deltas,
-                prior_lookup=daily_delta_lookup,
-                current_theme_metrics=current_theme_metrics,
+                show_daily_deltas=show_current_1m_deltas,
+                prior_lookup=current_delta_lookup,
+                metric_col="avg_1m",
             )
 
     lb1, lb1_msg = _build_historical_leaderboard(momentum_1w, "avg_1w", "performance")
@@ -651,6 +776,13 @@ with explore_tab:
     st.divider()
     st.subheader("Theme Movement Snapshots")
     st.caption("These tables remain historical movement views built from snapshot windows. Use them to spot rotation and momentum change, not current live leadership; displayed `performance` is the end-of-window historical metric for that view.")
+    show_movement_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_movement")
+    if show_movement_deltas:
+        st.caption(
+            "Theme Movement Snapshot deltas compare each theme table against its own prior daily movement endpoint "
+            f"(1W: `{movement_1w_prior_date or '-'}` from latest `{movement_1w_latest_date or '-'}` | "
+            f"1M: `{movement_1m_prior_date or '-'}` from latest `{movement_1m_latest_date or '-'}`)."
+        )
     leaderboard_mode = st.radio("Top table view", ["Themes", "Categories"], horizontal=True, key="themes_leaderboard_mode")
     show_advanced_leaderboard = st.checkbox(
         "Show advanced leaderboard context",
@@ -674,7 +806,16 @@ with explore_tab:
                 _render_category_leaderboard("Top Categories — 1W", category_lb1)
                 _render_category_theme_drill("1W", category_breakdown_1w)
         else:
-            _render_leaderboard("Top 10 Themes - 1W", "top_1w", lb1, label_by_id, show_advanced_leaderboard)
+            _render_leaderboard(
+                "Top 10 Themes - 1W",
+                "top_1w",
+                lb1,
+                label_by_id,
+                show_advanced_leaderboard,
+                show_daily_deltas=show_movement_deltas,
+                prior_lookup=movement_1w_delta_lookup,
+                performance_prior_col="prior_avg_1w",
+            )
     with c2:
         if lb2 is None:
             st.warning(f"Top 10 Themes - 1M: {lb2_msg}")
@@ -685,7 +826,16 @@ with explore_tab:
                 _render_category_leaderboard("Top Categories — 1M", category_lb2)
                 _render_category_theme_drill("1M", category_breakdown_1m)
         else:
-            _render_leaderboard("Top 10 Themes - 1M", "top_1m", lb2, label_by_id, show_advanced_leaderboard)
+            _render_leaderboard(
+                "Top 10 Themes - 1M",
+                "top_1m",
+                lb2,
+                label_by_id,
+                show_advanced_leaderboard,
+                show_daily_deltas=show_movement_deltas,
+                prior_lookup=movement_1m_delta_lookup,
+                performance_prior_col="prior_avg_1m",
+            )
     if leaderboard_mode == "Categories":
         st.caption(
             "Category mode ranks categories from the full eligible theme set for the selected window, then shows the top category rows. "
