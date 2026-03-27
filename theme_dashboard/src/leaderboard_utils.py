@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import numpy as np
 
 from .config import CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS
 
@@ -119,7 +120,14 @@ def build_window_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -> 
     return ranked[["rank", "theme_id", "theme", perf_col, "momentum_score", "rank_change"]], None
 
 
-def build_current_leadership_table(rankings: pd.DataFrame, top_k: int = 12) -> pd.DataFrame:
+def build_current_leadership_table(
+    rankings: pd.DataFrame,
+    top_k: int = 12,
+    *,
+    score_col: str = "composite_score",
+    eligible_count_col: str = "eligible_composite_count",
+    output_score_col: str = "composite_score",
+) -> pd.DataFrame:
     if rankings.empty:
         return pd.DataFrame()
 
@@ -130,30 +138,48 @@ def build_current_leadership_table(rankings: pd.DataFrame, top_k: int = 12) -> p
         return pd.DataFrame()
 
     leadership = leadership.sort_values(
-        ["composite_score", "positive_1m_breadth_pct", "eligible_composite_count", "ticker_count", "theme"],
+        [score_col, "positive_1m_breadth_pct", eligible_count_col, "ticker_count", "theme"],
         ascending=[False, False, False, False, True],
     ).head(top_k).reset_index(drop=True)
     leadership["rank"] = leadership.index + 1
-    leadership["eligible_contributor_count"] = leadership["eligible_composite_count"]
+    leadership["eligible_contributor_count"] = leadership[eligible_count_col]
     leadership["leadership_quality"] = leadership.apply(current_leadership_quality_label, axis=1)
-    leadership = leadership.rename(columns={"positive_1m_breadth_pct": "breadth_1m"})
-    return leadership[
-        [
-            "rank",
-            "theme_id",
-            "theme",
-            "category",
-            "composite_score",
-            "avg_1w",
-            "avg_1m",
-            "avg_3m",
-            "breadth_1m",
-            "ticker_count",
-            "eligible_contributor_count",
-            "eligible_breadth_pct",
-            "leadership_quality",
-        ]
+    if "current_momentum_score" not in leadership.columns:
+        leadership["current_momentum_score"] = np.nan
+    if "eligible_standardized_count" not in leadership.columns:
+        leadership["eligible_standardized_count"] = np.nan
+    if "eligible_momentum_count" not in leadership.columns:
+        leadership["eligible_momentum_count"] = np.nan
+    if score_col == "current_momentum_score" and output_score_col != "current_momentum_score":
+        leadership["current_momentum_score_context"] = leadership["current_momentum_score"]
+    elif score_col != "current_momentum_score" and output_score_col == "current_momentum_score":
+        leadership["current_momentum_score"] = leadership[score_col]
+    leadership = leadership.rename(columns={score_col: output_score_col, "positive_1m_breadth_pct": "breadth_1m"})
+    if "current_momentum_score" not in leadership.columns and "current_momentum_score_context" in leadership.columns:
+        leadership["current_momentum_score"] = leadership["current_momentum_score_context"]
+    ordered_cols = [
+        "rank",
+        "theme_id",
+        "theme",
+        "category",
+        "current_momentum_score",
+        output_score_col,
+        "avg_1w",
+        "avg_1m",
+        "avg_3m",
+        "breadth_1m",
+        "ticker_count",
+        "eligible_contributor_count",
+        "eligible_standardized_count",
+        "eligible_momentum_count",
+        "eligible_breadth_pct",
+        "leadership_quality",
     ]
+    deduped_cols: list[str] = []
+    for col in ordered_cols:
+        if col not in deduped_cols:
+            deduped_cols.append(col)
+    return leadership[deduped_cols]
 
 
 def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k: int = 10) -> pd.DataFrame:
@@ -176,13 +202,18 @@ def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k
         return pd.DataFrame()
 
     current["eligible_contributor_count"] = current[eligible_count_col]
+    current["performance"] = current[perf_col]
     current = current.sort_values(
         [perf_col, "composite_score", "eligible_contributor_count", "eligible_breadth_pct", "theme"],
         ascending=[False, False, False, False, True],
     ).head(top_k).reset_index(drop=True)
     current["rank"] = current.index + 1
     current["leadership_quality"] = current.apply(current_leadership_quality_label, axis=1)
-    current = current.rename(columns={perf_col: "performance", "positive_1m_breadth_pct": "breadth_1m"})
+    if "current_momentum_score" not in current.columns:
+        current["current_momentum_score"] = np.nan
+    if "avg_3m" not in current.columns:
+        current["avg_3m"] = np.nan
+    current = current.rename(columns={"positive_1m_breadth_pct": "breadth_1m"})
     return current[
         [
             "rank",
@@ -190,6 +221,10 @@ def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k
             "theme",
             "category",
             "performance",
+            "avg_1w",
+            "avg_1m",
+            "avg_3m",
+            "current_momentum_score",
             "composite_score",
             "breadth_1m",
             "ticker_count",

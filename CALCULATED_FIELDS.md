@@ -48,9 +48,13 @@ Theme-level current ranking fields:
 - `eligible_ticker_count = count of current eligible tickers`
 - `eligible_1w_count`, `eligible_1m_count`, `eligible_3m_count` = count of eligible non-null contributors by window
 - `eligible_composite_count = count of tickers eligible for all 3 windows`
+- `eligible_standardized_count = count of tickers eligible for both 1W and 1M`
 - `eligible_breadth_pct = eligible_ticker_count / ticker_count * 100`
 - `avg_1w`, `avg_1m`, `avg_3m` = mean of capped eligible returns
 - `positive_1w_breadth_pct`, `positive_1m_breadth_pct`, `positive_3m_breadth_pct` = percent of eligible non-null raw returns above zero
+- `legacy_composite_score = legacy branch composite retained for comparison`
+- `standardized_base_strength_score`, `standardized_participation_ratio`, `standardized_participation_factor`, `standardized_guardrail_factor`, `standardized_recovery_factor`, `standardized_composite_score` = staged validation fields for the new standardized baseline
+- `current_momentum_raw_score`, `current_momentum_quality_factor`, `current_momentum_score` = staged validation fields for the new current-thrust momentum model
 
 Composite score:
 
@@ -70,6 +74,64 @@ composite_score =
 Important nuance:
 - the confidence factor uses `ticker_count`, not `eligible_composite_count`
 - `composite_score` is set to null when `eligible_composite_count == 0`
+
+Standardized composite score validation fields:
+
+```text
+standardized_base_strength_score =
+    0.30 * avg_1w
+  + 0.70 * avg_1m
+
+standardized_participation_ratio =
+    eligible_standardized_count / max(ticker_count, 1)
+
+standardized_participation_factor =
+    clip(0.50 + standardized_participation_ratio, 0.50, 1.00)
+
+standardized_guardrail_factor =
+    1.00                                                         when avg_3m >= -10
+    1.00 - (((-10 - avg_3m) / 10) * 0.35)                       when -20 <= avg_3m < -10
+    max(0.30, 0.65 - (((-20 - avg_3m) / 10) * 0.35))            when avg_3m < -20
+
+standardized_recovery_factor =
+    1.00                                                         when avg_3m >= -10
+    clip(standardized_base_strength_score / 15.0, 0.50, 1.00)   when avg_3m < -10
+
+standardized_composite_score =
+    standardized_base_strength_score
+  * standardized_participation_factor
+  * standardized_guardrail_factor
+  * standardized_recovery_factor
+```
+
+Notes:
+- 3M is not a weighted input in the staged standardized score; it acts only as a two-zone soft guardrail
+- when 3M is weak, recent 1W/1M strength must clear a higher burden of proof to regain full credit
+- the participation adjustment is percentage-based and reaches full credit at roughly 50% participation
+- the legacy `composite_score` remains available as the comparison baseline on this branch
+
+Current momentum validation fields:
+
+```text
+current_momentum_raw_score =
+    0.70 * avg_1w
+  + 0.30 * avg_1m
+
+current_momentum_quality_factor =
+    1.00                                       when standardized_composite_score >= 10
+    0.60 + (((score - 5) / 5) * 0.40)         when 5 < standardized_composite_score < 10
+    0.60                                       when standardized_composite_score <= 5
+
+current_momentum_score =
+    current_momentum_raw_score
+  * current_momentum_quality_factor
+```
+
+Notes:
+- this is a current-thrust score, not the historical start/end `momentum_score` from Historical Performance
+- it stays close to raw current 1W leaders, but weak baseline themes only keep partial credit until their standardized composite improves
+- the Themes page exposes it in a localized `Current Momentum Validation` expander without replacing the default current 1W table
+- the Themes page now uses the standardized composite as its default visible `composite_score` / baseline-strength metric, while legacy composite remains available only in the validation/debug layer
 
 Current ranking minimum threshold:
 - `CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS` gates current leaderboard inclusion
@@ -127,6 +189,10 @@ Semantics:
 - `eligible_contributor_count = eligible_composite_count`
 - optional per-table Themes daily-delta toggles compare only `composite_score`, `avg_1w`, and `avg_1m` against the prior daily movement endpoint from the cached 1M movement history; when enabled, the page keeps those fields inline and adds the daily delta in parentheses beside the base value; default table ranking/sorting does not change
 - plain percentage fields on Themes tables render with `%` suffixes even when delta toggles are off
+- a localized `Standardized Composite Validation` expander on Themes compares the staged standardized score against the legacy baseline without replacing the default leadership table yet, including the staged `guardrail_factor` and `recovery_factor`
+- a localized `Current Momentum Validation` expander on Themes compares raw current 1W leaders against the staged current-thrust momentum model, alongside the standardized composite baseline and the momentum `quality_factor`
+- the main current Themes tables now show `momentum` next to `composite_score` as the trader-facing thrust-now versus baseline-strength pairing, while redundant eligible-count columns stay out of the default visible table layout
+- current 1W / current 1M tables expose `rank_change` only in the optional daily-delta view, where it reflects prior daily rank minus current rank for that same window metric
 
 ### Current Top Themes By Window
 
@@ -259,6 +325,35 @@ View type:
 Current ticker detail source path:
 - `theme_ticker_metrics(theme_id)`
 - `format_theme_ticker_table()`
+
+Selected-theme ticker detail scoring:
+- ticker-level `composite` now follows the same baseline-strength philosophy as the standardized theme composite, but without theme participation logic:
+
+```text
+ticker_base_strength =
+    0.30 * perf_1w
+  + 0.70 * perf_1m
+
+ticker_composite =
+    ticker_base_strength
+  * standardized_three_month_guardrail_factor(perf_3m)
+  * standardized_recovery_factor(ticker_base_strength, perf_3m)
+```
+
+- ticker-level `momentum` now follows the same thrust-now philosophy as theme current momentum:
+
+```text
+ticker_momentum_raw =
+    0.70 * perf_1w
+  + 0.30 * perf_1m
+
+ticker_momentum =
+    ticker_momentum_raw
+  * current_momentum_quality_factor(ticker_composite)
+```
+
+- these ticker scores are display-only detail enhancements on Themes; they do not change theme-level ranking formulas
+- the bottom selected-theme chart now shows ticker-level composite history for the current top 5 governed tickers in the selected theme, using existing preferred-source `ticker_history_last_n_snapshots()` rows when available
 
 Current summary cards:
 - `Governed tickers`

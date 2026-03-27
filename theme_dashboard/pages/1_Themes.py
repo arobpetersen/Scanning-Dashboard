@@ -1,5 +1,7 @@
 import time
 
+import altair as alt
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -16,7 +18,16 @@ from src.leaderboard_utils import (
     disambiguate_theme_labels,
 )
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
-from src.queries import baseline_status, ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
+from src.queries import baseline_status, ticker_history_last_n_snapshots, ticker_history_last_n_trading_days, ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
+from src.rankings import (
+    CURRENT_MOMENTUM_WEIGHTS,
+    current_momentum_quality_factor,
+    ticker_current_momentum_score,
+    ticker_standardized_composite_score,
+    standardized_participation_factor,
+    standardized_recovery_factor,
+    standardized_three_month_guardrail_factor,
+)
 from src.streamlit_utils import (
     clear_current_market_view_caches,
     db_cache_token,
@@ -38,7 +49,9 @@ from src.theme_selection import (
     SELECTED_THEME_LABEL_KEY,
     SELECTED_THEME_SOURCE_KEY,
     describe_selection_source,
+    prepare_replaceable_selectbox_widget_key,
     resolve_theme_selection,
+    rotate_replaceable_selectbox_widget,
     set_theme_selection_state,
     should_apply_selection_token,
 )
@@ -63,6 +76,9 @@ st.title("Themes")
 reset_perf_timings("themes")
 
 DAILY_HISTORICAL_APPEND_STALE_MINUTES = 45
+TICKER_COMPOSITE_CHART_TARGET_DAILY_POINTS = 20
+TICKER_COMPOSITE_CHART_TRADING_DAY_LOOKBACK = 140
+TICKER_COMPOSITE_CHART_RAW_SNAPSHOT_LIMIT = 160
 try:
     init_db()
     with get_conn() as conn:
@@ -141,6 +157,7 @@ def _resolve_prior_daily_endpoint(history: pd.DataFrame) -> tuple[pd.DataFrame, 
                 "prior_composite_score",
                 "prior_avg_1w",
                 "prior_avg_1m",
+                "prior_avg_3m",
                 "prior_breadth_1m",
             ]
         ), None, None
@@ -155,6 +172,7 @@ def _resolve_prior_daily_endpoint(history: pd.DataFrame) -> tuple[pd.DataFrame, 
                 "prior_composite_score",
                 "prior_avg_1w",
                 "prior_avg_1m",
+                "prior_avg_3m",
                 "prior_breadth_1m",
             ]
         ), available_dates[0] if available_dates else None, None
@@ -171,30 +189,46 @@ def _resolve_prior_daily_endpoint(history: pd.DataFrame) -> tuple[pd.DataFrame, 
                 "composite_score": "prior_composite_score",
                 "avg_1w": "prior_avg_1w",
                 "avg_1m": "prior_avg_1m",
+                "avg_3m": "prior_avg_3m",
                 "positive_1m_breadth_pct": "prior_breadth_1m",
             }
         )
     )
-    return prior_rows[
+    ranked_prior = prior_rows.copy()
+    ranked_prior["prior_rank_composite"] = ranked_prior["prior_composite_score"].rank(method="dense", ascending=False)
+    ranked_prior["prior_rank_1w"] = ranked_prior["prior_avg_1w"].rank(method="dense", ascending=False)
+    ranked_prior["prior_rank_1m"] = ranked_prior["prior_avg_1m"].rank(method="dense", ascending=False)
+    return ranked_prior[
         [
             "theme_id",
             "prior_composite_score",
             "prior_avg_1w",
             "prior_avg_1m",
+            "prior_avg_3m",
             "prior_breadth_1m",
+            "prior_rank_composite",
+            "prior_rank_1w",
+            "prior_rank_1m",
         ]
     ], latest_date, prior_date
 
 
-def _format_daily_delta_value(value, prior_value, *, is_percent: bool = False) -> str:
+def _format_daily_delta_value(
+    value,
+    prior_value,
+    *,
+    is_percent: bool = False,
+    value_decimals: int = 2,
+    delta_decimals: int = 2,
+) -> str:
     if value is None or pd.isna(value):
         return "-"
     suffix = "%" if is_percent else ""
-    rendered = f"{float(value):.2f}{suffix}"
+    rendered = f"{float(value):.{value_decimals}f}{suffix}"
     if prior_value is None or pd.isna(prior_value):
         return rendered
     delta = float(value) - float(prior_value)
-    return f"{rendered} ({delta:+.2f}{suffix})"
+    return f"{rendered} ({delta:+.{delta_decimals}f}{suffix})"
 
 
 def _apply_daily_delta_display(
@@ -203,13 +237,17 @@ def _apply_daily_delta_display(
     *,
     value_map: dict[str, str],
     percent_cols: set[str] | None = None,
+    value_decimals: int = 2,
+    percent_decimals: int = 2,
 ) -> pd.DataFrame:
     if display_df.empty:
         return display_df
 
     out = display_df.copy()
     if not prior_lookup.empty:
-        out = out.merge(prior_lookup, on="theme_id", how="left")
+        merge_cols = ["theme_id"] + [col for col in prior_lookup.columns if col != "theme_id" and col not in out.columns]
+        if len(merge_cols) > 1:
+            out = out.merge(prior_lookup[merge_cols], on="theme_id", how="left")
     else:
         for prior_col in value_map.values():
             out[prior_col] = pd.NA
@@ -223,6 +261,8 @@ def _apply_daily_delta_display(
                 row.get(value_col),
                 row.get(prior_col),
                 is_percent=value_col in percent_cols,
+                value_decimals=percent_decimals if value_col in percent_cols else value_decimals,
+                delta_decimals=percent_decimals if value_col in percent_cols else value_decimals,
             ),
             axis=1,
         )
@@ -230,34 +270,289 @@ def _apply_daily_delta_display(
     return out.drop(columns=[col for col in set(value_map.values()) if col in out.columns])
 
 
-def _format_plain_value(value, *, is_percent: bool = False):
+def _format_plain_value(value, *, is_percent: bool = False, decimals: int = 2):
     if value is None or pd.isna(value):
         return "-"
     if isinstance(value, str):
         return value
     suffix = "%" if is_percent else ""
-    return f"{float(value):.2f}{suffix}"
+    return f"{float(value):.{decimals}f}{suffix}"
 
 
-def _apply_plain_value_formatting(display_df: pd.DataFrame, *, percent_cols: set[str]) -> pd.DataFrame:
+def _apply_plain_value_formatting(
+    display_df: pd.DataFrame,
+    *,
+    percent_cols: set[str],
+    percent_decimals: int = 2,
+) -> pd.DataFrame:
     if display_df.empty:
         return display_df
     out = display_df.copy()
     for col in percent_cols:
         if col not in out.columns:
             continue
-        out[col] = out[col].apply(lambda value: _format_plain_value(value, is_percent=True))
+        out[col] = out[col].apply(
+            lambda value: _format_plain_value(value, is_percent=True, decimals=percent_decimals)
+        )
     return out
+
+
+def _current_table_column_config(columns: list[str], *, text_columns: set[str] | None = None) -> dict[str, object]:
+    configs: dict[str, object] = {}
+    text_columns = text_columns or set()
+    for column in columns:
+        if column in text_columns:
+            configs[column] = st.column_config.TextColumn(column, width="small")
+        elif column == "rank":
+            configs[column] = st.column_config.NumberColumn(column, format="%d", width="small")
+        elif column in {"theme"}:
+            configs[column] = st.column_config.TextColumn(column, width="small")
+        elif column in {"category"}:
+            configs[column] = st.column_config.TextColumn(column, width="small")
+        elif column in {"leadership_quality", "quality"}:
+            configs[column] = st.column_config.TextColumn(column, width="medium")
+        elif column in {"ticker_count", "tickers", "rank_change"}:
+            configs[column] = st.column_config.NumberColumn(column, format="%d", width="small")
+        elif column in {"current_momentum_score", "composite_score", "momentum", "composite"}:
+            configs[column] = st.column_config.NumberColumn(column, format="%.2f", width="small")
+        elif column in {"performance", "avg_1w", "avg_1m", "breadth_1m", "eligible_breadth_pct", "eligible %"}:
+            # These values are already rendered in percentage-point form like
+            # "17.9%" before they reach the dataframe, so keep them as text to
+            # avoid Streamlit applying fractional-percent scaling again.
+            configs[column] = st.column_config.TextColumn(column, width="small")
+    return configs
+
+
+def _historical_table_column_config(columns: list[str], *, text_columns: set[str] | None = None) -> dict[str, object]:
+    configs: dict[str, object] = {}
+    text_columns = text_columns or set()
+    for column in columns:
+        if column in text_columns:
+            configs[column] = st.column_config.TextColumn(column, width="small")
+        elif column == "rank":
+            configs[column] = st.column_config.NumberColumn(column, format="%d", width="small")
+        elif column in {"theme", "category"}:
+            configs[column] = st.column_config.TextColumn(column, width="small")
+        elif column in {"top_themes", "quality"}:
+            configs[column] = st.column_config.TextColumn(column, width="medium")
+        elif column in {"contributing_themes", "themes", "rank_change", "Δ rank"}:
+            configs[column] = st.column_config.NumberColumn(column, format="%d", width="small")
+        elif column in {"momentum_score", "momentum", "composite_score", "composite"}:
+            configs[column] = st.column_config.NumberColumn(column, format="%.2f", width="small")
+        elif column in {"performance", "avg_1w", "avg_1m", "avg_3m", "breadth_1m", "breadth", "eligible_breadth_pct", "eligible %"}:
+            configs[column] = st.column_config.TextColumn(column, width="small")
+    return configs
+
+
+def _format_rank_with_change(rank_value, prior_rank_value) -> str:
+    if rank_value is None or pd.isna(rank_value):
+        return "-"
+    rank_int = int(float(rank_value))
+    if prior_rank_value is None or pd.isna(prior_rank_value):
+        return f"{rank_int}"
+    rank_change = int(float(prior_rank_value) - float(rank_value))
+    return f"{rank_int} ({rank_change:+d})"
+
+
+def _apply_prior_current_model_scores(display_df: pd.DataFrame) -> pd.DataFrame:
+    if display_df.empty:
+        return display_df
+
+    out = display_df.copy()
+    required_cols = {
+        "prior_avg_1w",
+        "prior_avg_1m",
+        "prior_avg_3m",
+        "ticker_count",
+        "eligible_standardized_count",
+        "eligible_momentum_count",
+    }
+    if not required_cols.issubset(out.columns):
+        return out
+
+    prior_avg_1w = pd.to_numeric(out["prior_avg_1w"], errors="coerce")
+    prior_avg_1m = pd.to_numeric(out["prior_avg_1m"], errors="coerce")
+    prior_avg_3m = pd.to_numeric(out["prior_avg_3m"], errors="coerce")
+    ticker_count = pd.to_numeric(out["ticker_count"], errors="coerce").fillna(0.0)
+    eligible_standardized_count = pd.to_numeric(out["eligible_standardized_count"], errors="coerce").fillna(0.0)
+    eligible_momentum_count = pd.to_numeric(out["eligible_momentum_count"], errors="coerce").fillna(0.0)
+
+    prior_base_strength = 0.30 * prior_avg_1w + 0.70 * prior_avg_1m
+    participation_ratio = np.where(
+        ticker_count > 0,
+        eligible_standardized_count / ticker_count,
+        0.0,
+    )
+    participation_factor = pd.Series(participation_ratio, index=out.index).apply(standardized_participation_factor)
+    guardrail_factor = prior_avg_3m.apply(standardized_three_month_guardrail_factor)
+    recovery_factor = pd.DataFrame({"base": prior_base_strength, "avg_3m": prior_avg_3m}).apply(
+        lambda row: standardized_recovery_factor(row["base"], row["avg_3m"]),
+        axis=1,
+    )
+    out["prior_standardized_composite_score"] = np.where(
+        eligible_standardized_count > 0,
+        prior_base_strength * participation_factor * guardrail_factor * recovery_factor,
+        np.nan,
+    )
+
+    prior_momentum_raw = (
+        CURRENT_MOMENTUM_WEIGHTS["perf_1w"] * prior_avg_1w
+        + CURRENT_MOMENTUM_WEIGHTS["perf_1m"] * prior_avg_1m
+    )
+    prior_momentum_quality = pd.to_numeric(out["prior_standardized_composite_score"], errors="coerce").apply(
+        current_momentum_quality_factor
+    )
+    out["prior_current_momentum_score"] = np.where(
+        eligible_momentum_count > 0,
+        prior_momentum_raw * prior_momentum_quality,
+        np.nan,
+    )
+    out["prior_standardized_composite_score"] = pd.to_numeric(
+        out["prior_standardized_composite_score"], errors="coerce"
+    ).round(2)
+    out["prior_current_momentum_score"] = pd.to_numeric(
+        out["prior_current_momentum_score"], errors="coerce"
+    ).round(2)
+    return out
+
+
+def _apply_ticker_model_scores(ticker_df: pd.DataFrame) -> pd.DataFrame:
+    if ticker_df.empty:
+        return ticker_df
+
+    out = ticker_df.copy()
+    out["perf_1w"] = pd.to_numeric(out.get("perf_1w"), errors="coerce")
+    out["perf_1m"] = pd.to_numeric(out.get("perf_1m"), errors="coerce")
+    out["perf_3m"] = pd.to_numeric(out.get("perf_3m"), errors="coerce")
+    out["ticker_composite_score"] = out.apply(
+        lambda row: ticker_standardized_composite_score(row.get("perf_1w"), row.get("perf_1m"), row.get("perf_3m")),
+        axis=1,
+    )
+    out["ticker_momentum_score"] = out.apply(
+        lambda row: ticker_current_momentum_score(row.get("perf_1w"), row.get("perf_1m"), row.get("perf_3m")),
+        axis=1,
+    )
+    return out
+
+
+def _build_ticker_composite_history_chart_df(
+    conn,
+    ticker_df: pd.DataFrame,
+    *,
+    top_k: int = 5,
+    trading_day_lookback: int = TICKER_COMPOSITE_CHART_TRADING_DAY_LOOKBACK,
+) -> tuple[pd.DataFrame, list[str]]:
+    if ticker_df.empty or "ticker" not in ticker_df.columns or "ticker_composite_score" not in ticker_df.columns:
+        return pd.DataFrame(), []
+
+    top_tickers = (
+        ticker_df.dropna(subset=["ticker_composite_score"])
+        .sort_values(["ticker_composite_score", "ticker"], ascending=[False, True])
+        .head(top_k)["ticker"]
+        .astype(str)
+        .tolist()
+    )
+    if not top_tickers:
+        return pd.DataFrame(), []
+
+    history_frames: list[pd.DataFrame] = []
+    for ticker in top_tickers:
+        hist = ticker_history_last_n_trading_days(conn, ticker, trading_day_limit=trading_day_lookback)
+        using_daily_history = not hist.empty
+        if hist.empty:
+            hist = ticker_history_last_n_snapshots(conn, ticker, snapshot_limit=TICKER_COMPOSITE_CHART_RAW_SNAPSHOT_LIMIT)
+        if hist.empty:
+            continue
+        hist = _apply_ticker_model_scores(hist)
+        hist = hist.dropna(subset=["ticker_composite_score"]).copy()
+        if hist.empty:
+            continue
+        if using_daily_history:
+            hist["snapshot_date"] = pd.to_datetime(hist["snapshot_date"], errors="coerce").dt.date
+            hist = hist.dropna(subset=["snapshot_date"])
+            if hist.empty:
+                continue
+            hist = hist.sort_values(["ticker", "snapshot_date"])
+        else:
+            hist["snapshot_time"] = pd.to_datetime(hist["snapshot_time"], errors="coerce")
+            hist = hist.dropna(subset=["snapshot_time"])
+            if hist.empty:
+                continue
+            hist["snapshot_date"] = hist["snapshot_time"].dt.date
+            hist = (
+                hist.sort_values(["ticker", "snapshot_time"])
+                .groupby("snapshot_date", as_index=False)
+                .tail(1)
+                .sort_values("snapshot_time")
+            )
+        hist = hist[pd.to_datetime(hist["snapshot_date"], errors="coerce").dt.dayofweek < 5].copy()
+        if hist.empty:
+            continue
+        hist = hist.tail(TICKER_COMPOSITE_CHART_TARGET_DAILY_POINTS)
+        hist["ticker"] = str(ticker)
+        history_frames.append(hist[["snapshot_date", "ticker", "ticker_composite_score"]])
+
+    if not history_frames:
+        return pd.DataFrame(), top_tickers
+
+    combined = pd.concat(history_frames, ignore_index=True).sort_values(["snapshot_date", "ticker"])
+    if combined.empty:
+        return pd.DataFrame(), top_tickers
+    chart_df = combined.rename(columns={"snapshot_date": "date", "ticker_composite_score": "composite"}).copy()
+    chart_df["date"] = pd.to_datetime(chart_df["date"], errors="coerce")
+    chart_df = chart_df.dropna(subset=["date"])
+    return chart_df[["date", "ticker", "composite"]].sort_values(["date", "ticker"]), top_tickers
+
+
+def _render_ticker_composite_history_chart(chart_df: pd.DataFrame) -> None:
+    if chart_df.empty:
+        return
+    chart_display_df = chart_df.copy()
+    chart_display_df["date"] = pd.to_datetime(chart_display_df["date"], errors="coerce").dt.normalize()
+    chart_display_df = chart_display_df.dropna(subset=["date"])
+    if chart_display_df.empty:
+        return
+    chart = (
+        alt.Chart(chart_display_df)
+        .mark_line()
+        .encode(
+            x=alt.X(
+                "yearmonthdate(date):O",
+                sort=alt.SortField(field="date", order="ascending"),
+                axis=alt.Axis(title=None, labelAngle=0),
+            ),
+            y=alt.Y("composite:Q", title="Composite"),
+            color=alt.Color("ticker:N", title="Ticker"),
+            tooltip=[
+                alt.Tooltip("yearmonthdate(date):T", title="Date"),
+                alt.Tooltip("ticker:N", title="Ticker"),
+                alt.Tooltip("composite:Q", title="Composite", format=".2f"),
+            ],
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
 
 
 def _build_historical_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tuple[object, str | None]:
     ranked, msg = build_window_leaderboard(momentum, metric_col, top_k=10)
     if ranked.empty:
         return None, msg
+    ranked = ranked.rename(columns={metric_col: metric_label})
 
     latest = momentum["history"].sort_values(["snapshot_time", "theme"]).groupby("theme_id", as_index=False).tail(1)
     ranked = ranked.merge(
-        latest[["theme_id", "category", "positive_1m_breadth_pct"]],
+        latest[
+            [
+                "theme_id",
+                "category",
+                "avg_1w",
+                "avg_1m",
+                "avg_3m",
+                "composite_score",
+                "positive_1m_breadth_pct",
+                "ticker_count",
+            ]
+        ],
         on="theme_id",
         how="left",
         suffixes=("", "_latest"),
@@ -265,18 +560,45 @@ def _build_historical_leaderboard(momentum: dict, metric_col: str, metric_label:
     if "category_latest" in ranked.columns:
         ranked["category"] = ranked["category_latest"].where(ranked["category_latest"].notna(), ranked.get("category"))
         ranked = ranked.drop(columns=["category_latest"])
-    ranked = ranked.rename(columns={metric_col: metric_label, "positive_1m_breadth_pct": "breadth_1m"})
-    return ranked[["rank", "theme_id", "theme", "category", metric_label, "momentum_score", "rank_change", "breadth_1m"]], None
+    if "avg_3m" not in ranked.columns:
+        ranked["avg_3m"] = np.nan
+    if "composite_score" not in ranked.columns:
+        ranked["composite_score"] = np.nan
+    if "positive_1m_breadth_pct" not in ranked.columns:
+        ranked["positive_1m_breadth_pct"] = np.nan
+    if "ticker_count" not in ranked.columns:
+        ranked["ticker_count"] = np.nan
+    ranked["eligible_breadth_pct"] = ranked["positive_1m_breadth_pct"]
+    ranked["eligible_contributor_count"] = ranked["ticker_count"]
+    ranked["leadership_quality"] = ranked.apply(current_leadership_quality_label, axis=1)
+    return ranked[
+        [
+            "rank",
+            "theme_id",
+            "theme",
+            "category",
+            metric_label,
+            "avg_1w",
+            "avg_1m",
+            "avg_3m",
+            "momentum_score",
+            "composite_score",
+            "rank_change",
+            "eligible_breadth_pct",
+            "leadership_quality",
+        ]
+    ], None
 
 
 def _set_theme_selection(theme_id: int, label: str, source: str) -> None:
     set_theme_selection_state(st.session_state, theme_id, label, source)
 
 
-def _apply_dropdown_selection(id_by_label: dict[str, int]) -> None:
-    label = st.session_state.get(SELECTED_THEME_LABEL_KEY)
+def _apply_dropdown_selection(id_by_label: dict[str, int], widget_key: str) -> None:
+    label = st.session_state.get(widget_key)
     if label in id_by_label:
         _set_theme_selection(int(id_by_label[str(label)]), str(label), "manual_dropdown")
+        rotate_replaceable_selectbox_widget(st.session_state, SELECTED_THEME_LABEL_KEY)
 
 
 def _render_leaderboard(
@@ -289,37 +611,70 @@ def _render_leaderboard(
     show_daily_deltas: bool = False,
     prior_lookup: pd.DataFrame | None = None,
     performance_prior_col: str | None = None,
+    display_metric_col: str | None = None,
 ):
     st.markdown(f"**{title}**")
     st.caption(
         "Ranked by performance first, then momentum score, then rank improvement. "
-        "This is a historical end-of-window table, so `performance` is the selected boundary-window snapshot metric, not a current eligible/capped rank metric. "
+        "This is a historical end-of-window table, so the selected window metric still drives rank even though it is shown through the aligned avg columns rather than a separate `performance` column. "
         "Breadth is contextual only and does not determine rank."
     )
     display_base = leaderboard_df
     if show_daily_deltas:
         value_map = {}
-        if performance_prior_col:
-            value_map["performance"] = performance_prior_col
+        if performance_prior_col and display_metric_col:
+            value_map[display_metric_col] = performance_prior_col
         if value_map:
             display_base = _apply_daily_delta_display(
                 leaderboard_df,
                 prior_lookup if prior_lookup is not None else pd.DataFrame(),
                 value_map=value_map,
                 percent_cols={"performance"},
+                percent_decimals=1,
             )
+    display_df = _display_theme_table(display_base)
+    if show_advanced and "rank_change" in display_df.columns:
+        display_df["rank"] = display_df.apply(
+            lambda row: _format_rank_with_change(row.get("rank"), float(row.get("rank")) + float(row.get("rank_change")) if row.get("rank_change") is not None and not pd.isna(row.get("rank_change")) else pd.NA),
+            axis=1,
+        )
     display_df = _apply_plain_value_formatting(
-        _display_theme_table(display_base),
-        percent_cols={"performance", "breadth_1m"},
+        display_df,
+        percent_cols={"performance", "avg_1w", "avg_1m", "avg_3m", "eligible_breadth_pct"},
+        percent_decimals=1,
     )
-    visible_cols = ["rank", "theme", "category", "performance", "momentum_score"]
+    visible_cols = [
+        "rank",
+        "theme",
+        "category",
+        "avg_1w",
+        "avg_1m",
+        "avg_3m",
+        "momentum_score",
+        "composite_score",
+        "eligible_breadth_pct",
+        "leadership_quality",
+    ]
     if show_advanced:
-        visible_cols.extend(["rank_change", "breadth_1m"])
+        visible_cols.extend(["rank_change"])
+    visible_df = display_df[visible_cols].rename(
+        columns={
+            "momentum_score": "momentum",
+            "rank_change": "Δ rank",
+            "composite_score": "composite",
+            "eligible_breadth_pct": "eligible %",
+            "leadership_quality": "quality",
+        }
+    )
     event = render_dataframe(
         f"{key_prefix}_leaderboard",
-        display_df[visible_cols],
+        visible_df,
         width="stretch",
         hide_index=True,
+        column_config=_historical_table_column_config(
+            list(visible_df.columns),
+            text_columns={"rank"} if show_advanced else None,
+        ),
         on_select="rerun",
         selection_mode="single-cell",
         key=f"{key_prefix}_table",
@@ -341,11 +696,23 @@ def _render_leaderboard(
 
 def _render_category_leaderboard(title: str, leaderboard_df) -> None:
     st.markdown(f"**{title}**")
+    display_df = _apply_plain_value_formatting(
+        leaderboard_df.copy(),
+        percent_cols={"performance", "breadth_1m"},
+        percent_decimals=1,
+    ).rename(
+        columns={
+            "momentum_score": "momentum",
+            "breadth_1m": "breadth",
+            "contributing_themes": "themes",
+        }
+    )
     render_dataframe(
         title,
-        leaderboard_df[["rank", "category", "top_themes", "contributing_themes", "performance", "momentum_score", "breadth_1m"]],
+        display_df[["rank", "category", "performance", "momentum", "top_themes", "themes", "breadth"]],
         width="stretch",
         hide_index=True,
+        column_config=_historical_table_column_config(["rank", "category", "performance", "momentum", "top_themes", "themes", "breadth"]),
     )
     st.caption(
         "Category rows are built by grouping the full eligible theme set for the selected window by category. "
@@ -379,11 +746,17 @@ def _render_category_theme_drill(title: str, breakdown_df) -> None:
         display_rows = category_rows.copy()
         if "theme_display" in display_rows.columns:
             display_rows["theme"] = display_rows["theme_display"]
+        display_rows = _apply_plain_value_formatting(
+            display_rows,
+            percent_cols={"performance", "breadth_1m"},
+            percent_decimals=1,
+        ).rename(columns={"momentum_score": "momentum", "breadth_1m": "breadth"})
         render_dataframe(
             f"{title}_category_drill",
-            display_rows[["rank", "theme", "performance", "momentum_score", "breadth_1m"]],
+            display_rows[["rank", "theme", "performance", "momentum", "breadth"]],
             width="stretch",
             hide_index=True,
+            column_config=_historical_table_column_config(["rank", "theme", "performance", "momentum", "breadth"]),
         )
         st.caption("These are the underlying eligible themes for the selected category/window, sorted by the same theme-level metrics used to build the category summary.")
 
@@ -391,47 +764,76 @@ def _render_category_theme_drill(title: str, breakdown_df) -> None:
 def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, show_daily_deltas: bool = False, prior_lookup: pd.DataFrame | None = None) -> None:
     st.subheader("Current Market Leadership")
     st.caption(
-        "Ranks active themes by current confidence-adjusted composite strength using only eligible preferred-source contributors. "
-        "`eligible_contributors` shows how many names actually fed the current rank, while `eligible_breadth_pct` shows the share of governed members that passed live ranking filters."
+        "Ranks active themes by the current standardized composite baseline using only eligible preferred-source contributors. "
+        "This table keeps baseline strength, current momentum, and short-window performance adjacent so you can scan strength-now versus thrust-now without extra clutter."
     )
     prior_daily_lookup = prior_lookup if prior_lookup is not None else pd.DataFrame()
-    display_df = _display_theme_table(
-        _apply_daily_delta_display(
-            leadership_df,
-            prior_daily_lookup,
+    display_base = leadership_df
+    if show_daily_deltas and not prior_daily_lookup.empty:
+        display_base = leadership_df.merge(prior_daily_lookup, on="theme_id", how="left")
+        display_base = _apply_prior_current_model_scores(display_base)
+        display_base = _apply_daily_delta_display(
+            display_base,
+            display_base[["theme_id", "prior_current_momentum_score", "prior_standardized_composite_score"]],
             value_map={
-                "composite_score": "prior_composite_score",
+                "current_momentum_score": "prior_current_momentum_score",
+                "composite_score": "prior_standardized_composite_score",
+            },
+        )
+        display_base = _apply_daily_delta_display(
+            display_base,
+            display_base[["theme_id", "prior_avg_1w", "prior_avg_1m"]],
+            value_map={
                 "avg_1w": "prior_avg_1w",
                 "avg_1m": "prior_avg_1m",
             },
             percent_cols={"avg_1w", "avg_1m"},
+            percent_decimals=1,
         )
-        if show_daily_deltas
-        else leadership_df
-    )
+    display_df = _display_theme_table(display_base)
+    if show_daily_deltas and "prior_rank_composite" in display_df.columns:
+        display_df["rank"] = display_df.apply(
+            lambda row: _format_rank_with_change(row.get("rank"), row.get("prior_rank_composite")),
+            axis=1,
+        )
     display_df = _apply_plain_value_formatting(
         display_df,
-        percent_cols={"avg_1w", "avg_1m", "avg_3m", "breadth_1m", "eligible_breadth_pct"},
+        percent_cols={"avg_1w", "avg_1m", "avg_3m", "eligible_breadth_pct"},
+        percent_decimals=1,
     )
     visible_cols = [
         "rank",
         "theme",
         "category",
+        "current_momentum_score",
         "composite_score",
         "avg_1w",
         "avg_1m",
         "avg_3m",
-        "breadth_1m",
-        "ticker_count",
-        "eligible_contributor_count",
         "eligible_breadth_pct",
         "leadership_quality",
     ]
+    visible_df = display_df[visible_cols].rename(
+        columns={
+            "current_momentum_score": "momentum",
+            "composite_score": "composite",
+            "eligible_breadth_pct": "eligible %",
+            "leadership_quality": "quality",
+        }
+    )
     event = render_dataframe(
         "current_leadership",
-        display_df[visible_cols],
+        visible_df,
         width="stretch",
         hide_index=True,
+        column_config=_current_table_column_config(
+            list(visible_df.columns),
+            text_columns={"rank"} if show_daily_deltas else None,
+        ) | {
+            "theme": st.column_config.TextColumn("theme", width="small"),
+            "category": st.column_config.TextColumn("category", width="small"),
+            "quality": st.column_config.TextColumn("quality", width="small"),
+        },
         on_select="rerun",
         selection_mode="single-cell",
         key="current_leadership_table",
@@ -463,7 +865,7 @@ def _render_current_performance(
     st.markdown(f"**{title}**")
     st.caption(
         "Ranks current active themes on the selected window return using eligible preferred-source contributors only. "
-        "Displayed performance uses capped constituent returns for aggregation, but raw ticker rows remain unchanged in the detail table."
+        "The table is still ranked by the selected window return using capped constituent aggregation, while nearby avg, momentum, and composite columns give thrust-now and baseline-strength context without relying on extra count columns."
     )
     prior_daily_lookup = prior_lookup if prior_lookup is not None else pd.DataFrame()
     display_base = (
@@ -471,11 +873,12 @@ def _render_current_performance(
             leaderboard_df,
             prior_daily_lookup,
             value_map={
-                "composite_score": "prior_composite_score",
+                "composite_score": "prior_standardized_composite_score",
                 "avg_1w": "prior_avg_1w",
                 "avg_1m": "prior_avg_1m",
             },
             percent_cols={"avg_1w", "avg_1m"},
+            percent_decimals=1,
         )
         if show_daily_deltas
         else leaderboard_df
@@ -485,37 +888,48 @@ def _render_current_performance(
         "rank",
         "theme",
         "category",
-        "performance",
+        "avg_1w",
+        "avg_1m",
+        "avg_3m",
+        "current_momentum_score",
         "composite_score",
     ]
     if show_daily_deltas:
-        extra_cols: list[str] = []
-        if "avg_1w" in display_df.columns and metric_col != "avg_1w":
-            extra_cols.append("avg_1w")
-        if "avg_1m" in display_df.columns and metric_col != "avg_1m":
-            extra_cols.append("avg_1m")
-        insert_at = len(visible_cols)
-        for col in extra_cols:
-            visible_cols.insert(insert_at, col)
-            insert_at += 1
+        prior_rank_col = {"avg_1w": "prior_rank_1w", "avg_1m": "prior_rank_1m"}.get(metric_col)
+        if prior_rank_col and prior_rank_col in display_df.columns:
+            display_df["rank"] = display_df.apply(
+                lambda row: _format_rank_with_change(row.get("rank"), row.get(prior_rank_col)),
+                axis=1,
+            )
     display_df = _apply_plain_value_formatting(
         display_df,
-        percent_cols={"performance", "avg_1w", "avg_1m", "breadth_1m", "eligible_breadth_pct"},
+        percent_cols={"avg_1w", "avg_1m", "avg_3m", "eligible_breadth_pct"},
+        percent_decimals=1,
     )
     visible_cols.extend(
         [
-            "breadth_1m",
-            "ticker_count",
-            "eligible_contributor_count",
             "eligible_breadth_pct",
             "leadership_quality",
         ]
     )
+    visible_df = display_df[visible_cols].rename(
+        columns={
+            "current_momentum_score": "momentum",
+            "composite_score": "composite",
+            "eligible_breadth_pct": "eligible %",
+            "ticker_count": "tickers",
+            "leadership_quality": "quality",
+        }
+    )
     event = render_dataframe(
         f"{key_prefix}_current",
-        display_df[visible_cols],
+        visible_df,
         width="stretch",
         hide_index=True,
+        column_config=_current_table_column_config(
+            list(visible_df.columns),
+            text_columns={"rank"} if show_daily_deltas else None,
+        ),
         on_select="rerun",
         selection_mode="single-cell",
         key=f"{key_prefix}_current_table",
@@ -532,6 +946,264 @@ def _render_current_performance(
         if should_apply_selection_token(selection_token, st.session_state.get(handled_key)):
             _set_theme_selection(picked_theme_id, picked_label, key_prefix)
             st.session_state[handled_key] = selection_token
+
+
+def _render_standardized_composite_validation(
+    standardized_rankings: pd.DataFrame,
+    standardized_comparison: pd.DataFrame,
+) -> None:
+    with st.expander("Standardized Composite Validation", expanded=False):
+        st.caption(
+            "Validation view only: the Themes page above now uses the standardized composite as its default baseline, while this expander preserves legacy-vs-standardized comparison for debugging. "
+            "The standardized score uses 30% avg_1w, 70% avg_1m, a soft 3M guardrail, a recovery-strength burden of proof for weak 3M backdrops, and a participation-based adjustment instead of the fixed-size confidence baseline."
+        )
+
+        if standardized_rankings.empty:
+            st.info("No standardized composite rankings are available yet.")
+        else:
+            standardized_rankings = standardized_rankings.copy()
+            for col in (
+                "legacy_composite_score",
+                "standardized_participation_ratio",
+                "standardized_guardrail_factor",
+                "standardized_recovery_factor",
+            ):
+                if col not in standardized_rankings.columns:
+                    standardized_rankings[col] = np.nan
+            preview = build_current_leadership_table(
+                standardized_rankings,
+                top_k=12,
+                score_col="standardized_composite_score",
+                eligible_count_col="eligible_standardized_count",
+                output_score_col="standardized_composite_score",
+            ).merge(
+                standardized_rankings[
+                    [
+                        "theme_id",
+                        "legacy_composite_score",
+                        "standardized_participation_ratio",
+                        "standardized_guardrail_factor",
+                        "standardized_recovery_factor",
+                    ]
+                ],
+                on="theme_id",
+                how="left",
+            )
+            preview["standardized_participation_pct"] = (preview["standardized_participation_ratio"] * 100.0).round(2)
+            preview = _display_theme_table(preview)
+            preview = _apply_plain_value_formatting(
+                preview,
+                percent_cols={"avg_1w", "avg_1m", "avg_3m", "breadth_1m", "eligible_breadth_pct", "standardized_participation_pct"},
+            )
+            render_dataframe(
+                "standardized_composite_preview",
+                preview[
+                    [
+                        "rank",
+                        "theme",
+                        "category",
+                        "standardized_composite_score",
+                        "legacy_composite_score",
+                        "avg_1w",
+                        "avg_1m",
+                        "avg_3m",
+                        "standardized_participation_pct",
+                        "standardized_guardrail_factor",
+                        "standardized_recovery_factor",
+                    ]
+                ].rename(
+                    columns={
+                        "standardized_composite_score": "std_composite",
+                        "legacy_composite_score": "legacy_composite",
+                        "standardized_participation_pct": "participation_pct",
+                        "standardized_guardrail_factor": "guardrail_factor",
+                        "standardized_recovery_factor": "recovery_factor",
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+        if standardized_comparison.empty:
+            return
+
+        comparison = standardized_comparison.copy()
+        for col in (
+            "standardized_participation_ratio",
+            "standardized_guardrail_factor",
+            "standardized_recovery_factor",
+        ):
+            if col not in comparison.columns:
+                comparison[col] = np.nan
+        comparison["standardized_participation_pct"] = (comparison["standardized_participation_ratio"] * 100.0).round(2)
+        comparison["rank_shift_vs_legacy_abs"] = comparison["rank_shift_vs_legacy"].abs()
+        comparison = comparison.sort_values(
+            ["rank_shift_vs_legacy_abs", "rank_shift_vs_legacy", "theme"],
+            ascending=[False, False, True],
+            na_position="last",
+        ).head(15)
+        comparison = _display_theme_table(comparison)
+        comparison = _apply_plain_value_formatting(
+            comparison,
+            percent_cols={"avg_1w", "avg_1m", "avg_3m", "standardized_participation_pct"},
+        )
+        st.caption("Biggest standardized-vs-legacy rank differences in the currently eligible leadership set.")
+        render_dataframe(
+            "standardized_composite_comparison",
+            comparison[
+                [
+                    "theme",
+                    "category",
+                    "legacy_rank",
+                    "standardized_rank",
+                    "rank_shift_vs_legacy",
+                    "legacy_composite_score",
+                    "standardized_composite_score",
+                    "avg_1w",
+                    "avg_1m",
+                    "avg_3m",
+                    "standardized_participation_pct",
+                    "standardized_guardrail_factor",
+                    "standardized_recovery_factor",
+                ]
+            ].rename(
+                columns={
+                    "rank_shift_vs_legacy": "rank_shift",
+                    "legacy_composite_score": "legacy_composite",
+                    "standardized_composite_score": "std_composite",
+                    "standardized_participation_pct": "participation_pct",
+                    "standardized_guardrail_factor": "guardrail_factor",
+                    "standardized_recovery_factor": "recovery_factor",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+
+def _render_current_momentum_validation(
+    current_momentum_rankings: pd.DataFrame,
+    current_momentum_comparison: pd.DataFrame,
+) -> None:
+    with st.expander("Current Momentum Validation", expanded=False):
+        st.caption(
+            "Validation view only: current momentum is a current-thrust model, not the historical start/end momentum engine. "
+            "It uses 70% avg_1w, 30% avg_1m, then applies a soft standardized-composite quality factor so weak baseline themes need stronger recent thrust to rank cleanly."
+        )
+
+        if current_momentum_rankings.empty:
+            st.info("No current momentum rankings are available yet.")
+        else:
+            current_momentum_rankings = current_momentum_rankings.copy()
+            for col in (
+                "current_momentum_raw_score",
+                "current_momentum_quality_factor",
+                "standardized_composite_score",
+            ):
+                if col not in current_momentum_rankings.columns:
+                    current_momentum_rankings[col] = np.nan
+            preview = build_current_leadership_table(
+                current_momentum_rankings,
+                top_k=12,
+                score_col="current_momentum_score",
+                eligible_count_col="eligible_momentum_count",
+                output_score_col="momentum_leadership_score",
+            ).merge(
+                current_momentum_rankings[
+                    [
+                        "theme_id",
+                        "current_momentum_raw_score",
+                        "current_momentum_quality_factor",
+                        "standardized_composite_score",
+                    ]
+                ],
+                on="theme_id",
+                how="left",
+            )
+            preview = _display_theme_table(preview)
+            preview = _apply_plain_value_formatting(
+                preview,
+                percent_cols={"avg_1w", "avg_1m", "avg_3m", "breadth_1m", "eligible_breadth_pct"},
+            )
+            render_dataframe(
+                "current_momentum_preview",
+                preview[
+                    [
+                        "rank",
+                        "theme",
+                        "category",
+                        "momentum_leadership_score",
+                        "current_momentum_raw_score",
+                        "standardized_composite_score",
+                        "current_momentum_quality_factor",
+                        "avg_1w",
+                        "avg_1m",
+                    ]
+                ].rename(
+                    columns={
+                        "momentum_leadership_score": "momentum_score",
+                        "current_momentum_raw_score": "momentum_raw",
+                        "standardized_composite_score": "std_composite",
+                        "current_momentum_quality_factor": "quality_factor",
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+        if current_momentum_comparison.empty:
+            return
+
+        comparison = current_momentum_comparison.copy()
+        for col in (
+            "current_momentum_raw_score",
+            "current_momentum_quality_factor",
+            "current_momentum_score",
+            "standardized_composite_score",
+        ):
+            if col not in comparison.columns:
+                comparison[col] = np.nan
+        comparison["rank_shift_vs_1w_abs"] = comparison["rank_shift_vs_1w"].abs()
+        comparison = comparison.sort_values(
+            ["rank_shift_vs_1w_abs", "rank_shift_vs_1w", "theme"],
+            ascending=[False, False, True],
+            na_position="last",
+        ).head(15)
+        comparison = _display_theme_table(comparison)
+        comparison = _apply_plain_value_formatting(
+            comparison,
+            percent_cols={"avg_1w", "avg_1m"},
+        )
+        st.caption("Biggest current-momentum vs raw-current-1W rank differences in the currently eligible thrust set.")
+        render_dataframe(
+            "current_momentum_comparison",
+            comparison[
+                [
+                    "theme",
+                    "category",
+                    "current_1w_rank",
+                    "current_momentum_rank",
+                    "standardized_rank",
+                    "rank_shift_vs_1w",
+                    "avg_1w",
+                    "avg_1m",
+                    "current_momentum_score",
+                    "standardized_composite_score",
+                    "current_momentum_quality_factor",
+                ]
+            ].rename(
+                columns={
+                    "current_1w_rank": "raw_1w_rank",
+                    "current_momentum_rank": "momentum_rank",
+                    "rank_shift_vs_1w": "rank_shift",
+                    "standardized_composite_score": "std_composite",
+                    "current_momentum_score": "momentum_score",
+                    "current_momentum_quality_factor": "quality_factor",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
 
 
 explore_tab, manage_tab = st.tabs(["Explore", "Manage"])
@@ -556,8 +1228,16 @@ with explore_tab:
         st.session_state[SELECTED_THEME_SOURCE_KEY] = "default"
 
     current_snapshot = load_current_ranking_snapshot_cached(db_token)
-    current_theme_metrics = current_snapshot["theme_metrics"]
-    current_rankings = current_snapshot["rankings"]
+    current_theme_metrics = current_snapshot["theme_metrics"].copy()
+    if "standardized_composite_score" in current_theme_metrics.columns:
+        current_theme_metrics["composite_score"] = current_theme_metrics["standardized_composite_score"]
+    current_rankings = current_snapshot.get("standardized_rankings", current_snapshot["rankings"]).copy()
+    if "standardized_composite_score" in current_rankings.columns:
+        current_rankings["composite_score"] = current_rankings["standardized_composite_score"]
+    standardized_rankings = current_snapshot.get("standardized_rankings", pd.DataFrame())
+    standardized_comparison = current_snapshot.get("standardized_comparison", pd.DataFrame())
+    current_momentum_rankings = current_snapshot.get("current_momentum_rankings", pd.DataFrame())
+    current_momentum_comparison = current_snapshot.get("current_momentum_comparison", pd.DataFrame())
     momentum_1w = load_theme_momentum_cached(db_token, 7, top_n=20)
     momentum_1m = load_theme_momentum_cached(db_token, 30, top_n=20)
     baseline_row = baseline.iloc[0] if not baseline.empty else None
@@ -697,6 +1377,9 @@ with explore_tab:
         "Theme Movement tables use resolved historical window ends shown above, which can differ from the current snapshot clock."
     )
     st.caption(
+        "Default Themes-page `composite_score` now uses the standardized baseline: 30% avg_1w, 70% avg_1m, participation-aware, and 3M-skeptical without weighting 3M directly."
+    )
+    st.caption(
         "Reload latest DB state clears cached page analytics and rereads the database. "
         "It does not fetch market data, rerun refresh_runs, or rebuild historical snapshots."
     )
@@ -727,16 +1410,18 @@ with explore_tab:
             show_daily_deltas=show_leadership_deltas,
             prior_lookup=current_delta_lookup,
         )
+        _render_standardized_composite_validation(standardized_rankings, standardized_comparison)
 
     st.divider()
     st.subheader("Current Top Themes By Window")
-    st.caption("These are current live/preferred-source theme rankings, hardened for constituent eligibility, outlier control, and minimum contributor count. They answer strongest-now by one window, not strongest historical movement.")
+    st.caption("These are current live/preferred-source theme rankings, hardened for constituent eligibility, outlier control, and minimum contributor count. Their composite context now uses the standardized baseline, while the main ranking axis remains the selected current window.")
     current_c1, current_c2 = st.columns(2)
     with current_c1:
         show_current_1w_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_current_1w")
         if show_current_1w_deltas:
             if current_delta_prior_date is not None:
                 st.caption(f"Current 1W deltas compare against the prior daily movement endpoint `{current_delta_prior_date}`.")
+                st.caption("Optional `rank_change` appears here only in delta view and uses prior daily 1W rank versus current 1W rank.")
             else:
                 st.caption("Current 1W deltas need two distinct daily endpoints; missing prior-day comparisons are left blank.")
         if current_1w_df.empty:
@@ -756,6 +1441,7 @@ with explore_tab:
         if show_current_1m_deltas:
             if current_delta_prior_date is not None:
                 st.caption(f"Current 1M deltas compare against the prior daily movement endpoint `{current_delta_prior_date}`.")
+                st.caption("Optional `rank_change` appears here only in delta view and uses prior daily 1M rank versus current 1M rank.")
             else:
                 st.caption("Current 1M deltas need two distinct daily endpoints; missing prior-day comparisons are left blank.")
         if current_1m_df.empty:
@@ -770,6 +1456,7 @@ with explore_tab:
                 prior_lookup=current_delta_lookup,
                 metric_col="avg_1m",
             )
+    _render_current_momentum_validation(current_momentum_rankings, current_momentum_comparison)
 
     lb1, lb1_msg = _build_historical_leaderboard(momentum_1w, "avg_1w", "performance")
     lb2, lb2_msg = _build_historical_leaderboard(momentum_1m, "avg_1m", "performance")
@@ -815,6 +1502,7 @@ with explore_tab:
                 show_daily_deltas=show_movement_deltas,
                 prior_lookup=movement_1w_delta_lookup,
                 performance_prior_col="prior_avg_1w",
+                display_metric_col="avg_1w",
             )
     with c2:
         if lb2 is None:
@@ -835,6 +1523,7 @@ with explore_tab:
                 show_daily_deltas=show_movement_deltas,
                 prior_lookup=movement_1m_delta_lookup,
                 performance_prior_col="prior_avg_1m",
+                display_metric_col="avg_1m",
             )
     if leaderboard_mode == "Categories":
         st.caption(
@@ -845,12 +1534,18 @@ with explore_tab:
     st.divider()
 
     labels = list(options.keys())
+    theme_selector_widget_key = prepare_replaceable_selectbox_widget_key(
+        st.session_state,
+        SELECTED_THEME_LABEL_KEY,
+        labels,
+        selected_theme_label,
+    )
     selection = st.selectbox(
         "Theme detail view",
         labels,
-        key=SELECTED_THEME_LABEL_KEY,
+        key=theme_selector_widget_key,
         on_change=_apply_dropdown_selection,
-        args=(id_by_label,),
+        args=(id_by_label, theme_selector_widget_key),
     )
     theme_id = int(options[selection])
     st.caption(f"Selected from: {describe_selection_source(st.session_state.get(SELECTED_THEME_SOURCE_KEY))}")
@@ -859,6 +1554,10 @@ with explore_tab:
         ticker_df = theme_ticker_metrics(conn, theme_id)
         history_df = theme_snapshot_history(conn, theme_id, limit=50)
         theme_current_row = current_theme_metrics[current_theme_metrics["theme_id"] == theme_id].copy()
+
+    ticker_df = _apply_ticker_model_scores(ticker_df)
+    with get_conn() as conn:
+        ticker_composite_history_chart_df, top_composite_tickers = _build_ticker_composite_history_chart_df(conn, ticker_df)
 
     current_row = theme_current_row.iloc[0] if not theme_current_row.empty else None
     governed_count = int(current_row.get("ticker_count") or 0) if current_row is not None else int(len(ticker_df))
@@ -919,6 +1618,11 @@ with explore_tab:
                 display_ticker_df[perf_col] = display_ticker_df[perf_col].apply(
                     lambda v: display_or_dash(None) if v is None else (display_or_dash(None) if str(v) == "nan" else f"{float(v):.2f}%")
                 )
+        for score_col in ("ticker_composite_score", "ticker_momentum_score"):
+            if score_col in display_ticker_df.columns:
+                display_ticker_df[score_col] = display_ticker_df[score_col].apply(
+                    lambda v: display_or_dash(None) if v is None or str(v) == "nan" else f"{float(v):.2f}"
+                )
 
         cols = [
             c
@@ -928,6 +1632,8 @@ with explore_tab:
                 "perf_1w",
                 "perf_1m",
                 "perf_3m",
+                "ticker_composite_score",
+                "ticker_momentum_score",
                 "market_cap",
                 "avg_volume",
                 "dollar_volume",
@@ -942,6 +1648,8 @@ with explore_tab:
         ]
 
         rename_map = {
+            "ticker_composite_score": "composite",
+            "ticker_momentum_score": "momentum",
             "last_updated": "market_data_time",
             "snapshot_time": "snapshot_time",
             "latest_refresh_time": "last_refresh_time",
@@ -959,13 +1667,26 @@ with explore_tab:
         )
         render_dataframe("theme_ticker_view", view_df, width="stretch")
 
-    if not history_df.empty:
-        hist = history_df.sort_values("snapshot_time")
+    if not ticker_composite_history_chart_df.empty:
         st.caption(
-            "Selected-theme history shows preferred-source captured/reconstructed theme history for this theme. "
+            "Bottom chart shows ticker-level composite history for the current top 5 governed tickers in this theme, ranked by current ticker composite. "
+            "Ticker composite uses the same baseline-strength philosophy as the standardized theme composite: 30% 1W, 70% 1M, with a 3M skepticism layer."
+        )
+        _render_ticker_composite_history_chart(ticker_composite_history_chart_df)
+        st.caption(
+            f"Top composite tickers used for the chart: {', '.join(top_composite_tickers)}."
+        )
+    elif not ticker_df.empty:
+        st.info(
+            "Ticker composite history is unavailable for the current top governed tickers in this theme. "
+            "This can happen when recent ticker snapshot history is sparse or missing for the preferred source."
+        )
+
+    if not history_df.empty:
+        st.caption(
+            "Selected-theme history table below still shows preferred-source captured/reconstructed theme history for this theme. "
             "The movement tables above may prefer recent ticker-history-derived boundary rows when available, so short-window movement can differ without being a bug."
         )
-        st.line_chart(hist.set_index("snapshot_time")[["composite_score", "avg_1m", "positive_1m_breadth_pct"]])
         render_dataframe("theme_history_table", history_df, width="stretch")
 
 with manage_tab:

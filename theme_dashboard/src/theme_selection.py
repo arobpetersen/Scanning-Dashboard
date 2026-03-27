@@ -48,3 +48,17 @@ def set_theme_selection_state(session_state, theme_id: int, label: str, source: 
     session_state[SELECTED_THEME_ID_KEY] = int(theme_id)
     session_state[SELECTED_THEME_LABEL_KEY] = str(label)
     session_state[SELECTED_THEME_SOURCE_KEY] = str(source)
+
+
+def prepare_replaceable_selectbox_widget_key(session_state, base_key: str, options: list[str], current_value: str | None) -> str:
+    version_key = f"{base_key}__widget_version"
+    widget_key = f"{base_key}__widget__{int(session_state.get(version_key, 0))}"
+    current_label = str(current_value or "")
+    if current_label in options and session_state.get(widget_key) != current_label:
+        session_state[widget_key] = current_label
+    return widget_key
+
+
+def rotate_replaceable_selectbox_widget(session_state, base_key: str) -> None:
+    version_key = f"{base_key}__widget_version"
+    session_state[version_key] = int(session_state.get(version_key, 0)) + 1

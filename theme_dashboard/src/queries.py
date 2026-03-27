@@ -1198,6 +1198,43 @@ def ticker_history_last_n_snapshots(conn, ticker: str, snapshot_limit: int = 14)
     ).df()
 
 
+def ticker_history_last_n_trading_days(conn, ticker: str, trading_day_limit: int = 140) -> pd.DataFrame:
+    preferred_source = _preferred_ticker_history_source(conn)
+    if not preferred_source or not table_exists(conn, "ticker_daily_history"):
+        return pd.DataFrame()
+
+    history = conn.execute(
+        """
+        SELECT
+            ticker,
+            trading_date AS snapshot_date,
+            close,
+            market_data_source,
+            updated_at,
+            ROW_NUMBER() OVER (
+                PARTITION BY ticker, trading_date
+                ORDER BY updated_at DESC
+            ) AS rn
+        FROM ticker_daily_history
+        WHERE ticker = ?
+          AND market_data_source = ?
+        QUALIFY rn = 1
+        ORDER BY trading_date DESC
+        LIMIT ?
+        """,
+        [ticker.strip().upper(), preferred_source, int(trading_day_limit)],
+    ).df()
+    if history.empty:
+        return history
+
+    history = history.sort_values(["ticker", "snapshot_date"]).copy()
+    grouped = history.groupby("ticker")["close"]
+    history["perf_1w"] = ((grouped.transform(lambda s: s / s.shift(5))) - 1.0) * 100.0
+    history["perf_1m"] = ((grouped.transform(lambda s: s / s.shift(21))) - 1.0) * 100.0
+    history["perf_3m"] = ((grouped.transform(lambda s: s / s.shift(63))) - 1.0) * 100.0
+    return history[["ticker", "snapshot_date", "perf_1w", "perf_1m", "perf_3m", "market_data_source"]].copy()
+
+
 def latest_theme_snapshots(conn) -> pd.DataFrame:
     preferred_source = preferred_theme_snapshot_source(conn)
     if not preferred_source:

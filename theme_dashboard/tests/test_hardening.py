@@ -113,7 +113,19 @@ from src.scanner_research import (
 from src.streamlit_utils import _load_theme_inflections_cached, _load_theme_momentum_cached, resolve_valid_selectbox_value
 from src import streamlit_utils
 from src.eod_refresh import has_eod_run_for_date, run_scheduled_eod_refresh
-from src.rankings import _build_current_ranking_metrics, _compute_theme_metrics, compute_theme_rankings, theme_confidence_factor
+from src.rankings import (
+    _build_current_ranking_metrics,
+    _compute_theme_metrics,
+    current_momentum_quality_factor,
+    compute_current_ranking_snapshot,
+    compute_theme_rankings,
+    ticker_current_momentum_score,
+    ticker_standardized_composite_score,
+    standardized_participation_factor,
+    standardized_recovery_factor,
+    standardized_three_month_guardrail_factor,
+    theme_confidence_factor,
+)
 
 
 class TestLeaderboardUtils(unittest.TestCase):
@@ -880,6 +892,318 @@ class TestThemeConfidenceAdjustment(unittest.TestCase):
         self.assertEqual(float(out[out["theme"] == "Broad"]["composite_score"].iloc[0]), 9.0)
 
 
+class TestStandardizedCompositeScore(unittest.TestCase):
+    def test_standardized_participation_factor_uses_ratio_not_fixed_count(self):
+        self.assertEqual(float(standardized_participation_factor(0.50)), 1.0)
+        self.assertEqual(float(standardized_participation_factor(0.25)), 0.75)
+        self.assertEqual(float(standardized_participation_factor(0.10)), 0.60)
+
+    def test_standardized_three_month_guardrail_is_soft_penalty_not_weighted_component(self):
+        self.assertEqual(float(standardized_three_month_guardrail_factor(-10.0)), 1.0)
+        self.assertAlmostEqual(float(standardized_three_month_guardrail_factor(-15.0)), 0.825, places=6)
+        self.assertEqual(float(standardized_three_month_guardrail_factor(-20.0)), 0.65)
+        self.assertAlmostEqual(float(standardized_three_month_guardrail_factor(-25.0)), 0.475, places=6)
+        self.assertEqual(float(standardized_three_month_guardrail_factor(-30.0)), 0.30)
+        self.assertEqual(float(standardized_three_month_guardrail_factor(-35.0)), 0.30)
+
+    def test_standardized_recovery_factor_requires_standout_base_when_3m_is_weak(self):
+        self.assertEqual(float(standardized_recovery_factor(8.0, -8.0)), 1.0)
+        self.assertEqual(float(standardized_recovery_factor(15.0, -15.0)), 1.0)
+        self.assertAlmostEqual(float(standardized_recovery_factor(12.0, -15.0)), 0.80, places=6)
+        self.assertEqual(float(standardized_recovery_factor(5.0, -25.0)), 0.50)
+
+    def test_current_momentum_quality_factor_softly_penalizes_low_standardized_composite(self):
+        self.assertEqual(float(current_momentum_quality_factor(10.5)), 1.0)
+        self.assertAlmostEqual(float(current_momentum_quality_factor(7.5)), 0.80, places=6)
+        self.assertEqual(float(current_momentum_quality_factor(5.0)), 0.60)
+
+    def test_ticker_standardized_composite_score_uses_same_baseline_strength_philosophy(self):
+        self.assertAlmostEqual(float(ticker_standardized_composite_score(10.0, 20.0, 5.0)), 17.0, places=6)
+        self.assertLess(float(ticker_standardized_composite_score(10.0, 20.0, -25.0)), 17.0)
+
+    def test_ticker_current_momentum_score_uses_composite_quality_check(self):
+        stronger = float(ticker_current_momentum_score(16.0, 14.0, -8.0))
+        weaker = float(ticker_current_momentum_score(16.0, 6.0, -28.0))
+        self.assertGreater(stronger, weaker)
+
+    def test_build_current_ranking_metrics_exposes_standardized_composite_alongside_legacy(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Small but Participating",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "AAA",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 10.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 12.0,
+                    "perf_1m": 18.0,
+                    "perf_3m": -8.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Small but Participating",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "BBB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 11.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 10.0,
+                    "perf_1m": 16.0,
+                    "perf_3m": -8.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Small but Participating",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "CCC",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 12.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 8.0,
+                    "perf_1m": 14.0,
+                    "perf_3m": -8.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Small but Participating",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "DDD",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 13.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": None,
+                    "perf_1m": 12.0,
+                    "perf_3m": -8.0,
+                    "status": "active",
+                },
+            ]
+        )
+
+        out = _build_current_ranking_metrics(raw)
+
+        self.assertIn("legacy_composite_score", out.columns)
+        self.assertIn("standardized_composite_score", out.columns)
+        self.assertIn("eligible_standardized_count", out.columns)
+        self.assertEqual(int(out.iloc[0]["eligible_standardized_count"]), 3)
+        self.assertEqual(float(out.iloc[0]["standardized_participation_ratio"]), 0.75)
+        self.assertEqual(float(out.iloc[0]["standardized_participation_factor"]), 1.0)
+        self.assertEqual(float(out.iloc[0]["standardized_guardrail_factor"]), 1.0)
+        self.assertEqual(float(out.iloc[0]["standardized_recovery_factor"]), 1.0)
+        self.assertIn("current_momentum_score", out.columns)
+        self.assertIn("current_momentum_quality_factor", out.columns)
+        self.assertGreater(float(out.iloc[0]["standardized_composite_score"]), float(out.iloc[0]["legacy_composite_score"]))
+
+    def test_standardized_composite_requires_stronger_base_to_overcome_bad_3m(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Weak 3M But Standout",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "AAA",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 10.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 16.0,
+                    "perf_1m": 20.0,
+                    "perf_3m": -25.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Weak 3M But Standout",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "AAB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 11.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 14.0,
+                    "perf_1m": 18.0,
+                    "perf_3m": -25.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Weak 3M And Middling",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "BBB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 12.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 10.0,
+                    "perf_1m": 12.0,
+                    "perf_3m": -25.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Weak 3M And Middling",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "BBC",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 13.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 8.0,
+                    "perf_1m": 10.0,
+                    "perf_3m": -25.0,
+                    "status": "active",
+                },
+            ]
+        )
+
+        out = _build_current_ranking_metrics(raw).sort_values("standardized_composite_score", ascending=False).reset_index(drop=True)
+
+        self.assertEqual(out.iloc[0]["theme"], "Weak 3M But Standout")
+        self.assertEqual(float(out[out["theme"] == "Weak 3M But Standout"]["standardized_recovery_factor"].iloc[0]), 1.0)
+        self.assertAlmostEqual(
+            float(out[out["theme"] == "Weak 3M And Middling"]["standardized_recovery_factor"].iloc[0]),
+            0.69,
+            places=2,
+        )
+        self.assertGreater(
+            float(out[out["theme"] == "Weak 3M But Standout"]["standardized_composite_score"].iloc[0]),
+            float(out[out["theme"] == "Weak 3M And Middling"]["standardized_composite_score"].iloc[0]),
+        )
+
+    def test_current_momentum_uses_recent_thrust_with_standardized_quality_guardrail(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Low Quality Spike",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "AAA",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 10.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 20.0,
+                    "perf_1m": 6.0,
+                    "perf_3m": -28.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Low Quality Spike",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "AAB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 11.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 18.0,
+                    "perf_1m": 8.0,
+                    "perf_3m": -28.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Credible Thrust",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "BBB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 12.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 17.0,
+                    "perf_1m": 14.0,
+                    "perf_3m": -8.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Credible Thrust",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "BBC",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 13.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 15.0,
+                    "perf_1m": 12.0,
+                    "perf_3m": -8.0,
+                    "status": "active",
+                },
+            ]
+        )
+
+        out = _build_current_ranking_metrics(raw)
+
+        low_quality = out[out["theme"] == "Low Quality Spike"].iloc[0]
+        credible = out[out["theme"] == "Credible Thrust"].iloc[0]
+
+        self.assertGreater(float(low_quality["avg_1w"]), float(credible["avg_1w"]))
+        self.assertLess(float(low_quality["current_momentum_quality_factor"]), 1.0)
+        self.assertEqual(float(credible["current_momentum_quality_factor"]), 1.0)
+        self.assertGreater(float(credible["current_momentum_score"]), float(low_quality["current_momentum_score"]))
+
+    def test_standardized_composite_stays_null_when_no_pairwise_1w_1m_inputs_exist(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Missing Pairs",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "AAA",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 10.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": None,
+                    "perf_1m": 18.0,
+                    "perf_3m": -25.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Missing Pairs",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "BBB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 11.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 10.0,
+                    "perf_1m": None,
+                    "perf_3m": -25.0,
+                    "status": "active",
+                },
+            ]
+        )
+
+        out = _build_current_ranking_metrics(raw)
+
+        self.assertEqual(int(out.iloc[0]["eligible_standardized_count"]), 0)
+        self.assertTrue(pd.isna(out.iloc[0]["standardized_composite_score"]))
+
+
 class TestCurrentThemeRankingHardening(unittest.TestCase):
     def _build_conn(self):
         conn = duckdb.connect(":memory:")
@@ -1102,6 +1426,52 @@ class TestCurrentThemeRankingHardening(unittest.TestCase):
 
             self.assertEqual(out["theme"].tolist(), ["Quality"])
             self.assertEqual(int(out.iloc[0]["eligible_composite_count"]), 3)
+        finally:
+            conn.close()
+
+    def test_compute_current_ranking_snapshot_exposes_standardized_validation_outputs(self):
+        conn = self._build_conn()
+        try:
+            conn.execute("insert into theme_membership values (1, 'AAA'), (1, 'BBB'), (1, 'CCC'), (1, 'DDD')")
+            conn.execute("insert into theme_membership values (2, 'XXX'), (2, 'YYY'), (2, 'ZZZ')")
+            conn.execute(
+                """
+                insert into ticker_snapshots values
+                (1, 'AAA', 10, 14, 20, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'BBB', 11, 13, 19, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'CCC', 12, 12, 18, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'DDD', 13, null, 17, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'XXX', 10, 8, 10, 12, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'YYY', 10, 7, 9, 12, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'ZZZ', 10, 6, 8, 12, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live')
+                """
+            )
+            conn.execute(
+                """
+                insert into theme_snapshots(
+                    run_id, snapshot_time, theme_id, ticker_count,
+                    avg_1w, avg_1m, avg_3m,
+                    positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                    composite_score, snapshot_source
+                ) values
+                (1, '2026-03-12 22:00:00', 1, 4, 10, 15, -8, 75, 75, 75, 12, 'live'),
+                (1, '2026-03-12 22:00:00', 2, 3, 6, 9, 12, 100, 100, 100, 9, 'live')
+                """
+            )
+
+            snapshot = compute_current_ranking_snapshot(conn)
+
+            self.assertIn("standardized_rankings", snapshot)
+            self.assertIn("standardized_comparison", snapshot)
+            self.assertIn("current_momentum_rankings", snapshot)
+            self.assertIn("current_momentum_comparison", snapshot)
+            self.assertFalse(snapshot["standardized_rankings"].empty)
+            self.assertFalse(snapshot["standardized_comparison"].empty)
+            self.assertFalse(snapshot["current_momentum_rankings"].empty)
+            self.assertFalse(snapshot["current_momentum_comparison"].empty)
+            self.assertIn("rank_shift_vs_legacy", snapshot["standardized_comparison"].columns)
+            self.assertIn("standardized_recovery_factor", snapshot["standardized_comparison"].columns)
+            self.assertIn("current_momentum_quality_factor", snapshot["current_momentum_comparison"].columns)
         finally:
             conn.close()
 
@@ -2958,7 +3328,8 @@ class TestManualTickerSuppression(unittest.TestCase):
         page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
         content = page_source.read_text(encoding="utf-8")
 
-        self.assertIn("Selected-theme history shows preferred-source captured/reconstructed theme history", content)
+        self.assertIn("Bottom chart shows ticker-level composite history for the current top 5 governed tickers in this theme", content)
+        self.assertIn("Selected-theme history table below still shows preferred-source captured/reconstructed theme history", content)
         self.assertIn("movement tables above may prefer recent ticker-history-derived boundary rows", content)
         self.assertIn('c2.metric("Eligible/capped 1W"', content)
         self.assertIn('c3.metric("Eligible/capped 1M"', content)
@@ -2982,18 +3353,81 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn("Current 1W deltas compare against the prior daily movement endpoint", content)
         self.assertIn("Current 1M deltas compare against the prior daily movement endpoint", content)
         self.assertIn("Theme Movement Snapshot deltas compare each theme table against its own prior daily movement endpoint", content)
+        self.assertIn("def _historical_table_column_config(columns: list[str], *, text_columns: set[str] | None = None) -> dict[str, object]:", content)
+        self.assertIn('current_rankings = current_snapshot.get("standardized_rankings", current_snapshot["rankings"]).copy()', content)
+        self.assertIn('current_theme_metrics["composite_score"] = current_theme_metrics["standardized_composite_score"]', content)
+        self.assertIn('current_rankings["composite_score"] = current_rankings["standardized_composite_score"]', content)
+        self.assertIn('"composite_score": "prior_standardized_composite_score"', content)
         self.assertIn("Current Market Leadership deltas need two distinct daily endpoints; missing prior-day comparisons are left blank.", content)
-        self.assertIn('if "avg_1w" in display_df.columns and metric_col != "avg_1w":', content)
-        self.assertIn('if "avg_1m" in display_df.columns and metric_col != "avg_1m":', content)
-        self.assertIn('return f"{rendered} ({delta:+.2f}{suffix})"', content)
+        self.assertIn('"current_momentum_score"', content)
+        self.assertIn('"This table keeps baseline strength, current momentum, and short-window performance adjacent', content)
+        self.assertIn('"The table is still ranked by the selected window return using capped constituent aggregation', content)
+        self.assertIn("def _current_table_column_config(columns: list[str], *, text_columns: set[str] | None = None) -> dict[str, object]:", content)
+        self.assertIn('st.column_config.NumberColumn(column, format="%.2f", width="small")', content)
+        self.assertIn('st.column_config.TextColumn(column, width="small")', content)
+        self.assertIn('"current_momentum_score": "momentum"', content)
+        self.assertIn('"composite_score": "composite"', content)
+        self.assertIn('"eligible_breadth_pct": "eligible %"', content)
+        self.assertIn('"leadership_quality": "quality"', content)
+        self.assertIn('visible_cols = [\n        "rank",\n        "theme",\n        "category",\n        "current_momentum_score",', content)
+        self.assertIn('"avg_3m",', content)
+        self.assertIn('visible_cols = [', content)
+        self.assertIn('"category",', content)
+        self.assertIn('"avg_1w",', content)
+        self.assertIn('"avg_1m",', content)
+        self.assertIn('text_columns={"rank"} if show_daily_deltas else None', content)
+        self.assertIn('text_columns={"rank"} if show_advanced else None', content)
+        self.assertIn('"theme": st.column_config.TextColumn("theme", width="small")', content)
+        self.assertIn('"category": st.column_config.TextColumn("category", width="small")', content)
+        self.assertIn('"quality": st.column_config.TextColumn("quality", width="small")', content)
+        self.assertIn('avoid Streamlit applying fractional-percent scaling again', content)
+        self.assertIn('"prior_avg_3m"', content)
+        self.assertIn('"prior_rank_composite"', content)
+        self.assertIn("def _format_rank_with_change(rank_value, prior_rank_value) -> str:", content)
+        self.assertIn('"prior_rank_1w"', content)
+        self.assertIn('"prior_rank_1m"', content)
+        self.assertIn('lambda row: _format_rank_with_change(row.get("rank"), row.get("prior_rank_composite"))', content)
+        self.assertIn('"momentum_score": "momentum"', content)
+        self.assertIn('"rank_change": "Δ rank"', content)
+        self.assertIn('"composite_score": "composite"', content)
+        self.assertIn('"eligible_breadth_pct": "eligible %"', content)
+        self.assertIn('"leadership_quality": "quality"', content)
+        self.assertIn('"contributing_themes": "themes"', content)
+        self.assertIn('"avg_3m"', content)
+        self.assertIn('visible_cols.extend(["rank_change"])', content)
+        self.assertIn("def _apply_ticker_model_scores(ticker_df: pd.DataFrame) -> pd.DataFrame:", content)
+        self.assertIn("def _build_ticker_composite_history_chart_df(", content)
+        self.assertIn("TICKER_COMPOSITE_CHART_TARGET_DAILY_POINTS = 20", content)
+        self.assertIn("TICKER_COMPOSITE_CHART_TRADING_DAY_LOOKBACK = 140", content)
+        self.assertIn("TICKER_COMPOSITE_CHART_RAW_SNAPSHOT_LIMIT = 160", content)
+        self.assertIn("trading_day_lookback: int = TICKER_COMPOSITE_CHART_TRADING_DAY_LOOKBACK", content)
+        self.assertIn("ticker_history_last_n_trading_days(conn, ticker, trading_day_limit=trading_day_lookback)", content)
+        self.assertIn("if hist.empty:", content)
+        self.assertIn("ticker_history_last_n_snapshots(conn, ticker, snapshot_limit=TICKER_COMPOSITE_CHART_RAW_SNAPSHOT_LIMIT)", content)
+        self.assertIn("def _render_ticker_composite_history_chart(chart_df: pd.DataFrame) -> None:", content)
+        self.assertIn('hist["snapshot_date"] = hist["snapshot_time"].dt.date', content)
+        self.assertIn('.groupby("snapshot_date", as_index=False)', content)
+        self.assertIn('dt.dayofweek < 5', content)
+        self.assertIn('hist = hist.tail(TICKER_COMPOSITE_CHART_TARGET_DAILY_POINTS)', content)
+        self.assertIn('chart_df[["date", "ticker", "composite"]]', content)
+        self.assertIn('"yearmonthdate(date):O"', content)
+        self.assertIn("st.altair_chart(chart, use_container_width=True)", content)
+        self.assertIn('"ticker_composite_score": "composite"', content)
+        self.assertIn('"ticker_momentum_score": "momentum"', content)
+        self.assertIn("Bottom chart shows ticker-level composite history for the current top 5 governed tickers in this theme", content)
+        self.assertIn("Optional `rank_change` appears here only in delta view and uses prior daily 1W rank versus current 1W rank.", content)
+        self.assertIn("Optional `rank_change` appears here only in delta view and uses prior daily 1M rank versus current 1M rank.", content)
+        self.assertIn('display_df["rank"] = display_df.apply(', content)
+        self.assertIn('return f"{rendered} ({delta:+.{delta_decimals}f}{suffix})"', content)
         self.assertIn('suffix = "%" if is_percent else ""', content)
         self.assertIn("def _apply_daily_delta_display(", content)
-        self.assertIn("def _apply_plain_value_formatting(display_df: pd.DataFrame, *, percent_cols: set[str]) -> pd.DataFrame:", content)
-        self.assertIn('return f"{float(value):.2f}{suffix}"', content)
+        self.assertIn("def _apply_plain_value_formatting(", content)
+        self.assertIn('return f"{float(value):.{decimals}f}{suffix}"', content)
         self.assertIn('"avg_1w": "prior_avg_1w"', content)
         self.assertIn('"avg_1m": "prior_avg_1m"', content)
-        self.assertIn('"composite_score": "prior_composite_score"', content)
-        self.assertNotIn('"avg_3m": "prior_avg_3m"', content)
+        self.assertIn('"current_momentum_score": "prior_current_momentum_score"', content)
+        self.assertIn('"composite_score": "prior_standardized_composite_score"', content)
+        self.assertIn("def _apply_prior_current_model_scores(display_df: pd.DataFrame) -> pd.DataFrame:", content)
         self.assertNotIn('"breadth_1m": "prior_breadth_1m"', content)
         self.assertNotIn('"eligible_breadth_pct": "prior_breadth_1m"', content)
         self.assertNotIn('"delta_comp"', content)
@@ -3002,6 +3436,21 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertNotIn("background-color: rgba(26, 127, 55, 0.16)", content)
         self.assertNotIn("background-color: rgba(180, 35, 24, 0.16)", content)
         self.assertNotIn("unsafe_allow_html=True", content)
+        self.assertIn('with st.expander("Standardized Composite Validation", expanded=False):', content)
+        self.assertIn('with st.expander("Current Momentum Validation", expanded=False):', content)
+        self.assertIn("Themes page above now uses the standardized composite as its default baseline", content)
+        self.assertIn('current_snapshot.get("standardized_rankings", pd.DataFrame())', content)
+        self.assertIn('current_snapshot.get("standardized_comparison", pd.DataFrame())', content)
+        self.assertIn('current_snapshot.get("current_momentum_rankings", pd.DataFrame())', content)
+        self.assertIn('current_snapshot.get("current_momentum_comparison", pd.DataFrame())', content)
+        self.assertIn('"standardized_recovery_factor"', content)
+        self.assertIn('"recovery_factor"', content)
+        self.assertIn('"current_momentum_quality_factor"', content)
+        self.assertIn('"quality_factor"', content)
+        self.assertIn('theme_selector_widget_key = prepare_replaceable_selectbox_widget_key(', content)
+        self.assertIn('rotate_replaceable_selectbox_widget(st.session_state, SELECTED_THEME_LABEL_KEY)', content)
+        self.assertIn('if col not in standardized_rankings.columns:', content)
+        self.assertIn('if col not in comparison.columns:', content)
         self.assertIn('if st.button("Reload latest DB state", key="themes_force_refresh")', content)
         self.assertIn('if st.button("Materialize latest historical day", key="themes_force_latest_day_refresh")', content)
         self.assertIn("def _active_daily_historical_append_runs() -> pd.DataFrame:", content)
@@ -3088,6 +3537,8 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('if st.button("Reload latest DB state", key="historical_force_refresh")', content)
         self.assertIn("This recomputes historical movement, leaderboard, and inflection tables in-memory from stored data only", content)
         self.assertIn("Historical Performance tables are driven by the resolved boundary window shown above", content)
+        self.assertIn('historical_theme_widget_key = prepare_replaceable_selectbox_widget_key(', content)
+        self.assertIn('rotate_replaceable_selectbox_widget(st.session_state, "historical_selected_theme")', content)
 
     def test_suggestions_page_source_uses_clickable_queue_and_scanner_selection(self):
         page_source = Path(__file__).resolve().parents[1] / "pages" / "3_Suggestions.py"

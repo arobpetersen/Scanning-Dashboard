@@ -19,7 +19,11 @@ from src.streamlit_utils import (
     show_perf_summary,
     stop_for_database_error,
 )
-from src.theme_selection import set_theme_selection_state
+from src.theme_selection import (
+    prepare_replaceable_selectbox_widget_key,
+    rotate_replaceable_selectbox_widget,
+    set_theme_selection_state,
+)
 from src.theme_service import list_themes, seed_if_needed
 
 
@@ -751,7 +755,18 @@ else:
         selected_label_default = theme_label_by_id.get(int(selected_theme_id_default))
         if selected_label_default in options:
             default_index = labels.index(selected_label_default)
-    sel = st.selectbox("Theme", labels, index=default_index)
+    selected_label_default = labels[default_index]
+    historical_theme_widget_key = prepare_replaceable_selectbox_widget_key(
+        st.session_state,
+        "historical_selected_theme",
+        labels,
+        selected_label_default,
+    )
+    sel = st.selectbox("Theme", labels, key=historical_theme_widget_key)
+    if st.session_state.get("historical_selected_theme_name") != sel:
+        st.session_state["historical_selected_theme_name"] = str(sel)
+        st.session_state["historical_selected_theme_id"] = int(options[sel])
+        rotate_replaceable_selectbox_widget(st.session_state, "historical_selected_theme")
     st.caption(
         "Historical table basis: resolved historical snapshot window above. "
         "Detail basis below: historical theme snapshot rows for the selected theme, not a current/live constituent member table."

@@ -26,6 +26,23 @@ METRIC_COLUMNS = [
     "composite_score",
 ]
 
+STANDARDIZED_COMPOSITE_WEIGHTS = {
+    "perf_1w": 0.30,
+    "perf_1m": 0.70,
+}
+STANDARDIZED_COMPOSITE_3M_NO_PENALTY_PCT = -10.0
+STANDARDIZED_COMPOSITE_3M_MODERATE_PENALTY_PCT = -20.0
+STANDARDIZED_COMPOSITE_3M_MODERATE_ZONE_FLOOR = 0.65
+STANDARDIZED_COMPOSITE_3M_GUARDRAIL_FLOOR = 0.30
+STANDARDIZED_COMPOSITE_RECOVERY_BASE_SCORE = 15.0
+CURRENT_MOMENTUM_WEIGHTS = {
+    "perf_1w": 0.70,
+    "perf_1m": 0.30,
+}
+CURRENT_MOMENTUM_QUALITY_NO_PENALTY_SCORE = 10.0
+CURRENT_MOMENTUM_QUALITY_FLOOR_SCORE = 5.0
+CURRENT_MOMENTUM_QUALITY_FACTOR_FLOOR = 0.60
+
 
 CURRENT_RANKING_COLUMNS = [
     "theme_id",
@@ -40,6 +57,8 @@ CURRENT_RANKING_COLUMNS = [
     "eligible_1m_count",
     "eligible_3m_count",
     "eligible_composite_count",
+    "eligible_standardized_count",
+    "eligible_momentum_count",
     "eligible_breadth_pct",
     "avg_1w",
     "avg_1m",
@@ -48,6 +67,16 @@ CURRENT_RANKING_COLUMNS = [
     "positive_1m_breadth_pct",
     "positive_3m_breadth_pct",
     "composite_score",
+    "legacy_composite_score",
+    "standardized_base_strength_score",
+    "standardized_participation_ratio",
+    "standardized_participation_factor",
+    "standardized_guardrail_factor",
+    "standardized_recovery_factor",
+    "standardized_composite_score",
+    "current_momentum_raw_score",
+    "current_momentum_quality_factor",
+    "current_momentum_score",
 ]
 
 
@@ -55,6 +84,85 @@ def theme_confidence_factor(ticker_count: int | float) -> float:
     if pd.isna(ticker_count) or float(ticker_count) <= 0:
         return 0.0
     return min(1.0, (float(ticker_count) / float(THEME_CONFIDENCE_FULL_COUNT)) ** 0.5)
+
+
+def standardized_participation_factor(participation_ratio: int | float) -> float:
+    if pd.isna(participation_ratio):
+        return 0.5
+    return float(np.clip(0.5 + float(participation_ratio), 0.5, 1.0))
+
+
+def standardized_three_month_guardrail_factor(avg_3m: int | float) -> float:
+    if pd.isna(avg_3m):
+        return 1.0
+    avg_3m_value = float(avg_3m)
+    if avg_3m_value >= STANDARDIZED_COMPOSITE_3M_NO_PENALTY_PCT:
+        return 1.0
+    if avg_3m_value >= STANDARDIZED_COMPOSITE_3M_MODERATE_PENALTY_PCT:
+        progress = (STANDARDIZED_COMPOSITE_3M_NO_PENALTY_PCT - avg_3m_value) / (
+            STANDARDIZED_COMPOSITE_3M_NO_PENALTY_PCT - STANDARDIZED_COMPOSITE_3M_MODERATE_PENALTY_PCT
+        )
+        return float(1.0 - progress * (1.0 - STANDARDIZED_COMPOSITE_3M_MODERATE_ZONE_FLOOR))
+
+    progress = (STANDARDIZED_COMPOSITE_3M_MODERATE_PENALTY_PCT - avg_3m_value) / 10.0
+    factor = STANDARDIZED_COMPOSITE_3M_MODERATE_ZONE_FLOOR - progress * (
+        STANDARDIZED_COMPOSITE_3M_MODERATE_ZONE_FLOOR - STANDARDIZED_COMPOSITE_3M_GUARDRAIL_FLOOR
+    )
+    return float(max(STANDARDIZED_COMPOSITE_3M_GUARDRAIL_FLOOR, factor))
+
+
+def standardized_recovery_factor(base_strength_score: int | float, avg_3m: int | float) -> float:
+    if pd.isna(avg_3m) or float(avg_3m) >= STANDARDIZED_COMPOSITE_3M_NO_PENALTY_PCT:
+        return 1.0
+    if pd.isna(base_strength_score):
+        return 0.5
+    return float(np.clip(float(base_strength_score) / STANDARDIZED_COMPOSITE_RECOVERY_BASE_SCORE, 0.5, 1.0))
+
+
+def current_momentum_quality_factor(standardized_composite_score: int | float) -> float:
+    if pd.isna(standardized_composite_score):
+        return CURRENT_MOMENTUM_QUALITY_FACTOR_FLOOR
+    score_value = float(standardized_composite_score)
+    if score_value >= CURRENT_MOMENTUM_QUALITY_NO_PENALTY_SCORE:
+        return 1.0
+    if score_value <= CURRENT_MOMENTUM_QUALITY_FLOOR_SCORE:
+        return CURRENT_MOMENTUM_QUALITY_FACTOR_FLOOR
+    progress = (score_value - CURRENT_MOMENTUM_QUALITY_FLOOR_SCORE) / (
+        CURRENT_MOMENTUM_QUALITY_NO_PENALTY_SCORE - CURRENT_MOMENTUM_QUALITY_FLOOR_SCORE
+    )
+    return float(
+        CURRENT_MOMENTUM_QUALITY_FACTOR_FLOOR
+        + progress * (1.0 - CURRENT_MOMENTUM_QUALITY_FACTOR_FLOOR)
+    )
+
+
+def ticker_standardized_composite_score(
+    perf_1w: int | float,
+    perf_1m: int | float,
+    perf_3m: int | float,
+) -> float:
+    if pd.isna(perf_1w) or pd.isna(perf_1m):
+        return float("nan")
+    base_strength_score = 0.30 * float(perf_1w) + 0.70 * float(perf_1m)
+    guardrail_factor = standardized_three_month_guardrail_factor(perf_3m)
+    recovery_factor = standardized_recovery_factor(base_strength_score, perf_3m)
+    return float(base_strength_score * guardrail_factor * recovery_factor)
+
+
+def ticker_current_momentum_score(
+    perf_1w: int | float,
+    perf_1m: int | float,
+    perf_3m: int | float,
+) -> float:
+    if pd.isna(perf_1w) or pd.isna(perf_1m):
+        return float("nan")
+    standardized_composite_score = ticker_standardized_composite_score(perf_1w, perf_1m, perf_3m)
+    momentum_raw_score = (
+        CURRENT_MOMENTUM_WEIGHTS["perf_1w"] * float(perf_1w)
+        + CURRENT_MOMENTUM_WEIGHTS["perf_1m"] * float(perf_1m)
+    )
+    quality_factor = current_momentum_quality_factor(standardized_composite_score)
+    return float(momentum_raw_score * quality_factor)
 
 
 def _compute_theme_metrics(raw: pd.DataFrame) -> pd.DataFrame:
@@ -228,6 +336,7 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
     prepared["composite_metric_eligible"] = (
         prepared["perf_1w_eligible"] & prepared["perf_1m_eligible"] & prepared["perf_3m_eligible"]
     )
+    prepared["standardized_metric_eligible"] = prepared["perf_1w_eligible"] & prepared["perf_1m_eligible"]
 
     prepared["ticker_present"] = prepared["ticker"].notna().astype(int)
     prepared["perf_1w_capped_for_agg"] = prepared[capped_return_cols["perf_1w"]].where(prepared["perf_1w_eligible"])
@@ -247,6 +356,8 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         eligible_1m_count=("perf_1m_eligible", "sum"),
         eligible_3m_count=("perf_3m_eligible", "sum"),
         eligible_composite_count=("composite_metric_eligible", "sum"),
+        eligible_standardized_count=("standardized_metric_eligible", "sum"),
+        eligible_momentum_count=("standardized_metric_eligible", "sum"),
         avg_1w=("perf_1w_capped_for_agg", "mean"),
         avg_1m=("perf_1m_capped_for_agg", "mean"),
         avg_3m=("perf_3m_capped_for_agg", "mean"),
@@ -264,6 +375,8 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         "eligible_1m_count",
         "eligible_3m_count",
         "eligible_composite_count",
+        "eligible_standardized_count",
+        "eligible_momentum_count",
     ]
     out[count_cols] = out[count_cols].fillna(0).astype(int)
     out["run_id"] = pd.to_numeric(out["run_id"], errors="coerce")
@@ -286,6 +399,40 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         base_score * out["ticker_count"].apply(theme_confidence_factor),
         np.nan,
     )
+    out["legacy_composite_score"] = out["composite_score"]
+    out["standardized_base_strength_score"] = (
+        STANDARDIZED_COMPOSITE_WEIGHTS["perf_1w"] * out["avg_1w"].fillna(0.0)
+        + STANDARDIZED_COMPOSITE_WEIGHTS["perf_1m"] * out["avg_1m"].fillna(0.0)
+    )
+    out["standardized_participation_ratio"] = np.where(
+        out["ticker_count"] > 0,
+        out["eligible_standardized_count"] / out["ticker_count"],
+        0.0,
+    )
+    out["standardized_participation_factor"] = out["standardized_participation_ratio"].apply(standardized_participation_factor)
+    out["standardized_guardrail_factor"] = out["avg_3m"].apply(standardized_three_month_guardrail_factor)
+    out["standardized_recovery_factor"] = [
+        standardized_recovery_factor(base_score, avg_3m)
+        for base_score, avg_3m in zip(out["standardized_base_strength_score"], out["avg_3m"])
+    ]
+    out["standardized_composite_score"] = np.where(
+        out["eligible_standardized_count"] > 0,
+        out["standardized_base_strength_score"]
+        * out["standardized_participation_factor"]
+        * out["standardized_guardrail_factor"]
+        * out["standardized_recovery_factor"],
+        np.nan,
+    )
+    out["current_momentum_raw_score"] = (
+        CURRENT_MOMENTUM_WEIGHTS["perf_1w"] * out["avg_1w"].fillna(0.0)
+        + CURRENT_MOMENTUM_WEIGHTS["perf_1m"] * out["avg_1m"].fillna(0.0)
+    )
+    out["current_momentum_quality_factor"] = out["standardized_composite_score"].apply(current_momentum_quality_factor)
+    out["current_momentum_score"] = np.where(
+        out["eligible_momentum_count"] > 0,
+        out["current_momentum_raw_score"] * out["current_momentum_quality_factor"],
+        np.nan,
+    )
     numeric_cols = [
         "eligible_breadth_pct",
         "avg_1w",
@@ -295,18 +442,159 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         "positive_1m_breadth_pct",
         "positive_3m_breadth_pct",
         "composite_score",
+        "legacy_composite_score",
+        "standardized_base_strength_score",
+        "standardized_participation_ratio",
+        "standardized_participation_factor",
+        "standardized_guardrail_factor",
+        "standardized_recovery_factor",
+        "standardized_composite_score",
+        "current_momentum_raw_score",
+        "current_momentum_quality_factor",
+        "current_momentum_score",
     ]
     out[numeric_cols] = out[numeric_cols].round(2)
     return out[CURRENT_RANKING_COLUMNS]
 
 
-def _finalize_current_rankings(current: pd.DataFrame) -> pd.DataFrame:
-    rankings = current[current["eligible_composite_count"] >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS].copy()
+def _finalize_current_rankings(
+    current: pd.DataFrame,
+    *,
+    score_col: str = "composite_score",
+    eligible_count_col: str = "eligible_composite_count",
+) -> pd.DataFrame:
+    rankings = current[current[eligible_count_col] >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS].copy()
     rankings = rankings.sort_values(
-        ["composite_score", "positive_1m_breadth_pct", "eligible_composite_count", "theme"],
+        [score_col, "positive_1m_breadth_pct", eligible_count_col, "theme"],
         ascending=[False, False, False, True],
     ).reset_index(drop=True)
     return rankings
+
+
+def _finalize_current_window_rankings(current: pd.DataFrame, perf_col: str) -> pd.DataFrame:
+    eligible_count_col = {
+        "avg_1w": "eligible_1w_count",
+        "avg_1m": "eligible_1m_count",
+        "avg_3m": "eligible_3m_count",
+    }.get(perf_col)
+    if not eligible_count_col:
+        raise ValueError(f"Unsupported current performance column: {perf_col}")
+
+    rankings = current.copy()
+    if "is_active" in rankings.columns:
+        rankings = rankings[rankings["is_active"] == True].copy()
+    rankings = rankings[rankings[eligible_count_col] >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS].copy()
+    rankings = rankings.sort_values(
+        [perf_col, "composite_score", eligible_count_col, "eligible_breadth_pct", "theme"],
+        ascending=[False, False, False, False, True],
+    ).reset_index(drop=True)
+    return rankings
+
+
+def _build_standardized_composite_validation(legacy_rankings: pd.DataFrame, standardized_rankings: pd.DataFrame) -> pd.DataFrame:
+    legacy = legacy_rankings[["theme_id", "theme", "category", "legacy_composite_score", "eligible_composite_count"]].copy()
+    legacy["legacy_rank"] = range(1, len(legacy) + 1)
+
+    standardized = standardized_rankings[
+        [
+            "theme_id",
+            "theme",
+            "category",
+            "standardized_composite_score",
+            "eligible_standardized_count",
+            "standardized_participation_ratio",
+            "standardized_participation_factor",
+            "standardized_guardrail_factor",
+            "standardized_recovery_factor",
+            "avg_1w",
+            "avg_1m",
+            "avg_3m",
+        ]
+    ].copy()
+    standardized["standardized_rank"] = range(1, len(standardized) + 1)
+
+    comparison = legacy.merge(standardized, on="theme_id", how="outer", suffixes=("_legacy", "_standardized"))
+    comparison["theme"] = comparison["theme_standardized"].where(comparison["theme_standardized"].notna(), comparison["theme_legacy"])
+    comparison["category"] = comparison["category_standardized"].where(comparison["category_standardized"].notna(), comparison["category_legacy"])
+    comparison["rank_shift_vs_legacy"] = comparison["legacy_rank"] - comparison["standardized_rank"]
+    comparison["entered_standardized_view"] = comparison["legacy_rank"].isna() & comparison["standardized_rank"].notna()
+    comparison["dropped_from_standardized_view"] = comparison["legacy_rank"].notna() & comparison["standardized_rank"].isna()
+    comparison = comparison.drop(columns=["theme_legacy", "theme_standardized", "category_legacy", "category_standardized"])
+    return comparison.sort_values(
+        ["rank_shift_vs_legacy", "standardized_rank", "legacy_rank", "theme"],
+        ascending=[False, True, True, True],
+        na_position="last",
+    ).reset_index(drop=True)
+
+
+def _build_current_momentum_validation(
+    current_1w_rankings: pd.DataFrame,
+    current_momentum_rankings: pd.DataFrame,
+    standardized_rankings: pd.DataFrame,
+) -> pd.DataFrame:
+    current_1w = current_1w_rankings[
+        ["theme_id", "theme", "category", "avg_1w", "avg_1m", "standardized_composite_score"]
+    ].copy()
+    current_1w["current_1w_rank"] = range(1, len(current_1w) + 1)
+
+    current_momentum = current_momentum_rankings[
+        [
+            "theme_id",
+            "theme",
+            "category",
+            "current_momentum_raw_score",
+            "current_momentum_quality_factor",
+            "current_momentum_score",
+            "standardized_composite_score",
+            "avg_1w",
+            "avg_1m",
+        ]
+    ].copy()
+    current_momentum["current_momentum_rank"] = range(1, len(current_momentum) + 1)
+
+    standardized = standardized_rankings[["theme_id"]].copy()
+    standardized["standardized_rank"] = range(1, len(standardized) + 1)
+
+    comparison = current_1w.merge(
+        current_momentum,
+        on="theme_id",
+        how="outer",
+        suffixes=("_1w", "_momentum"),
+    ).merge(standardized, on="theme_id", how="left")
+    comparison["theme"] = comparison["theme_momentum"].where(comparison["theme_momentum"].notna(), comparison["theme_1w"])
+    comparison["category"] = comparison["category_momentum"].where(comparison["category_momentum"].notna(), comparison["category_1w"])
+    comparison["avg_1w"] = comparison["avg_1w_momentum"].where(comparison["avg_1w_momentum"].notna(), comparison["avg_1w_1w"])
+    comparison["avg_1m"] = comparison["avg_1m_momentum"].where(comparison["avg_1m_momentum"].notna(), comparison["avg_1m_1w"])
+    comparison["standardized_composite_score"] = comparison["standardized_composite_score_momentum"].where(
+        comparison["standardized_composite_score_momentum"].notna(),
+        comparison["standardized_composite_score_1w"],
+    )
+    comparison["rank_shift_vs_1w"] = comparison["current_1w_rank"] - comparison["current_momentum_rank"]
+    comparison["entered_momentum_view"] = comparison["current_1w_rank"].isna() & comparison["current_momentum_rank"].notna()
+    comparison["dropped_from_momentum_view"] = comparison["current_1w_rank"].notna() & comparison["current_momentum_rank"].isna()
+    return comparison[
+        [
+            "theme_id",
+            "theme",
+            "category",
+            "current_1w_rank",
+            "current_momentum_rank",
+            "standardized_rank",
+            "rank_shift_vs_1w",
+            "avg_1w",
+            "avg_1m",
+            "current_momentum_raw_score",
+            "current_momentum_quality_factor",
+            "current_momentum_score",
+            "standardized_composite_score",
+            "entered_momentum_view",
+            "dropped_from_momentum_view",
+        ]
+    ].sort_values(
+        ["rank_shift_vs_1w", "current_momentum_rank", "current_1w_rank", "theme"],
+        ascending=[False, True, True, True],
+        na_position="last",
+    ).reset_index(drop=True)
 
 
 def compute_current_ranking_snapshot(conn) -> dict[str, pd.DataFrame]:
@@ -317,11 +605,34 @@ def compute_current_ranking_snapshot(conn) -> dict[str, pd.DataFrame]:
         return {
             "theme_metrics": pd.DataFrame(columns=CURRENT_RANKING_COLUMNS),
             "rankings": pd.DataFrame(),
+            "standardized_rankings": pd.DataFrame(),
+            "standardized_comparison": pd.DataFrame(),
+            "current_momentum_rankings": pd.DataFrame(),
+            "current_momentum_comparison": pd.DataFrame(),
         }
+
+    legacy_rankings = _finalize_current_rankings(current, score_col="legacy_composite_score", eligible_count_col="eligible_composite_count")
+    standardized_rankings = _finalize_current_rankings(
+        current,
+        score_col="standardized_composite_score",
+        eligible_count_col="eligible_standardized_count",
+    )
+    current_1w_rankings = _finalize_current_window_rankings(current, "avg_1w")
+    current_momentum_rankings = _finalize_current_rankings(
+        current,
+        score_col="current_momentum_score",
+        eligible_count_col="eligible_momentum_count",
+    )
+    standardized_comparison = _build_standardized_composite_validation(legacy_rankings, standardized_rankings)
+    current_momentum_comparison = _build_current_momentum_validation(
+        current_1w_rankings,
+        current_momentum_rankings,
+        standardized_rankings,
+    )
 
     preferred_source = preferred_theme_snapshot_source(conn)
     if not preferred_source:
-        rankings = current.copy()
+        rankings = legacy_rankings.copy()
         for col in (
             "delta_avg_1w",
             "delta_avg_1m",
@@ -330,7 +641,14 @@ def compute_current_ranking_snapshot(conn) -> dict[str, pd.DataFrame]:
             "delta_composite_score",
         ):
             rankings[col] = np.nan
-        return {"theme_metrics": current, "rankings": _finalize_current_rankings(rankings)}
+        return {
+            "theme_metrics": current,
+            "rankings": rankings,
+            "standardized_rankings": standardized_rankings,
+            "standardized_comparison": standardized_comparison,
+            "current_momentum_rankings": current_momentum_rankings,
+            "current_momentum_comparison": current_momentum_comparison,
+        }
 
     prior = conn.execute(
         """
@@ -359,15 +677,22 @@ def compute_current_ranking_snapshot(conn) -> dict[str, pd.DataFrame]:
         [preferred_source],
     ).df()
 
-    rankings = current.merge(prior, on="theme_id", how="left")
+    rankings = legacy_rankings.merge(prior, on="theme_id", how="left")
     rankings["delta_avg_1w"] = (rankings["avg_1w"] - rankings["prev_avg_1w"]).round(2)
     rankings["delta_avg_1m"] = (rankings["avg_1m"] - rankings["prev_avg_1m"]).round(2)
     rankings["delta_avg_3m"] = (rankings["avg_3m"] - rankings["prev_avg_3m"]).round(2)
     rankings["delta_positive_1m_breadth_pct"] = (
         rankings["positive_1m_breadth_pct"] - rankings["prev_positive_1m_breadth_pct"]
     ).round(2)
-    rankings["delta_composite_score"] = (rankings["composite_score"] - rankings["prev_composite_score"]).round(2)
-    return {"theme_metrics": current, "rankings": _finalize_current_rankings(rankings)}
+    rankings["delta_composite_score"] = (rankings["legacy_composite_score"] - rankings["prev_composite_score"]).round(2)
+    return {
+        "theme_metrics": current,
+        "rankings": rankings,
+        "standardized_rankings": standardized_rankings,
+        "standardized_comparison": standardized_comparison,
+        "current_momentum_rankings": current_momentum_rankings,
+        "current_momentum_comparison": current_momentum_comparison,
+    }
 
 
 def compute_theme_rankings(conn) -> pd.DataFrame:

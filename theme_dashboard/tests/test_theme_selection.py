@@ -5,7 +5,9 @@ from src.theme_selection import (
     SELECTED_THEME_LABEL_KEY,
     SELECTED_THEME_SOURCE_KEY,
     describe_selection_source,
+    prepare_replaceable_selectbox_widget_key,
     resolve_theme_selection,
+    rotate_replaceable_selectbox_widget,
     set_theme_selection_state,
     should_apply_selection_token,
 )
@@ -47,6 +49,27 @@ class TestThemeSelection(unittest.TestCase):
         self.assertEqual(session_state[SELECTED_THEME_ID_KEY], 7)
         self.assertEqual(session_state[SELECTED_THEME_LABEL_KEY], "AI (Tech)")
         self.assertEqual(session_state[SELECTED_THEME_SOURCE_KEY], "historical_table")
+
+    def test_prepare_replaceable_selectbox_widget_key_seeds_current_selection(self):
+        session_state = {}
+
+        widget_key = prepare_replaceable_selectbox_widget_key(
+            session_state,
+            "historical_selected_theme",
+            ["AI (Tech)", "Energy (Macro)"],
+            "Energy (Macro)",
+        )
+
+        self.assertEqual(widget_key, "historical_selected_theme__widget__0")
+        self.assertEqual(session_state[widget_key], "Energy (Macro)")
+
+    def test_rotate_replaceable_selectbox_widget_advances_widget_version(self):
+        session_state = {}
+
+        rotate_replaceable_selectbox_widget(session_state, "historical_selected_theme")
+        rotate_replaceable_selectbox_widget(session_state, "historical_selected_theme")
+
+        self.assertEqual(session_state["historical_selected_theme__widget_version"], 2)
 
 
 if __name__ == "__main__":
