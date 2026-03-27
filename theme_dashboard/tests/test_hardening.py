@@ -22,11 +22,14 @@ from src.leaderboard_utils import (
     build_current_performance_table,
     build_window_leaderboard,
     disambiguate_theme_labels,
+    historical_concentration_label,
 )
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
 from src.momentum_engine import compute_theme_momentum
 from src.rotation_engine import compute_theme_rotation
 from src.queries import (
+    _recent_ticker_history_theme_history,
+    historical_theme_movement_row_audit,
     latest_ticker_snapshots,
     refresh_history,
     snapshot_counts,
@@ -117,6 +120,7 @@ from src.rankings import (
     _build_current_ranking_metrics,
     _compute_theme_metrics,
     current_momentum_quality_factor,
+    current_ticker_coverage_status,
     current_ticker_is_eligible,
     compute_current_ranking_snapshot,
     compute_theme_rankings,
@@ -126,10 +130,45 @@ from src.rankings import (
     standardized_recovery_factor,
     standardized_three_month_guardrail_factor,
     theme_confidence_factor,
+    visible_ticker_suppressed,
 )
 
 
 class TestLeaderboardUtils(unittest.TestCase):
+    def test_historical_concentration_label_interprets_single_name_thin_narrow_and_broad(self):
+        self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 1, "positive_1m_breadth_pct": 100.0})), "Single-name")
+        self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 2, "positive_1m_breadth_pct": 100.0})), "Thin")
+        self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 3, "positive_1m_breadth_pct": 66.67})), "Narrow")
+        self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 5, "positive_1m_breadth_pct": 80.0})), "Broad")
+        self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 5, "positive_1m_breadth_pct": 40.0})), "Narrow")
+
+    def test_historical_concentration_label_prefers_historical_contributor_counts_over_ticker_count(self):
+        self.assertEqual(
+            historical_concentration_label(
+                pd.Series(
+                    {
+                        "ticker_count": 8,
+                        "eligible_contributor_count": 2,
+                        "covered_eligible_constituent_count": 1,
+                        "positive_1m_breadth_pct": 100.0,
+                    }
+                )
+            ),
+            "Single-name",
+        )
+        self.assertEqual(
+            historical_concentration_label(
+                pd.Series(
+                    {
+                        "ticker_count": 8,
+                        "eligible_contributor_count": 2,
+                        "positive_1m_breadth_pct": 100.0,
+                    }
+                )
+            ),
+            "Thin",
+        )
+
     def test_window_specific_sorting_prefers_window_metric(self):
         history = pd.DataFrame(
             [
@@ -152,6 +191,53 @@ class TestLeaderboardUtils(unittest.TestCase):
 
         self.assertEqual(ranked_1w.iloc[0]["theme"], "B")
         self.assertEqual(ranked_1m.iloc[0]["theme"], "A")
+
+    def test_window_leaderboard_can_use_momentum_as_primary_sort_driver(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-01-01", "theme_id": 1, "theme": "A", "avg_1w": 8.0, "avg_1m": 2.0, "avg_3m": 3.0},
+                {"snapshot_time": "2026-01-08", "theme_id": 1, "theme": "A", "avg_1w": 8.0, "avg_1m": 3.0, "avg_3m": 4.0},
+                {"snapshot_time": "2026-01-01", "theme_id": 2, "theme": "B", "avg_1w": 6.0, "avg_1m": 1.0, "avg_3m": 1.0},
+                {"snapshot_time": "2026-01-08", "theme_id": 2, "theme": "B", "avg_1w": 6.0, "avg_1m": 2.0, "avg_3m": 2.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "A", "momentum_score": 5, "rank_change": 1},
+                {"theme_id": 2, "theme": "B", "momentum_score": 9, "rank_change": 1},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary}
+
+        ranked, _ = build_window_leaderboard(momentum, "avg_1w", top_k=2, primary_sort_col="momentum_score")
+
+        self.assertEqual(ranked.iloc[0]["theme"], "B")
+        self.assertEqual(float(ranked.iloc[0]["momentum_score"]), 9.0)
+
+    def test_window_leaderboard_allows_valid_thin_historical_themes(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-01-01", "theme_id": 1, "theme": "Thin", "avg_1w": 4.0, "ticker_count": 2},
+                {"snapshot_time": "2026-01-08", "theme_id": 1, "theme": "Thin", "avg_1w": 8.0, "ticker_count": 2},
+                {"snapshot_time": "2026-01-01", "theme_id": 2, "theme": "Healthy", "avg_1w": 3.0, "ticker_count": 3},
+                {"snapshot_time": "2026-01-08", "theme_id": 2, "theme": "Healthy", "avg_1w": 6.0, "ticker_count": 3},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "Thin", "momentum_score": 99, "rank_change": 2},
+                {"theme_id": 2, "theme": "Healthy", "momentum_score": 5, "rank_change": 1},
+            ]
+        )
+
+        ranked, _ = build_window_leaderboard(
+            {"history": history, "window_summary": summary},
+            "avg_1w",
+            top_k=10,
+            primary_sort_col="momentum_score",
+        )
+
+        self.assertEqual(ranked["theme"].tolist(), ["Thin", "Healthy"])
 
 
 class TestHistoricalAnalyticsConnectionIsolation(unittest.TestCase):
@@ -634,6 +720,31 @@ class TestSuggestionsPageState(unittest.TestCase):
         self.assertIn("AI (Tech) [#2]", category_out.loc[category_out["category"] == "Tech", "top_themes"].iloc[0])
         self.assertEqual(sorted(breakdown_out.loc[breakdown_out["category"] == "Tech", "theme_display"].tolist()), ["AI (Tech) [#1]", "AI (Tech) [#2]"])
 
+    def test_category_outputs_allow_valid_thin_historical_themes(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme_id": 1, "theme": "Thin", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0, "ticker_count": 2},
+                {"snapshot_time": "2026-03-08", "theme_id": 1, "theme": "Thin", "category": "Tech", "avg_1w": 8.0, "positive_1m_breadth_pct": 70.0, "ticker_count": 2},
+                {"snapshot_time": "2026-03-01", "theme_id": 2, "theme": "Healthy", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 50.0, "ticker_count": 3},
+                {"snapshot_time": "2026-03-08", "theme_id": 2, "theme": "Healthy", "category": "Tech", "avg_1w": 6.0, "positive_1m_breadth_pct": 60.0, "ticker_count": 3},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "Thin", "momentum_score": 99.0, "rank_change": 2},
+                {"theme_id": 2, "theme": "Healthy", "momentum_score": 4.0, "rank_change": 1},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary, "source_preference": "live"}
+
+        category_out, category_msg = build_category_leaderboard(momentum, "avg_1w", top_k=10)
+        breakdown_out, breakdown_msg = build_category_theme_breakdown(momentum, "avg_1w")
+
+        self.assertIsNone(category_msg)
+        self.assertIsNone(breakdown_msg)
+        self.assertIn("Thin", category_out.iloc[0]["top_themes"])
+        self.assertEqual(sorted(breakdown_out["theme"].tolist()), ["Healthy", "Thin"])
+
     def test_disambiguate_theme_labels_only_changes_collisions(self):
         df = pd.DataFrame(
             [
@@ -933,6 +1044,50 @@ class TestStandardizedCompositeScore(unittest.TestCase):
         self.assertFalse(current_ticker_is_eligible(12.0, 0.0, "active", snapshot_present=True))
         self.assertFalse(current_ticker_is_eligible(12.0, 2_000_000.0, "refresh_suppressed", snapshot_present=True))
         self.assertFalse(current_ticker_is_eligible(12.0, 2_000_000.0, "active", snapshot_present=False))
+
+    def test_current_ticker_coverage_status_distinguishes_limbo_state_from_suppressed_and_healthy(self):
+        self.assertEqual(
+            current_ticker_coverage_status(
+                governed_membership=True,
+                suppressed=False,
+                eligible=True,
+                has_current_usable_snapshot=True,
+            ),
+            "healthy current coverage",
+        )
+        self.assertEqual(
+            current_ticker_coverage_status(
+                governed_membership=True,
+                suppressed=True,
+                eligible=False,
+                has_current_usable_snapshot=False,
+            ),
+            "suppressed",
+        )
+        self.assertEqual(
+            current_ticker_coverage_status(
+                governed_membership=True,
+                suppressed=False,
+                eligible=False,
+                has_current_usable_snapshot=False,
+            ),
+            "needs refresh check",
+        )
+        self.assertEqual(
+            current_ticker_coverage_status(
+                governed_membership=True,
+                suppressed=False,
+                eligible=False,
+                has_current_usable_snapshot=True,
+            ),
+            "current but ineligible",
+        )
+
+    def test_visible_ticker_suppressed_treats_manual_and_operational_suppression_as_same_user_facing_truth(self):
+        self.assertTrue(visible_ticker_suppressed("active", True))
+        self.assertTrue(visible_ticker_suppressed("refresh_suppressed", False))
+        self.assertTrue(visible_ticker_suppressed("refresh_suppressed", True))
+        self.assertFalse(visible_ticker_suppressed("active", False))
 
     def test_build_current_ranking_metrics_exposes_standardized_composite_alongside_legacy(self):
         raw = pd.DataFrame(
@@ -1484,6 +1639,136 @@ class TestCurrentThemeRankingHardening(unittest.TestCase):
             conn.close()
 
 class TestBoundarySelection(unittest.TestCase):
+    def test_recent_ticker_history_theme_history_caps_outlier_returns_and_allows_valid_thin_themes(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_daily_history(
+                ticker varchar,
+                trading_date date,
+                close double,
+                market_data_source varchar,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Capped Theme', 'Tech', true), (2, 'Thin Theme', 'Tech', true)")
+        conn.execute("insert into theme_membership values (1, 'AAA'), (1, 'BBB'), (1, 'CCC'), (2, 'XXX'), (2, 'YYY')")
+
+        dates = pd.bdate_range("2025-12-15", periods=70)
+        history_rows: list[dict[str, object]] = []
+        for trading_date in dates:
+            for ticker in ("BBB", "CCC", "XXX", "YYY"):
+                history_rows.append(
+                    {
+                        "ticker": ticker,
+                        "trading_date": trading_date.date(),
+                        "close": 1.0,
+                        "market_data_source": "live",
+                        "updated_at": pd.Timestamp(trading_date),
+                    }
+                )
+            history_rows.append(
+                {
+                    "ticker": "AAA",
+                    "trading_date": trading_date.date(),
+                    "close": 3.0 if trading_date == dates[-1] else 1.0,
+                    "market_data_source": "live",
+                    "updated_at": pd.Timestamp(trading_date),
+                }
+            )
+
+        history_df = pd.DataFrame(history_rows)
+        conn.register("ticker_daily_history_incoming", history_df)
+        conn.execute("insert into ticker_daily_history select * from ticker_daily_history_incoming")
+        conn.unregister("ticker_daily_history_incoming")
+
+        out = _recent_ticker_history_theme_history(conn, "live")
+
+        latest = out.sort_values("snapshot_time").groupby("theme_id", as_index=False).tail(1)
+        capped_theme = latest[latest["theme_id"] == 1].iloc[0]
+
+        self.assertAlmostEqual(float(capped_theme["avg_1w"]), 16.67, places=2)
+        self.assertAlmostEqual(float(capped_theme["avg_1m"]), 16.67, places=2)
+        self.assertAlmostEqual(float(capped_theme["avg_3m"]), 16.67, places=2)
+        self.assertIn(2, latest["theme_id"].tolist())
+        conn.close()
+
+    def test_historical_theme_movement_row_audit_reuses_derived_boundary_contract(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table symbol_refresh_status(ticker varchar, status varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1w_breadth_pct double,
+                positive_1m_breadth_pct double,
+                positive_3m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table ticker_daily_history(
+                ticker varchar,
+                trading_date date,
+                close double,
+                market_data_source varchar,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Audit Theme', 'Tech')")
+        conn.execute("insert into theme_membership values (1, 'AAA'), (1, 'BBB'), (1, 'CCC')")
+        conn.execute("insert into symbol_refresh_status values ('AAA', 'active'), ('BBB', 'active'), ('CCC', 'active')")
+        conn.execute(
+            """
+            insert into theme_snapshots values
+            (1, '2026-03-13 22:00:00', 1, 3, -5.0, -5.0, -5.0, 0.0, 0.0, 0.0, -5.0, 'live'),
+            (2, '2026-03-20 22:00:00', 1, 3, 1.0, 1.0, 1.0, 33.33, 33.33, 33.33, 1.0, 'live')
+            """
+        )
+
+        dates = pd.bdate_range("2025-12-15", periods=70)
+        history_rows: list[dict[str, object]] = []
+        for trading_date in dates:
+            history_rows.extend(
+                [
+                    {"ticker": "AAA", "trading_date": trading_date.date(), "close": 3.0 if trading_date == pd.Timestamp("2026-03-20") else 1.0, "market_data_source": "live", "updated_at": pd.Timestamp(trading_date)},
+                    {"ticker": "BBB", "trading_date": trading_date.date(), "close": 1.0, "market_data_source": "live", "updated_at": pd.Timestamp(trading_date)},
+                    {"ticker": "CCC", "trading_date": trading_date.date(), "close": 1.0, "market_data_source": "live", "updated_at": pd.Timestamp(trading_date)},
+                ]
+            )
+        history_df = pd.DataFrame(history_rows)
+        conn.register("ticker_daily_history_incoming", history_df)
+        conn.execute("insert into ticker_daily_history select * from ticker_daily_history_incoming")
+        conn.unregister("ticker_daily_history_incoming")
+
+        audit = historical_theme_movement_row_audit(conn, 1, 7)
+
+        self.assertTrue(audit["audit_available"])
+        self.assertEqual(set(audit["aggregate_summary"]["boundary_label"].tolist()), {"start", "end"})
+        end_row = audit["aggregate_summary"][audit["aggregate_summary"]["boundary_label"] == "end"].iloc[0]
+        self.assertTrue(bool(end_row["passed_historical_gate"]))
+        self.assertAlmostEqual(float(end_row["avg_1m"]), 16.67, places=2)
+        constituent_rows = audit["constituent_rows"]
+        aaa_end = constituent_rows[(constituent_rows["boundary_label"] == "end") & (constituent_rows["ticker"] == "AAA")].iloc[0]
+        self.assertAlmostEqual(float(aaa_end["perf_1m_capped"]), 50.0, places=6)
+        self.assertIn("-> 50.00", str(aaa_end["raw_vs_capped_1m"]))
+        conn.close()
+
     def test_theme_history_window_uses_boundary_snapshot(self):
         conn = duckdb.connect(":memory:")
         conn.execute("create table themes(id bigint, name varchar, category varchar)")
@@ -3267,6 +3552,17 @@ class TestManualTickerSuppression(unittest.TestCase):
         conn = duckdb.connect(":memory:")
         conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
         conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp, provider varchar)")
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
         conn.execute(
             """
             create table symbol_refresh_status(
@@ -3339,6 +3635,105 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertEqual(onboarding_restored["ticker"].tolist(), ["DOCN"])
         conn.close()
 
+    def test_ticker_lookup_summary_distinguishes_any_snapshot_from_usable_current_preferred_snapshot(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp, provider varchar)")
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                manual_suppressed boolean default false,
+                manual_suppression_reason varchar,
+                manual_suppressed_at timestamp,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'AI - Agentic', 'AI', true)")
+        conn.execute("insert into theme_membership values (1, 'DOCN')")
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-20 16:00:00', 'live')")
+        conn.execute("insert into refresh_runs values (2, 'success', '2026-03-21 16:00:00', 'mock')")
+        conn.execute("insert into ticker_snapshots values (1, 'NVDA', 100, 1, 2, 3, null, 1000000, null, null, null, '2026-03-20 15:59:00', 'live')")
+        conn.execute("insert into ticker_snapshots values (2, 'DOCN', 40, 1, 2, 3, null, 2000000, null, null, null, '2026-03-21 15:59:00', 'mock')")
+
+        summary = ticker_lookup_summary(conn, "DOCN")
+
+        self.assertEqual(str(summary.iloc[0]["latest_snapshot_source"]), "mock")
+        self.assertFalse(bool(summary.iloc[0]["has_current_preferred_snapshot"]))
+        self.assertFalse(bool(summary.iloc[0]["has_current_usable_preferred_snapshot"]))
+        conn.close()
+
+    def test_ticker_lookup_summary_exposes_operational_refresh_suppression_even_without_manual_suppression(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp, provider varchar)")
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                manual_suppressed boolean default false,
+                manual_suppression_reason varchar,
+                manual_suppressed_at timestamp,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'AI - Edge Computing', 'AI', true)")
+        conn.execute("insert into theme_membership values (1, 'ACIA')")
+        conn.execute("""insert into symbol_refresh_status(
+            ticker, status, manual_suppressed, last_failure_category, consecutive_failure_count, rolling_failure_count
+        ) values ('ACIA', 'refresh_suppressed', FALSE, 'NO_CANDLES', 3, 4)""")
+
+        summary = ticker_lookup_summary(conn, "ACIA")
+
+        self.assertFalse(bool(summary.iloc[0]["manually_suppressed"]))
+        self.assertTrue(bool(summary.iloc[0]["operationally_suppressed"]))
+        conn.close()
+
     def test_ticker_lookup_page_source_includes_operational_suppression_controls(self):
         page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
         content = page_source.read_text(encoding="utf-8")
@@ -3356,11 +3751,16 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn("Bottom chart shows ticker-level composite history for the current top 5 visible governed tickers in this theme", content)
         self.assertIn("Selected-theme history table below still shows preferred-source captured/reconstructed theme history", content)
         self.assertIn("movement tables above may prefer recent ticker-history-derived boundary rows", content)
-        self.assertIn('c2.metric("Eligible/capped 1W"', content)
-        self.assertIn('c3.metric("Eligible/capped 1M"', content)
-        self.assertIn('c4.metric("Eligible/capped 3M"', content)
-        self.assertIn("These current summary metrics match the current ranking pipeline", content)
-        self.assertIn("Ticker rows below use current preferred-source snapshot rows for governed members.", content)
+        self.assertIn("def _render_summary_metric(label: str, value: object) -> None:", content)
+        self.assertIn('_render_summary_metric("Composite", _metric_value(current_row.get("composite_score")))', content)
+        self.assertIn('_render_summary_metric("Momentum", _metric_value(current_row.get("current_momentum_score")))', content)
+        self.assertIn('_render_summary_metric("Rank", current_rank)', content)
+        self.assertIn('_render_summary_metric("1W rank change", window_rank_change)', content)
+        self.assertIn('_render_summary_metric(', content)
+        self.assertIn('"Contributors"', content)
+        self.assertIn('_render_summary_metric("Avg 1W", _metric_value(current_row.get("avg_1w"), suffix="%"))', content)
+        self.assertIn('_render_summary_metric("Avg 1M", _metric_value(current_row.get("avg_1m"), suffix="%"))', content)
+        self.assertIn('_render_summary_metric("Avg 3M", _metric_value(current_row.get("avg_3m"), suffix="%"))', content)
         self.assertIn("This theme currently has no governed members, so there are no current member rows to display.", content)
         self.assertIn("no current governed-member rows are visible in the detail table", content)
         self.assertIn("Current enriched coverage is partial for this theme", content)
@@ -3436,7 +3836,7 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('hist = hist.tail(TICKER_COMPOSITE_CHART_TARGET_DAILY_POINTS)', content)
         self.assertIn('chart_df[["date", "ticker", "composite"]]', content)
         self.assertIn('"yearmonthdate(date):O"', content)
-        self.assertIn("st.altair_chart(chart, use_container_width=True)", content)
+        self.assertIn('st.altair_chart(chart, width="stretch")', content)
         self.assertIn('"ticker_composite_score": "composite"', content)
         self.assertIn('"ticker_momentum_score": "momentum"', content)
         self.assertIn("Bottom chart shows ticker-level composite history for the current top 5 visible governed tickers in this theme", content)
@@ -3444,10 +3844,30 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('include_suppressed_tickers = st.checkbox(', content)
         self.assertIn('"Include suppressed tickers"', content)
         self.assertIn('"eligible"', content)
-        self.assertIn('"manual_suppressed": "suppressed"', content)
+        self.assertIn('"suppressed": "suppressed"', content)
         self.assertIn("current_ticker_is_eligible(", content)
-        self.assertIn("Ticker rows below use current preferred-source snapshot rows for governed members.", content)
-        self.assertIn("The bottom chart is separate: it uses stored daily ticker history first", content)
+        self.assertIn("current_ticker_coverage_status(", content)
+        self.assertIn("visible_ticker_suppressed(", content)
+        self.assertIn('"current_status": "current status"', content)
+        self.assertIn("needs refresh check", content)
+        self.assertIn('st.caption("Current theme")', content)
+        self.assertIn('st.markdown("### Search and select a theme to view detail.")', content)
+        self.assertNotIn('st.info("Search and select a theme to view detail.")', content)
+        self.assertIn('theme_search_widget_key = f"theme_detail_view_search__{int(st.session_state.get(\'theme_detail_view_search__widget_version\', 0))}"', content)
+        self.assertIn('selected_search = st.selectbox(', content)
+        self.assertIn('index=None,', content)
+        self.assertIn('placeholder="Type to search and select a different theme"', content)
+        self.assertIn('_set_theme_selection(int(options[selection]), selection, "manual_dropdown")', content)
+        self.assertIn('rotate_replaceable_selectbox_widget(st.session_state, "theme_detail_view_search")', content)
+        self.assertIn('with st.container(border=True):', content)
+        self.assertIn("unsafe_allow_html=True", content)
+        self.assertIn("color:var(--text-color)", content)
+        self.assertIn('st.markdown("<div style=\'height:0.25rem;\'></div>", unsafe_allow_html=True)', content)
+        self.assertIn('selected_theme_id = st.session_state.get(SELECTED_THEME_ID_KEY)', content)
+        self.assertIn('selected_theme_label = st.session_state.get(SELECTED_THEME_LABEL_KEY)', content)
+        self.assertIn('l6.metric("Current coverage", str(current_coverage_status))', content)
+        self.assertIn("Ticker Lookup shows stored state only and does not trigger a live refresh attempt from this view.", content)
+        self.assertIn('l5.metric("Suppressed", "yes" if visible_lookup_suppressed else "no")', content)
         self.assertIn("Optional `rank_change` appears here only in delta view and uses prior daily 1W rank versus current 1W rank.", content)
         self.assertIn("Optional `rank_change` appears here only in delta view and uses prior daily 1M rank versus current 1M rank.", content)
         self.assertIn('display_df["rank"] = display_df.apply(', content)
@@ -3468,7 +3888,6 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertNotIn('"delta_1m"', content)
         self.assertNotIn("background-color: rgba(26, 127, 55, 0.16)", content)
         self.assertNotIn("background-color: rgba(180, 35, 24, 0.16)", content)
-        self.assertNotIn("unsafe_allow_html=True", content)
         self.assertIn('with st.expander("Standardized Composite Validation", expanded=False):', content)
         self.assertIn('with st.expander("Current Momentum Validation", expanded=False):', content)
         self.assertIn("Themes page above now uses the standardized composite as its default baseline", content)
@@ -3480,8 +3899,13 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('"recovery_factor"', content)
         self.assertIn('"current_momentum_quality_factor"', content)
         self.assertIn('"quality_factor"', content)
-        self.assertIn('theme_selector_widget_key = prepare_replaceable_selectbox_widget_key(', content)
-        self.assertIn('rotate_replaceable_selectbox_widget(st.session_state, SELECTED_THEME_LABEL_KEY)', content)
+        self.assertIn('st.caption("Current theme")', content)
+        self.assertIn('theme_search_widget_key = f"theme_detail_view_search__{int(st.session_state.get(\'theme_detail_view_search__widget_version\', 0))}"', content)
+        self.assertIn('selected_search = st.selectbox(', content)
+        self.assertIn('index=None,', content)
+        self.assertIn('placeholder="Type to search and select a different theme"', content)
+        self.assertIn('rotate_replaceable_selectbox_widget(st.session_state, "theme_detail_view_search")', content)
+        self.assertIn('_set_theme_selection(int(options[selection]), selection, "manual_dropdown")', content)
         self.assertIn('if col not in standardized_rankings.columns:', content)
         self.assertIn('if col not in comparison.columns:', content)
         self.assertIn('if st.button("Reload latest DB state", key="themes_force_refresh")', content)
@@ -3553,7 +3977,6 @@ class TestManualTickerSuppression(unittest.TestCase):
 
         self.assertIn("Movement windows resolve boundaries with precedence", content)
         self.assertIn("ticker_history_derived > captured > reconstructed", content)
-        self.assertIn("Detail history precedence for same-date rows is `captured > ticker_history_derived > reconstructed`.", content)
         self.assertIn("Movement boundary precedence here is `ticker_history_derived > captured > reconstructed`", content)
         self.assertIn("effective window=`{int(window_meta.get('effective_window_days') or 0)}`d", content)
         self.assertIn("This is a change leaderboard built from start-to-end window deltas", content)
@@ -3570,8 +3993,16 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('if st.button("Reload latest DB state", key="historical_force_refresh")', content)
         self.assertIn("This recomputes historical movement, leaderboard, and inflection tables in-memory from stored data only", content)
         self.assertIn("Historical Performance tables are driven by the resolved boundary window shown above", content)
-        self.assertIn('historical_theme_widget_key = prepare_replaceable_selectbox_widget_key(', content)
-        self.assertIn('rotate_replaceable_selectbox_widget(st.session_state, "historical_selected_theme")', content)
+        self.assertIn('sel = st.selectbox(', content)
+        self.assertIn('index=default_index,', content)
+        self.assertIn('with st.expander("Debug: Movement Row Audit", expanded=False):', content)
+        self.assertIn('movement_audit = historical_theme_movement_row_audit(conn, options[sel], int(lookback_days))', content)
+        self.assertIn("Constituent rows below show governed membership, eligibility, raw vs capped returns", content)
+        self.assertIn('leaders_tbl["concentration"] = leaders_tbl.apply(historical_concentration_label, axis=1)', content)
+        self.assertIn('top_momentum_display["concentration"] = top_momentum_display.apply(historical_concentration_label, axis=1)', content)
+        self.assertIn('leaders_cols.extend(["concentration", "delta_avg_1m", "delta_breadth"])', content)
+        self.assertIn('"eligible_contributor_count"', content)
+        self.assertIn('"covered_eligible_constituent_count"', content)
 
     def test_suggestions_page_source_uses_clickable_queue_and_scanner_selection(self):
         page_source = Path(__file__).resolve().parents[1] / "pages" / "3_Suggestions.py"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable
@@ -15,6 +17,9 @@ from .provider_mock import MockProvider
 from .rankings import persist_theme_snapshot_for_run
 from .symbol_hygiene import apply_refresh_failure, apply_refresh_success, refresh_eligible_tickers
 from .theme_service import active_ticker_universe
+
+logger = logging.getLogger(__name__)
+TRACE_REFRESH_TICKER = str(os.getenv("REFRESH_TRACE_TICKER", "") or "").strip().upper()
 
 
 class RefreshBlockedError(RuntimeError):
@@ -171,6 +176,10 @@ def _is_rate_limit_error(message: str) -> bool:
     return categorize_failure_message(message) == "RATE_LIMIT"
 
 
+def _refresh_trace_enabled(ticker: str | None) -> bool:
+    return bool(TRACE_REFRESH_TICKER) and str(ticker or "").strip().upper() == TRACE_REFRESH_TICKER
+
+
 def run_refresh(
     conn,
     provider_name: str,
@@ -198,6 +207,16 @@ def run_refresh(
     universe = list(tickers) if tickers is not None else active_ticker_universe(conn)
     clean_tickers = sorted({(t or "").strip().upper() for t in universe if (t or "").strip()})
     eligible_tickers, suppressed_tickers = refresh_eligible_tickers(conn, clean_tickers)
+    if TRACE_REFRESH_TICKER and TRACE_REFRESH_TICKER in clean_tickers:
+        logger.warning(
+            "Refresh trace %s: in_clean_tickers=%s in_eligible_tickers=%s in_suppressed_tickers=%s provider=%s scope_type=%s",
+            TRACE_REFRESH_TICKER,
+            True,
+            TRACE_REFRESH_TICKER in eligible_tickers,
+            TRACE_REFRESH_TICKER in suppressed_tickers,
+            provider.name,
+            scope_type,
+        )
 
     run_id = conn.execute(
         """
@@ -256,7 +275,21 @@ def run_refresh(
             return run_id
 
         for idx, ticker in enumerate(eligible_tickers, start=1):
+            if _refresh_trace_enabled(ticker):
+                logger.warning(
+                    "Refresh trace %s: entering provider.fetch_ticker_data at idx=%s run_id=%s",
+                    ticker,
+                    idx,
+                    run_id,
+                )
             df, failures = provider.fetch_ticker_data([ticker])
+            if _refresh_trace_enabled(ticker):
+                logger.warning(
+                    "Refresh trace %s: provider returned rows=%s failures=%s",
+                    ticker,
+                    len(df),
+                    len(failures),
+                )
 
             if not df.empty:
                 payload = df.copy()
@@ -303,6 +336,13 @@ def run_refresh(
                 error_message = failure.get("error_message", "Unknown error")
                 failed_symbol = str(failure.get("ticker", ticker) or ticker).strip().upper()
                 failure_category = categorize_failure_message(error_message)
+                if _refresh_trace_enabled(failed_symbol):
+                    logger.warning(
+                        "Refresh trace %s: normalized failure category=%s message=%s",
+                        failed_symbol,
+                        failure_category,
+                        error_message,
+                    )
                 conn.execute(
                     "INSERT INTO refresh_failures(run_id, ticker, error_message, failure_category) VALUES (?, ?, ?, ?)",
                     [run_id, failed_symbol, error_message, failure_category],

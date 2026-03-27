@@ -330,7 +330,15 @@ Current ticker detail source semantics:
 - current/live ticker detail fields use the preferred-source current snapshot path
 - this is the right source for current ticker detail because the table is meant to show the latest governed-member snapshot state, not reconstructed daily history
 - suppressed governed members are now hidden by default in the visible table, but remain available through the local `Include suppressed tickers` toggle
-- when suppressed rows are included, the table can also show a `suppressed` indicator column
+- when suppressed rows are included, the table can also show a visible `suppressed` indicator column
+- visible `suppressed` means overall suppression, not only manual suppression:
+  - `yes` when `manual_suppressed = true`
+  - or when `symbol_refresh_status.status = 'refresh_suppressed'`
+- the visible `current status` field is a detail-view operational state, not a new ranking formula:
+  - `healthy current coverage` = governed, unsuppressed, and currently eligible
+  - `suppressed` = manually/operationally suppressed
+  - `needs refresh check` = governed and unsuppressed, but no usable current preferred-source snapshot coverage is stored
+  - `current but ineligible` = preferred-source snapshot coverage exists, but the row still fails current eligibility
 - the visible `eligible` column uses the same effective current-ranking eligibility rules as the main current ranking pipeline:
   - snapshot present
   - price >= minimum
@@ -369,6 +377,8 @@ ticker_momentum =
 - chart history uses `ticker_history_last_n_trading_days()` first so the time series can use stored daily history when available
 - only if deeper daily history is unavailable for a ticker does the chart fall back to recent preferred-source `ticker_history_last_n_snapshots()` rows
 - chart plotting keeps one weekday point per ticker-day and excludes weekends from the rendered series
+- the Themes selected-theme detail panel and Ticker Lookup remain read-only stored-state surfaces; they do not trigger a live refresh attempt from the view itself
+- Ticker Lookup uses the same user-facing suppression truth: visible `Suppressed = yes` when suppression is manual or operational
 
 Current summary cards:
 - `Governed tickers`

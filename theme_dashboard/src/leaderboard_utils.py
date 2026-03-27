@@ -65,6 +65,37 @@ def current_leadership_quality_label(row: pd.Series) -> str:
     return "Narrow leader"
 
 
+def historical_concentration_label(row: pd.Series) -> str:
+    contributor_count = next(
+        (
+            int(value)
+            for value in [
+                pd.to_numeric(row.get("covered_eligible_contributor_count"), errors="coerce"),
+                pd.to_numeric(row.get("covered_eligible_constituent_count"), errors="coerce"),
+                pd.to_numeric(row.get("eligible_contributor_count"), errors="coerce"),
+                pd.to_numeric(row.get("eligible_constituent_count"), errors="coerce"),
+                pd.to_numeric(row.get("ticker_count"), errors="coerce"),
+            ]
+            if value is not None and not pd.isna(value) and int(value) > 0
+        ),
+        0,
+    )
+    breadth = row.get("positive_1m_breadth_pct", row.get("breadth_1m"))
+    breadth_value = float(breadth) if breadth is not None and not pd.isna(breadth) else None
+
+    if contributor_count <= 0:
+        return "Unknown"
+    if contributor_count == 1:
+        return "Single-name"
+    if contributor_count == 2:
+        return "Thin"
+    if contributor_count == 3:
+        return "Narrow"
+    if breadth_value is not None and breadth_value >= 60:
+        return "Broad"
+    return "Narrow"
+
+
 def _validate_window_leaderboard_inputs(momentum: dict) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
     history = momentum.get("history", pd.DataFrame())
     if history.empty:
@@ -95,11 +126,17 @@ def _validate_window_leaderboard_inputs(momentum: dict) -> tuple[pd.DataFrame, p
     return history, summary, None
 
 
-def build_window_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -> tuple[pd.DataFrame, str | None]:
+def build_window_leaderboard(
+    momentum: dict,
+    perf_col: str,
+    top_k: int = 10,
+    *,
+    primary_sort_col: str | None = None,
+) -> tuple[pd.DataFrame, str | None]:
     """Build a window-specific leaderboard from momentum output.
 
     Sorting is deterministic and window-specific:
-    1) selected window performance column (avg_1w/avg_1m/avg_3m),
+    1) selected primary sort column,
     2) momentum_score,
     3) rank_change.
     """
@@ -108,11 +145,17 @@ def build_window_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -> 
         return pd.DataFrame(), msg
 
     latest = history.sort_values(["snapshot_time", "theme"]).groupby("theme_id", as_index=False).tail(1)
+    sort_col = primary_sort_col or perf_col
+    sort_cols = [sort_col]
+    if sort_col != "momentum_score":
+        sort_cols.append("momentum_score")
+    sort_cols.extend(["rank_change", "theme"])
+    ascending = [False] * (len(sort_cols) - 1) + [True]
 
     ranked = (
         latest[["theme_id", "theme", perf_col]]
         .merge(summary[["theme_id", "momentum_score", "rank_change"]], on="theme_id", how="left")
-        .sort_values([perf_col, "momentum_score", "rank_change", "theme"], ascending=[False, False, False, True])
+        .sort_values(sort_cols, ascending=ascending)
         .head(top_k)
         .reset_index(drop=True)
     )

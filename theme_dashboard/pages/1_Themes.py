@@ -22,12 +22,14 @@ from src.queries import baseline_status, ticker_history_last_n_snapshots, ticker
 from src.rankings import (
     CURRENT_MOMENTUM_WEIGHTS,
     current_momentum_quality_factor,
+    current_ticker_coverage_status,
     current_ticker_is_eligible,
     ticker_current_momentum_score,
     ticker_standardized_composite_score,
     standardized_participation_factor,
     standardized_recovery_factor,
     standardized_three_month_guardrail_factor,
+    visible_ticker_suppressed,
 )
 from src.streamlit_utils import (
     clear_current_market_view_caches,
@@ -433,6 +435,25 @@ def _apply_ticker_model_scores(ticker_df: pd.DataFrame) -> pd.DataFrame:
         lambda row: ticker_current_momentum_score(row.get("perf_1w"), row.get("perf_1m"), row.get("perf_3m")),
         axis=1,
     )
+    out["has_current_usable_snapshot"] = out.apply(
+        lambda row: bool(
+            pd.notna(row.get("snapshot_time"))
+            and any(
+                pd.notna(row.get(col))
+                for col in ["price", "perf_1w", "perf_1m", "perf_3m", "avg_volume"]
+            )
+        ),
+        axis=1,
+    )
+    out["suppressed"] = out.apply(
+        lambda row: bool(
+            visible_ticker_suppressed(
+                row.get("status", "active"),
+                bool(row.get("manual_suppressed", False)),
+            )
+        ),
+        axis=1,
+    )
     out["eligible"] = out.apply(
         lambda row: bool(
             current_ticker_is_eligible(
@@ -444,6 +465,15 @@ def _apply_ticker_model_scores(ticker_df: pd.DataFrame) -> pd.DataFrame:
                     or (row.get("price") is not None and not pd.isna(row.get("price")))
                 ),
             )
+        ),
+        axis=1,
+    )
+    out["current_status"] = out.apply(
+        lambda row: current_ticker_coverage_status(
+            governed_membership=True,
+            suppressed=bool(row.get("suppressed", False)),
+            eligible=bool(row.get("eligible", False)),
+            has_current_usable_snapshot=bool(row.get("has_current_usable_snapshot", False)),
         ),
         axis=1,
     )
@@ -545,11 +575,17 @@ def _render_ticker_composite_history_chart(chart_df: pd.DataFrame) -> None:
             ],
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
-def _build_historical_leaderboard(momentum: dict, metric_col: str, metric_label: str) -> tuple[object, str | None]:
-    ranked, msg = build_window_leaderboard(momentum, metric_col, top_k=10)
+def _build_historical_leaderboard(
+    momentum: dict,
+    metric_col: str,
+    metric_label: str,
+    *,
+    primary_sort_col: str | None = None,
+) -> tuple[object, str | None]:
+    ranked, msg = build_window_leaderboard(momentum, metric_col, top_k=10, primary_sort_col=primary_sort_col)
     if ranked.empty:
         return None, msg
     ranked = ranked.rename(columns={metric_col: metric_label})
@@ -627,10 +663,12 @@ def _render_leaderboard(
     prior_lookup: pd.DataFrame | None = None,
     performance_prior_col: str | None = None,
     display_metric_col: str | None = None,
+    ranking_caption: str | None = None,
 ):
     st.markdown(f"**{title}**")
     st.caption(
-        "Ranked by performance first, then momentum score, then rank improvement. "
+        ranking_caption
+        or "Ranked by performance first, then momentum score, then rank improvement. "
         "This is a historical end-of-window table, so the selected window metric still drives rank even though it is shown through the aligned avg columns rather than a separate `performance` column. "
         "Breadth is contextual only and does not determine rank."
     )
@@ -1227,18 +1265,16 @@ with explore_tab:
     render_feedback_message(st.session_state, "themes_refresh_feedback")
 
     options, label_by_id, id_by_label = _theme_option_maps(themes)
-    fallback_theme_id = int(themes.iloc[0]["id"])
-    selected_theme_id, selected_theme_label = resolve_theme_selection(
-        st.session_state.get(SELECTED_THEME_ID_KEY),
-        st.session_state.get(SELECTED_THEME_LABEL_KEY),
-        label_by_id,
-        id_by_label,
-        fallback_theme_id,
-    )
-    if st.session_state.get(SELECTED_THEME_ID_KEY) != selected_theme_id:
-        st.session_state[SELECTED_THEME_ID_KEY] = selected_theme_id
-    if st.session_state.get(SELECTED_THEME_LABEL_KEY) != selected_theme_label:
-        st.session_state[SELECTED_THEME_LABEL_KEY] = selected_theme_label
+    selected_theme_id = st.session_state.get(SELECTED_THEME_ID_KEY)
+    selected_theme_label = st.session_state.get(SELECTED_THEME_LABEL_KEY)
+    if selected_theme_id in label_by_id:
+        selected_theme_label = label_by_id[int(selected_theme_id)]
+    elif selected_theme_label in id_by_label:
+        selected_theme_id = int(id_by_label[str(selected_theme_label)])
+        selected_theme_label = str(selected_theme_label)
+    else:
+        selected_theme_id = None
+        selected_theme_label = None
     if SELECTED_THEME_SOURCE_KEY not in st.session_state:
         st.session_state[SELECTED_THEME_SOURCE_KEY] = "default"
 
@@ -1473,7 +1509,12 @@ with explore_tab:
             )
     _render_current_momentum_validation(current_momentum_rankings, current_momentum_comparison)
 
-    lb1, lb1_msg = _build_historical_leaderboard(momentum_1w, "avg_1w", "performance")
+    lb1, lb1_msg = _build_historical_leaderboard(
+        momentum_1w,
+        "avg_1w",
+        "performance",
+        primary_sort_col="momentum_score",
+    )
     lb2, lb2_msg = _build_historical_leaderboard(momentum_1m, "avg_1m", "performance")
     st.divider()
     st.subheader("Theme Movement Snapshots")
@@ -1518,6 +1559,10 @@ with explore_tab:
                 prior_lookup=movement_1w_delta_lookup,
                 performance_prior_col="prior_avg_1w",
                 display_metric_col="avg_1w",
+                ranking_caption=(
+                    "Ranked by momentum score first, then 1W return level, then rank improvement. "
+                    "This remains a historical movement table, so `avg_1w` still gives the end-of-window 1W context while momentum now drives the board."
+                ),
             )
     with c2:
         if lb2 is None:
@@ -1548,88 +1593,162 @@ with explore_tab:
 
     st.divider()
 
-    labels = list(options.keys())
-    theme_selector_widget_key = prepare_replaceable_selectbox_widget_key(
-        st.session_state,
-        SELECTED_THEME_LABEL_KEY,
-        labels,
-        selected_theme_label,
-    )
-    selection = st.selectbox(
-        "Theme detail view",
-        labels,
-        key=theme_selector_widget_key,
-        on_change=_apply_dropdown_selection,
-        args=(id_by_label, theme_selector_widget_key),
-    )
-    theme_id = int(options[selection])
-    st.caption(f"Selected from: {describe_selection_source(st.session_state.get(SELECTED_THEME_SOURCE_KEY))}")
+    selected_theme_id = st.session_state.get(SELECTED_THEME_ID_KEY)
+    selected_theme_label = st.session_state.get(SELECTED_THEME_LABEL_KEY)
+    if selected_theme_id in label_by_id:
+        selected_theme_label = label_by_id[int(selected_theme_id)]
+    elif selected_theme_label in id_by_label:
+        selected_theme_id = int(id_by_label[str(selected_theme_label)])
+        selected_theme_label = str(selected_theme_label)
+    else:
+        selected_theme_id = None
+        selected_theme_label = None
 
-    with get_conn() as conn:
-        ticker_df = theme_ticker_metrics(conn, theme_id, include_suppressed=True)
-        history_df = theme_snapshot_history(conn, theme_id, limit=50)
-        theme_current_row = current_theme_metrics[current_theme_metrics["theme_id"] == theme_id].copy()
+    labels = list(options.keys())
+    default_theme_index = labels.index(selected_theme_label) if selected_theme_label in labels else None
+    selection = labels[default_theme_index] if default_theme_index is not None else None
+    picker_col, source_col = st.columns([3.5, 1.5])
+    with picker_col:
+        st.caption("Current theme")
+        if selection:
+            st.markdown(f"### {selection}")
+        else:
+            st.markdown("### Search and select a theme to view detail.")
+        st.markdown("")
+        theme_search_widget_key = f"theme_detail_view_search__{int(st.session_state.get('theme_detail_view_search__widget_version', 0))}"
+        selected_search = st.selectbox(
+            "Theme detail view",
+            labels,
+            index=None,
+            placeholder="Type to search and select a different theme",
+            key=theme_search_widget_key,
+            label_visibility="collapsed",
+        )
+        if selected_search:
+            selection = str(selected_search)
+            _set_theme_selection(int(options[selection]), selection, "manual_dropdown")
+            rotate_replaceable_selectbox_widget(st.session_state, "theme_detail_view_search")
+    with source_col:
+        if selection:
+            st.caption(f"Selected from: {describe_selection_source(st.session_state.get(SELECTED_THEME_SOURCE_KEY))}")
+
+    if not selection:
+        ticker_df = pd.DataFrame()
+        history_df = pd.DataFrame()
+        theme_current_row = pd.DataFrame()
+        include_suppressed_tickers = False
+        visible_ticker_df = pd.DataFrame()
+        ticker_composite_history_chart_df = pd.DataFrame()
+        top_composite_tickers = []
+        current_row = None
+        governed_count = 0
+        visible_member_rows = 0
+        suppressed_hidden_count = 0
+        enriched_row_count = 0
+    else:
+        theme_id = int(options[selection])
+
+        with get_conn() as conn:
+            ticker_df = theme_ticker_metrics(conn, theme_id, include_suppressed=True)
+            history_df = theme_snapshot_history(conn, theme_id, limit=50)
+            theme_current_row = current_theme_metrics[current_theme_metrics["theme_id"] == theme_id].copy()
 
     ticker_df = _apply_ticker_model_scores(ticker_df)
     if not ticker_df.empty:
         ticker_df = ticker_df.copy()
-        ticker_df["eligible"] = ticker_df.apply(
-            lambda row: current_ticker_is_eligible(
-                row.get("price"),
-                row.get("avg_volume"),
-                row.get("status", "active"),
-                snapshot_present=pd.notna(row.get("snapshot_time")),
-            ),
-            axis=1,
-        )
         ticker_df["manual_suppressed"] = ticker_df.get("manual_suppressed", False).fillna(False).astype(bool)
+        ticker_df["suppressed"] = ticker_df.get("suppressed", False).fillna(False).astype(bool)
 
-    include_suppressed_tickers = st.checkbox(
-        "Include suppressed tickers",
-        value=False,
-        key="themes_include_suppressed_tickers",
-        help="Show governed members that are manually suppressed from the default current detail view.",
-    )
-    visible_ticker_df = (
-        ticker_df.copy()
-        if include_suppressed_tickers
-        else ticker_df[~ticker_df.get("manual_suppressed", pd.Series(False, index=ticker_df.index)).fillna(False)].copy()
-    )
-    with get_conn() as conn:
-        ticker_composite_history_chart_df, top_composite_tickers = _build_ticker_composite_history_chart_df(conn, visible_ticker_df)
+    if selection:
+        include_suppressed_tickers = st.checkbox(
+            "Include suppressed tickers",
+            value=False,
+            key="themes_include_suppressed_tickers",
+            help="Show governed members that are suppressed either manually or operationally from the default current detail view.",
+        )
+        visible_ticker_df = (
+            ticker_df.copy()
+            if include_suppressed_tickers
+            else ticker_df[~ticker_df.get("suppressed", pd.Series(False, index=ticker_df.index)).fillna(False)].copy()
+        )
+        if not visible_ticker_df.empty:
+            visible_ticker_df = visible_ticker_df.sort_values(
+                ["eligible", "has_current_usable_snapshot", "ticker_composite_score", "ticker"],
+                ascending=[False, False, False, True],
+                na_position="last",
+            ).reset_index(drop=True)
+        with get_conn() as conn:
+            ticker_composite_history_chart_df, top_composite_tickers = _build_ticker_composite_history_chart_df(conn, visible_ticker_df)
 
-    current_row = theme_current_row.iloc[0] if not theme_current_row.empty else None
-    governed_count = int(current_row.get("ticker_count") or 0) if current_row is not None else int(len(ticker_df))
-    visible_member_rows = int(len(visible_ticker_df))
-    suppressed_hidden_count = max(int(len(ticker_df)) - visible_member_rows, 0)
-    enriched_basis_cols = [col for col in ["price", "perf_1w", "perf_1m", "perf_3m", "avg_volume", "snapshot_time"] if col in visible_ticker_df.columns]
-    enriched_row_count = int(visible_ticker_df[enriched_basis_cols].notna().any(axis=1).sum()) if enriched_basis_cols else 0
+        current_row = theme_current_row.iloc[0] if not theme_current_row.empty else None
+        governed_count = int(current_row.get("ticker_count") or 0) if current_row is not None else int(len(ticker_df))
+        visible_member_rows = int(len(visible_ticker_df))
+        suppressed_hidden_count = max(int(len(ticker_df)) - visible_member_rows, 0)
+        enriched_basis_cols = [col for col in ["price", "perf_1w", "perf_1m", "perf_3m", "avg_volume", "snapshot_time"] if col in visible_ticker_df.columns]
+        enriched_row_count = int(visible_ticker_df[enriched_basis_cols].notna().any(axis=1).sum()) if enriched_basis_cols else 0
 
     if current_row is not None:
-        qc1, qc2, qc3, qc4 = st.columns(4)
-        qc1.metric("Governed tickers", int(current_row.get("ticker_count") or 0))
-        qc2.metric("Current eligible", int(current_row.get("eligible_composite_count") or 0))
-        qc3.metric("Eligible breadth", f"{float(current_row.get('eligible_breadth_pct') or 0):.1f}%")
-        quality_label = "n/a (inactive theme)" if not bool(current_row.get("is_active")) else current_leadership_quality_label(current_row)
-        qc4.metric("Current quality", str(quality_label))
-        st.caption(
-            "Current theme ranking eligibility is separate from membership: governed members remain in the theme, "
-            "but only eligible preferred-source contributors feed current ranking calculations."
-        )
+        def _metric_value(value, *, suffix: str = "", decimals: int = 2) -> str:
+            if value is None or pd.isna(value):
+                return "—"
+            return f"{float(value):.{decimals}f}{suffix}"
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Current eligible contribs", int(current_row.get("eligible_composite_count") or 0))
-        c2.metric("Eligible/capped 1W", f"{float(current_row.get('avg_1w') or 0):.2f}%")
-        c3.metric("Eligible/capped 1M", f"{float(current_row.get('avg_1m') or 0):.2f}%")
-        c4.metric("Eligible/capped 3M", f"{float(current_row.get('avg_3m') or 0):.2f}%")
-        st.caption(
-            "These current summary metrics match the current ranking pipeline: preferred-source contributors only, "
-            "eligibility-filtered, and constituent returns capped before aggregation. Raw governed-member ticker rows remain below for inspection."
-        )
-        st.caption(
-            "Ticker rows below use current preferred-source snapshot rows for governed members. "
-            "The bottom chart is separate: it uses stored daily ticker history first, with recent snapshot history only as a fallback when deeper daily history is missing."
-        )
+        def _render_summary_metric(label: str, value: object) -> None:
+            rendered_value = "â€”" if value is None else str(value)
+            if rendered_value == "Ã¢â‚¬â€":
+                rendered_value = "&mdash;"
+            rendered_value = "&mdash;" if value is None else str(value)
+            st.markdown(
+                (
+                    "<div style='padding:0.02rem 0.04rem; line-height:1.0;'>"
+                    f"<div style='font-size:0.76rem; font-weight:500; color:var(--text-color); opacity:0.82; margin-bottom:0.08rem;'>{label}</div>"
+                    f"<div style='font-size:1.14rem; font-weight:625; color:var(--text-color);'>{rendered_value}</div>"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+
+        current_rank = "-"
+        if not current_rankings.empty and "theme_id" in current_rankings.columns:
+            current_rank_lookup = current_rankings.reset_index(drop=True).copy()
+            current_rank_lookup["current_rank"] = current_rank_lookup.index + 1
+            current_rank_row = current_rank_lookup[current_rank_lookup["theme_id"] == theme_id]
+            if not current_rank_row.empty:
+                current_rank = int(current_rank_row.iloc[0]["current_rank"])
+        window_rank_change = "—"
+        movement_summary = momentum_1w.get("window_summary", pd.DataFrame())
+        if not movement_summary.empty and "theme_id" in movement_summary.columns:
+            movement_row = movement_summary[movement_summary["theme_id"] == theme_id]
+            if not movement_row.empty and pd.notna(movement_row.iloc[0].get("rank_change")):
+                window_rank_change = f"{float(movement_row.iloc[0]['rank_change']):+.0f}"
+
+        summary_left, summary_mid, summary_right = st.columns([1.95, 4.1, 1.95], gap="small")
+        with summary_mid:
+            with st.container(border=True):
+                s1, s2, s3, s4 = st.columns(4, gap="small")
+                with s1:
+                    _render_summary_metric("Composite", _metric_value(current_row.get("composite_score")))
+                with s2:
+                    _render_summary_metric("Momentum", _metric_value(current_row.get("current_momentum_score")))
+                with s3:
+                    _render_summary_metric("Rank", current_rank)
+                with s4:
+                    _render_summary_metric("1W rank change", window_rank_change)
+
+                st.markdown("<div style='height:0.25rem;'></div>", unsafe_allow_html=True)
+                s5, s6, s7, s8 = st.columns(4, gap="small")
+                with s5:
+                    _render_summary_metric(
+                        "Contributors",
+                        "—" if pd.isna(current_row.get("eligible_composite_count")) else int(current_row.get("eligible_composite_count") or 0),
+                    )
+                with s6:
+                    _render_summary_metric("Avg 1W", _metric_value(current_row.get("avg_1w"), suffix="%"))
+                with s7:
+                    _render_summary_metric("Avg 1M", _metric_value(current_row.get("avg_1m"), suffix="%"))
+                with s8:
+                    _render_summary_metric("Avg 3M", _metric_value(current_row.get("avg_3m"), suffix="%"))
+                st.markdown("<div style='height:0.18rem;'></div>", unsafe_allow_html=True)
 
     if suppressed_hidden_count > 0 and not include_suppressed_tickers:
         st.caption(f"{suppressed_hidden_count} suppressed ticker(s) are hidden from the default detail table.")
@@ -1675,7 +1794,7 @@ with explore_tab:
             for c in [
                 "ticker",
                 "eligible",
-                "manual_suppressed" if include_suppressed_tickers else None,
+                "suppressed" if include_suppressed_tickers else None,
                 "price",
                 "perf_1w",
                 "perf_1m",
@@ -1688,6 +1807,7 @@ with explore_tab:
                 "short_interest_pct",
                 "float_shares",
                 "adr_pct",
+                "current_status",
                 "last_updated",
                 "snapshot_time",
                 "latest_refresh_time",
@@ -1696,8 +1816,9 @@ with explore_tab:
         ]
 
         rename_map = {
+            "current_status": "current status",
             "eligible": "eligible",
-            "manual_suppressed": "suppressed",
+            "suppressed": "suppressed",
             "ticker_composite_score": "composite",
             "ticker_momentum_score": "momentum",
             "last_updated": "market_data_time",
@@ -1710,11 +1831,7 @@ with explore_tab:
             if nullable_col in view_df.columns:
                 view_df[nullable_col] = view_df[nullable_col].apply(display_or_dash)
 
-        st.caption(
-            "`market_data_time` is the provider market-data timestamp. "
-            "`snapshot_time` is when the preferred-source ticker snapshot row was captured. "
-            "`last_refresh_time` is the latest completed refresh in the current ticker-source view."
-        )
+        st.caption("Timestamps: `market_data_time` = provider market data, `snapshot_time` = captured snapshot row, `last_refresh_time` = latest completed refresh.")
         render_dataframe("theme_ticker_view", view_df, width="stretch")
 
     if not ticker_composite_history_chart_df.empty:
@@ -1897,13 +2014,32 @@ with manage_tab:
             st.warning("Ticker lookup did not return any rows.")
         else:
             row = lookup.iloc[0]
+            visible_lookup_suppressed = bool(
+                visible_ticker_suppressed(
+                    "refresh_suppressed" if bool(row.get("operationally_suppressed")) else "active",
+                    bool(row.get("manually_suppressed")),
+                )
+            )
+            current_lookup_eligible = current_ticker_is_eligible(
+                row.get("preferred_price"),
+                row.get("preferred_avg_volume"),
+                "refresh_suppressed" if visible_lookup_suppressed else "active",
+                snapshot_present=bool(row.get("has_current_preferred_snapshot")),
+            )
+            current_coverage_status = current_ticker_coverage_status(
+                governed_membership=bool(row.get("exists_in_theme_membership")),
+                suppressed=visible_lookup_suppressed,
+                eligible=bool(current_lookup_eligible),
+                has_current_usable_snapshot=bool(row.get("has_current_usable_preferred_snapshot")),
+            )
             st.write(f"**Status:** `{row['lookup_status']}` for `{lookup_ticker}`")
-            l1, l2, l3, l4, l5 = st.columns(5)
+            l1, l2, l3, l4, l5, l6 = st.columns(6)
             l1.metric("Assigned themes", int(row.get("assigned_theme_count") or 0))
             l2.metric("In governed membership", "yes" if bool(row.get("exists_in_theme_membership")) else "no")
             l3.metric("In snapshots", "yes" if bool(row.get("exists_in_ticker_snapshots")) else "no")
             l4.metric("Seen elsewhere", "yes" if bool(row.get("exists_in_refresh_run_tickers") or row.get("exists_in_symbol_refresh_status")) else "no")
-            l5.metric("Suppressed", "yes" if bool(row.get("manually_suppressed")) else "no")
+            l5.metric("Suppressed", "yes" if visible_lookup_suppressed else "no")
+            l6.metric("Current coverage", str(current_coverage_status))
             active_assignment_count = int(row.get("active_assigned_theme_count") or 0)
             inactive_assignment_count = int(row.get("inactive_assigned_theme_count") or 0)
             if int(row.get("assigned_theme_count") or 0):
@@ -1911,16 +2047,31 @@ with manage_tab:
                 if inactive_assignment_count:
                     assignment_bits.append(f"inactive=`{inactive_assignment_count}`")
                 st.caption("Governed membership assignment breakdown: " + " | ".join(assignment_bits))
-            if bool(row.get("manually_suppressed")):
+            if visible_lookup_suppressed:
                 st.caption(
                     "This ticker remains visible in raw lookup context but is excluded operationally from governed-membership-driven workflows."
+                )
+            elif str(current_coverage_status) == "needs refresh check":
+                refresh_note = (
+                    "No refresh attempt is recorded yet for this ticker."
+                    if not bool(row.get("exists_in_refresh_run_tickers"))
+                    else "A refresh trail exists, but no usable current preferred-source snapshot row is stored."
+                )
+                st.caption(
+                    "This ticker is governed and unsuppressed but has no usable current preferred-source snapshot coverage. "
+                    "Ticker Lookup shows stored state only and does not trigger a live refresh attempt from this view. "
+                    f"{refresh_note}"
                 )
 
             detail = {
                 "ticker": lookup_ticker,
-                "suppressed": "yes" if bool(row.get("manually_suppressed")) else "no",
+                "current_coverage": current_coverage_status,
+                "preferred_snapshot_present": "yes" if bool(row.get("has_current_preferred_snapshot")) else "no",
+                "suppressed": "yes" if visible_lookup_suppressed else "no",
                 "suppression_reason": row.get("manual_suppression_reason") or display_or_dash(None),
                 "suppressed_at": short_timestamp(row.get("manual_suppressed_at")) or display_or_dash(None),
+                "preferred_snapshot_time": short_timestamp(row.get("preferred_snapshot_time")) or display_or_dash(None),
+                "preferred_snapshot_source": row.get("preferred_snapshot_source") or display_or_dash(None),
                 "latest_snapshot_time": short_timestamp(row.get("latest_snapshot_time")) or display_or_dash(None),
                 "latest_snapshot_source": row.get("latest_snapshot_source") or "n/a",
                 "latest_price": format_price(row.get("latest_price")) or display_or_dash(None),

@@ -154,6 +154,28 @@ def current_ticker_is_eligible(
     return str(status or "active") != "refresh_suppressed"
 
 
+def visible_ticker_suppressed(status: object = "active", manual_suppressed: bool = False) -> bool:
+    return bool(manual_suppressed) or str(status or "active") == "refresh_suppressed"
+
+
+def current_ticker_coverage_status(
+    *,
+    governed_membership: bool,
+    suppressed: bool,
+    eligible: bool,
+    has_current_usable_snapshot: bool,
+) -> str:
+    if not governed_membership:
+        return "not governed"
+    if suppressed:
+        return "suppressed"
+    if eligible:
+        return "healthy current coverage"
+    if not has_current_usable_snapshot:
+        return "needs refresh check"
+    return "current but ineligible"
+
+
 def ticker_standardized_composite_score(
     perf_1w: int | float,
     perf_1m: int | float,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
+import logging
+import os
 from typing import Iterable
 
 import pandas as pd
@@ -9,6 +11,9 @@ import requests
 
 from .config import LIVE_HISTORICAL_SOURCE, LIVE_QUOTE_PROFILE_SOURCE, massive_api_key
 from .provider_base import ProviderBase
+
+logger = logging.getLogger(__name__)
+TRACE_REFRESH_TICKER = str(os.getenv("REFRESH_TRACE_TICKER", "") or "").strip().upper()
 
 
 class LiveProvider(ProviderBase):
@@ -174,6 +179,8 @@ class LiveProvider(ProviderBase):
 
         for ticker in normalized:
             try:
+                if TRACE_REFRESH_TICKER and ticker == TRACE_REFRESH_TICKER:
+                    logger.warning("Refresh trace %s: LiveProvider fetch start", ticker)
                 closes, volumes, last_updated = self._fetch_history(ticker)
                 perf_1w = self._calc_return(closes, 5)
                 perf_1m = self._calc_return(closes, 21)
@@ -204,6 +211,14 @@ class LiveProvider(ProviderBase):
                         "last_updated": last_updated,
                     }
                 )
+                if TRACE_REFRESH_TICKER and ticker == TRACE_REFRESH_TICKER:
+                    logger.warning(
+                        "Refresh trace %s: LiveProvider success closes=%s avg_volume_present=%s last_updated=%s",
+                        ticker,
+                        len(closes),
+                        self._avg_volume(volumes, 21) is not None,
+                        last_updated,
+                    )
             except Exception as exc:
                 msg = str(exc)
                 if "RATE_LIMIT" in msg or "429" in msg:
@@ -214,6 +229,8 @@ class LiveProvider(ProviderBase):
                     msg = f"NO_CANDLES: {msg}"
                 else:
                     msg = f"REQUEST_ERROR: {msg}"
+                if TRACE_REFRESH_TICKER and ticker == TRACE_REFRESH_TICKER:
+                    logger.warning("Refresh trace %s: LiveProvider failure message=%s", ticker, msg)
                 failures.append({"ticker": ticker, "error_message": f"Massive fetch failed: {msg}"})
 
         return pd.DataFrame(rows), failures

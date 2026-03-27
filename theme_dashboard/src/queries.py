@@ -5,6 +5,8 @@ import pandas as pd
 
 from .config import (
     COMPOSITE_WEIGHTS,
+    CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS,
+    CURRENT_RANKING_RETURN_CAP_PCT,
     ENABLE_RECENT_TICKER_HISTORY_PREFERRED_RECONSTRUCTION,
     THEME_CONFIDENCE_FULL_COUNT,
 )
@@ -325,6 +327,16 @@ def _recent_ticker_history_theme_history(
     recent_start = max(recent_floor, requested_start) if requested_start is not None else recent_floor
     buffer_start = recent_start - pd.Timedelta(days=TICKER_HISTORY_BUFFER_DAYS)
     membership_filter_sql = "WHERE t.id = ?" if theme_id is not None else ""
+    suppression_join_sql = (
+        "LEFT JOIN symbol_refresh_status s ON s.ticker = m.ticker"
+        if table_exists(conn, "symbol_refresh_status")
+        else ""
+    )
+    eligibility_expr = (
+        "CASE WHEN COALESCE(s.status, 'active') = 'refresh_suppressed' THEN FALSE ELSE TRUE END"
+        if table_exists(conn, "symbol_refresh_status")
+        else "TRUE"
+    )
     params: list[object] = []
     if theme_id is not None:
         params.append(int(theme_id))
@@ -347,10 +359,10 @@ def _recent_ticker_history_theme_history(
                 t.name AS theme,
                 t.category,
                 m.ticker,
-                CASE WHEN COALESCE(s.status, 'active') = 'refresh_suppressed' THEN FALSE ELSE TRUE END AS is_eligible
+                {eligibility_expr} AS is_eligible
             FROM themes t
             JOIN theme_membership m ON m.theme_id = t.id
-            LEFT JOIN symbol_refresh_status s ON s.ticker = m.ticker
+            {suppression_join_sql}
             {membership_filter_sql}
         ),
         theme_counts AS (
@@ -390,12 +402,12 @@ def _recent_ticker_history_theme_history(
             SELECT
                 m.theme_id,
                 rp.trading_date,
-                AVG(CASE WHEN m.is_eligible THEN rp.perf_1w ELSE NULL END) AS avg_1w,
-                AVG(CASE WHEN m.is_eligible THEN rp.perf_1m ELSE NULL END) AS avg_1m,
-                AVG(CASE WHEN m.is_eligible THEN rp.perf_3m ELSE NULL END) AS avg_3m,
-                AVG(CASE WHEN NOT m.is_eligible OR rp.perf_1w IS NULL THEN NULL WHEN rp.perf_1w > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_1w_breadth_pct,
-                AVG(CASE WHEN NOT m.is_eligible OR rp.perf_1m IS NULL THEN NULL WHEN rp.perf_1m > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_1m_breadth_pct,
-                AVG(CASE WHEN NOT m.is_eligible OR rp.perf_3m IS NULL THEN NULL WHEN rp.perf_3m > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_3m_breadth_pct,
+                AVG(CASE WHEN m.is_eligible THEN GREATEST(LEAST(rp.perf_1w, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) ELSE NULL END) AS avg_1w,
+                AVG(CASE WHEN m.is_eligible THEN GREATEST(LEAST(rp.perf_1m, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) ELSE NULL END) AS avg_1m,
+                AVG(CASE WHEN m.is_eligible THEN GREATEST(LEAST(rp.perf_3m, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) ELSE NULL END) AS avg_3m,
+                AVG(CASE WHEN NOT m.is_eligible OR rp.perf_1w IS NULL THEN NULL WHEN GREATEST(LEAST(rp.perf_1w, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_1w_breadth_pct,
+                AVG(CASE WHEN NOT m.is_eligible OR rp.perf_1m IS NULL THEN NULL WHEN GREATEST(LEAST(rp.perf_1m, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_1m_breadth_pct,
+                AVG(CASE WHEN NOT m.is_eligible OR rp.perf_3m IS NULL THEN NULL WHEN GREATEST(LEAST(rp.perf_3m, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_3m_breadth_pct,
                 SUM(CASE WHEN m.is_eligible AND rp.close IS NOT NULL THEN 1 ELSE 0 END) AS covered_eligible_constituent_count
             FROM membership m
             JOIN recent_perf rp ON rp.ticker = m.ticker
@@ -426,7 +438,7 @@ def _recent_ticker_history_theme_history(
             ? AS snapshot_source,
             'ticker_history_derived' AS provenance_class,
             'ticker_daily_history_recent' AS provenance_source_label,
-            tc.eligible_constituent_count,
+            tc.eligible_constituent_count AS eligible_contributor_count,
             tdm.covered_eligible_constituent_count
         FROM theme_date_metrics tdm
         JOIN theme_counts tc ON tc.theme_id = tdm.theme_id
@@ -461,6 +473,8 @@ def _recent_ticker_history_theme_history(
             "snapshot_source",
             "provenance_class",
             "provenance_source_label",
+            "eligible_contributor_count",
+            "covered_eligible_constituent_count",
         ]
     ].reset_index(drop=True)
 
@@ -977,6 +991,239 @@ def historical_theme_boundary_debug(conn, theme_id: int, lookback_days: int) -> 
     return _with_bootstrap_recovery(_load)
 
 
+def _historical_theme_movement_row_audit_core(conn, theme_id: int, lookback_days: int) -> dict[str, object]:
+    boundary_debug = _historical_theme_boundary_debug_core(conn, theme_id, lookback_days)
+    boundary_summary = boundary_debug.get("boundary_summary", pd.DataFrame())
+    candidate_rows = boundary_debug.get("candidate_rows", pd.DataFrame())
+    start_time = boundary_debug.get("resolved_window_start")
+    end_time = boundary_debug.get("resolved_window_end")
+
+    base = {
+        "resolved_window_start": start_time,
+        "resolved_window_end": end_time,
+        "boundary_summary": boundary_summary,
+        "candidate_rows": candidate_rows,
+        "aggregate_summary": pd.DataFrame(),
+        "constituent_rows": pd.DataFrame(),
+        "audit_available": False,
+        "audit_reason": "No resolved movement boundary rows available for this theme/window.",
+        "theme_identity": pd.DataFrame(),
+    }
+    if boundary_summary.empty or start_time is None or end_time is None:
+        return base
+
+    selected_boundary_rows = candidate_rows[candidate_rows["selected"] == True].copy() if not candidate_rows.empty else pd.DataFrame()
+    if selected_boundary_rows.empty:
+        base["audit_reason"] = "No selected winning boundary rows were found for this theme/window."
+        return base
+
+    winners = set(selected_boundary_rows["provenance_class"].dropna().astype(str).tolist())
+    if winners != {"ticker_history_derived"}:
+        base["audit_reason"] = (
+            "Constituent-level capped audit is only available when the resolved movement boundary rows are "
+            "`ticker_history_derived`. Use the lineage table above for captured/reconstructed winners."
+        )
+        return base
+
+    latest_winner = selected_boundary_rows.sort_values(["snapshot_time", "snapshot_date"]).tail(1).iloc[0]
+    base["theme_identity"] = pd.DataFrame(
+        [
+            {
+                "theme_id": int(theme_id),
+                "theme": latest_winner.get("theme") if "theme" in selected_boundary_rows.columns else None,
+                "category": latest_winner.get("category") if "category" in selected_boundary_rows.columns else None,
+                "winner_provenance_class": "ticker_history_derived",
+                "winner_provenance_source_label": latest_winner.get("provenance_source_label"),
+            }
+        ]
+    )
+
+    membership = conn.execute(
+        """
+        SELECT
+            upper(trim(m.ticker)) AS ticker,
+            t.id AS theme_id,
+            t.name AS theme,
+            t.category,
+            COALESCE(s.status, 'active') AS status,
+            CASE WHEN COALESCE(s.status, 'active') = 'refresh_suppressed' THEN FALSE ELSE TRUE END AS is_eligible
+        FROM themes t
+        JOIN theme_membership m ON m.theme_id = t.id
+        LEFT JOIN symbol_refresh_status s ON upper(trim(s.ticker)) = upper(trim(m.ticker))
+        WHERE t.id = ?
+        ORDER BY ticker
+        """,
+        [int(theme_id)],
+    ).df()
+    if membership.empty:
+        base["audit_reason"] = "No governed membership rows were found for this theme."
+        return base
+
+    eligible_members = membership[membership["is_eligible"] == True].copy()
+    if eligible_members.empty:
+        base["audit_reason"] = "This theme has no historical-eligible governed constituents after suppression filtering."
+        return base
+
+    buffer_start = pd.Timestamp(start_time) - pd.Timedelta(days=TICKER_HISTORY_BUFFER_DAYS)
+    daily_history = conn.execute(
+        """
+        SELECT
+            upper(trim(h.ticker)) AS ticker,
+            h.trading_date,
+            h.close
+        FROM ticker_daily_history h
+        WHERE h.market_data_source = ?
+          AND upper(trim(h.ticker)) IN (
+              SELECT upper(trim(ticker))
+              FROM theme_membership
+              WHERE theme_id = ?
+          )
+          AND h.trading_date BETWEEN ? AND ?
+        ORDER BY ticker, trading_date
+        """,
+        [
+            str(latest_winner.get("market_data_source") or latest_winner.get("provenance_source_label") or "live"),
+            int(theme_id),
+            pd.Timestamp(buffer_start).date(),
+            pd.Timestamp(end_time).date(),
+        ],
+    ).df()
+    if daily_history.empty:
+        base["audit_reason"] = "No stored ticker_daily_history rows were available for the winning movement source."
+        return base
+
+    daily_history = daily_history.sort_values(["ticker", "trading_date"]).copy()
+    daily_history["trading_date"] = pd.to_datetime(daily_history["trading_date"]).dt.date
+    grouped = daily_history.groupby("ticker")["close"]
+    daily_history["perf_1w_raw"] = ((grouped.transform(lambda s: s / s.shift(5))) - 1.0) * 100.0
+    daily_history["perf_1m_raw"] = ((grouped.transform(lambda s: s / s.shift(21))) - 1.0) * 100.0
+    daily_history["perf_3m_raw"] = ((grouped.transform(lambda s: s / s.shift(63))) - 1.0) * 100.0
+    for perf_col in ("perf_1w", "perf_1m", "perf_3m"):
+        daily_history[f"{perf_col}_capped"] = pd.to_numeric(
+            daily_history[f"{perf_col}_raw"], errors="coerce"
+        ).clip(-CURRENT_RANKING_RETURN_CAP_PCT, CURRENT_RANKING_RETURN_CAP_PCT)
+
+    boundary_dates = {
+        "start": pd.Timestamp(start_time).date(),
+        "end": pd.Timestamp(end_time).date(),
+    }
+    constituent_frames: list[pd.DataFrame] = []
+    aggregate_rows: list[dict[str, object]] = []
+    distinct_governed_tickers = int(membership["ticker"].nunique())
+
+    for boundary_label, boundary_date in boundary_dates.items():
+        rows = membership.merge(
+            daily_history[daily_history["trading_date"] == boundary_date],
+            on="ticker",
+            how="left",
+        ).copy()
+        rows["boundary_label"] = boundary_label
+        eligible_contributor_count = int(rows["is_eligible"].sum())
+        covered_eligible_contributor_count = int(((rows["is_eligible"] == True) & rows["close"].notna()).sum())
+        passed_historical_gate = bool(
+            eligible_contributor_count >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS
+            and covered_eligible_contributor_count >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS
+        )
+        rows["passed_historical_gate"] = passed_historical_gate
+        constituent_frames.append(rows)
+
+        eligible_rows = rows[(rows["is_eligible"] == True) & rows["close"].notna()].copy()
+        aggregate_rows.append(
+            {
+                "boundary_label": boundary_label,
+                "boundary_date": boundary_date,
+                "theme_id": int(theme_id),
+                "theme": rows["theme"].dropna().iloc[0] if rows["theme"].notna().any() else None,
+                "category": rows["category"].dropna().iloc[0] if rows["category"].notna().any() else None,
+                "winner_provenance_class": "ticker_history_derived",
+                "winner_provenance_source_label": latest_winner.get("provenance_source_label"),
+                "distinct_governed_tickers": distinct_governed_tickers,
+                "eligible_contributor_count": eligible_contributor_count,
+                "covered_eligible_contributor_count": covered_eligible_contributor_count,
+                "historical_gate_min": int(CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS),
+                "passed_historical_gate": passed_historical_gate,
+                "avg_1w": round(float(eligible_rows["perf_1w_capped"].mean()), 2) if not eligible_rows.empty else None,
+                "avg_1m": round(float(eligible_rows["perf_1m_capped"].mean()), 2) if not eligible_rows.empty else None,
+                "avg_3m": round(float(eligible_rows["perf_3m_capped"].mean()), 2) if not eligible_rows.empty else None,
+                "positive_1m_breadth_pct": (
+                    round(float((eligible_rows["perf_1m_capped"] > 0).mean() * 100.0), 2)
+                    if not eligible_rows.empty and eligible_rows["perf_1m_capped"].notna().any()
+                    else None
+                ),
+                "composite_score": (
+                    round(
+                        (
+                            (COMPOSITE_WEIGHTS["perf_1w"] * float(eligible_rows["perf_1w_capped"].mean()))
+                            + (COMPOSITE_WEIGHTS["perf_1m"] * float(eligible_rows["perf_1m_capped"].mean()))
+                            + (COMPOSITE_WEIGHTS["perf_3m"] * float(eligible_rows["perf_3m_capped"].mean()))
+                        ) * _theme_confidence_factor_for_history(int(rows["is_eligible"].sum())),
+                        2,
+                    )
+                    if not eligible_rows.empty
+                    else None
+                ),
+            }
+        )
+
+    aggregate_summary = pd.DataFrame(aggregate_rows)
+    constituent_rows = pd.concat(constituent_frames, ignore_index=True) if constituent_frames else pd.DataFrame()
+    if not constituent_rows.empty:
+        constituent_rows["raw_vs_capped_1w"] = constituent_rows.apply(
+            lambda row: None
+            if pd.isna(row.get("perf_1w_raw"))
+            else f"{float(row.get('perf_1w_raw')):.2f} -> {float(row.get('perf_1w_capped')):.2f}",
+            axis=1,
+        )
+        constituent_rows["raw_vs_capped_1m"] = constituent_rows.apply(
+            lambda row: None
+            if pd.isna(row.get("perf_1m_raw"))
+            else f"{float(row.get('perf_1m_raw')):.2f} -> {float(row.get('perf_1m_capped')):.2f}",
+            axis=1,
+        )
+        constituent_rows["raw_vs_capped_3m"] = constituent_rows.apply(
+            lambda row: None
+            if pd.isna(row.get("perf_3m_raw"))
+            else f"{float(row.get('perf_3m_raw')):.2f} -> {float(row.get('perf_3m_capped')):.2f}",
+            axis=1,
+        )
+        constituent_rows = constituent_rows[
+            [
+                "boundary_label",
+                "ticker",
+                "status",
+                "is_eligible",
+                "close",
+                "perf_1w_raw",
+                "perf_1w_capped",
+                "raw_vs_capped_1w",
+                "perf_1m_raw",
+                "perf_1m_capped",
+                "raw_vs_capped_1m",
+                "perf_3m_raw",
+                "perf_3m_capped",
+                "raw_vs_capped_3m",
+                "passed_historical_gate",
+            ]
+        ].sort_values(["boundary_label", "ticker"]).reset_index(drop=True)
+
+    base.update(
+        {
+            "aggregate_summary": aggregate_summary,
+            "constituent_rows": constituent_rows,
+            "audit_available": True,
+            "audit_reason": "Constituent-level audit is available because both winning boundary rows use ticker-history-derived provenance.",
+        }
+    )
+    return base
+
+
+def historical_theme_movement_row_audit(conn, theme_id: int, lookback_days: int) -> dict[str, object]:
+    def _load(active_conn=conn) -> dict[str, object]:
+        return _historical_theme_movement_row_audit_core(active_conn, theme_id, lookback_days)
+
+    return _with_bootstrap_recovery(_load)
+
+
 def theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
     boundary_history = _recent_movement_theme_snapshot_union(conn)
     if boundary_history.empty:
@@ -1294,9 +1541,15 @@ def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     ticker_source_expr = _ticker_snapshot_source_expr(conn)
+    preferred_source = preferred_ticker_snapshot_source(conn)
+    preferred_snapshot_filter = f"AND {ticker_source_expr} = ?" if preferred_source else "AND 1 = 0"
     manual_suppressed_expr = "COALESCE(manual_suppressed, FALSE)" if _manual_suppression_enabled(conn) else "FALSE"
     manual_reason_expr = "manual_suppression_reason" if table_has_column(conn, "symbol_refresh_status", "manual_suppression_reason") else "NULL"
     manual_at_expr = "manual_suppressed_at" if table_has_column(conn, "symbol_refresh_status", "manual_suppressed_at") else "NULL"
+    params: list[object] = [normalized, normalized, normalized, normalized]
+    if preferred_source:
+        params.append(preferred_source)
+    params.extend([normalized, normalized, normalized])
     return conn.execute(
         f"""
         WITH membership AS (
@@ -1328,6 +1581,22 @@ def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
               AND (r.run_id IS NULL OR r.status IN ('success', 'partial'))
             QUALIFY ROW_NUMBER() OVER (ORDER BY s.run_id DESC) = 1
         ),
+        preferred_snapshot AS (
+            SELECT
+                s.price AS preferred_price,
+                s.avg_volume AS preferred_avg_volume,
+                s.perf_1w AS preferred_perf_1w,
+                s.perf_1m AS preferred_perf_1m,
+                s.perf_3m AS preferred_perf_3m,
+                r.finished_at AS preferred_snapshot_time,
+                {ticker_source_expr} AS preferred_snapshot_source
+            FROM ticker_snapshots s
+            LEFT JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE s.ticker = ?
+              AND (r.run_id IS NULL OR r.status IN ('success', 'partial'))
+              {preferred_snapshot_filter}
+            QUALIFY ROW_NUMBER() OVER (ORDER BY s.run_id DESC) = 1
+        ),
         refresh_seen AS (
             SELECT COUNT(*) AS refresh_run_count
             FROM refresh_run_tickers
@@ -1337,6 +1606,7 @@ def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
             SELECT
                 COUNT(*) AS symbol_status_count,
                 MAX(CASE WHEN {manual_suppressed_expr} THEN 1 ELSE 0 END) AS manual_suppressed_flag,
+                MAX(CASE WHEN COALESCE(status, 'active') = 'refresh_suppressed' THEN 1 ELSE 0 END) AS refresh_suppressed_flag,
                 MAX(CASE WHEN {manual_suppressed_expr} THEN {manual_reason_expr} ELSE NULL END) AS manual_suppression_reason,
                 MAX(CASE WHEN {manual_suppressed_expr} THEN {manual_at_expr} ELSE NULL END) AS manual_suppressed_at
             FROM symbol_refresh_status
@@ -1352,6 +1622,7 @@ def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
             COALESCE(m.active_membership_count, 0) AS active_assigned_theme_count,
             COALESCE(m.inactive_membership_count, 0) AS inactive_assigned_theme_count,
             CAST(COALESCE(ss.manual_suppressed_flag, 0) > 0 AS BOOLEAN) AS manually_suppressed,
+            CAST(COALESCE(ss.refresh_suppressed_flag, 0) > 0 AS BOOLEAN) AS operationally_suppressed,
             ss.manual_suppression_reason,
             ss.manual_suppressed_at,
             ls.latest_snapshot_time,
@@ -1359,6 +1630,21 @@ def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
             ls.latest_price,
             ls.latest_market_cap,
             ls.latest_avg_volume,
+            ps.preferred_snapshot_time,
+            ps.preferred_snapshot_source,
+            ps.preferred_price,
+            ps.preferred_avg_volume,
+            CAST(ps.preferred_snapshot_time IS NOT NULL AS BOOLEAN) AS has_current_preferred_snapshot,
+            CAST(
+                ps.preferred_snapshot_time IS NOT NULL
+                AND (
+                    ps.preferred_price IS NOT NULL
+                    OR ps.preferred_avg_volume IS NOT NULL
+                    OR ps.preferred_perf_1w IS NOT NULL
+                    OR ps.preferred_perf_1m IS NOT NULL
+                    OR ps.preferred_perf_3m IS NOT NULL
+                ) AS BOOLEAN
+            ) AS has_current_usable_preferred_snapshot,
             CASE
               WHEN COALESCE(ss.manual_suppressed_flag, 0) > 0 THEN 'Suppressed operationally'
               WHEN COALESCE(m.membership_count, 0) > 0 THEN 'In DB and assigned'
@@ -1371,8 +1657,9 @@ def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
         CROSS JOIN refresh_seen r
         CROSS JOIN symbol_seen ss
         LEFT JOIN latest_snapshot ls ON TRUE
+        LEFT JOIN preferred_snapshot ps ON TRUE
         """,
-        [normalized, normalized, normalized, normalized, normalized, normalized],
+        params,
     ).df()
 
 
