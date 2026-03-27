@@ -323,8 +323,20 @@ View type:
 - mixed current-view + historical-view
 
 Current ticker detail source path:
-- `theme_ticker_metrics(theme_id)`
+- `theme_ticker_metrics(theme_id, include_suppressed=True)`
 - `format_theme_ticker_table()`
+
+Current ticker detail source semantics:
+- current/live ticker detail fields use the preferred-source current snapshot path
+- this is the right source for current ticker detail because the table is meant to show the latest governed-member snapshot state, not reconstructed daily history
+- suppressed governed members are now hidden by default in the visible table, but remain available through the local `Include suppressed tickers` toggle
+- when suppressed rows are included, the table can also show a `suppressed` indicator column
+- the visible `eligible` column uses the same effective current-ranking eligibility rules as the main current ranking pipeline:
+  - snapshot present
+  - price >= minimum
+  - avg_volume > 0
+  - dollar_volume >= minimum
+  - not `refresh_suppressed`
 
 Selected-theme ticker detail scoring:
 - ticker-level `composite` now follows the same baseline-strength philosophy as the standardized theme composite, but without theme participation logic:
@@ -353,7 +365,10 @@ ticker_momentum =
 ```
 
 - these ticker scores are display-only detail enhancements on Themes; they do not change theme-level ranking formulas
-- the bottom selected-theme chart now shows ticker-level composite history for the current top 5 governed tickers in the selected theme, using existing preferred-source `ticker_history_last_n_snapshots()` rows when available
+- the bottom selected-theme chart now shows ticker-level composite history for the current top 5 visible governed tickers in the selected theme
+- chart history uses `ticker_history_last_n_trading_days()` first so the time series can use stored daily history when available
+- only if deeper daily history is unavailable for a ticker does the chart fall back to recent preferred-source `ticker_history_last_n_snapshots()` rows
+- chart plotting keeps one weekday point per ticker-day and excludes weekends from the rendered series
 
 Current summary cards:
 - `Governed tickers`
@@ -371,7 +386,7 @@ Current summary semantics:
 
 Ticker table semantics:
 - governed-membership-first view
-- suppression filtered out
+- suppression hidden by default, with local opt-in include toggle
 - latest preferred-source ticker row per ticker
 - market cap can backfill from the latest non-null preferred-source row
 - sorted by `ticker asc`

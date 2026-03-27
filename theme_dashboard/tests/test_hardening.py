@@ -117,6 +117,7 @@ from src.rankings import (
     _build_current_ranking_metrics,
     _compute_theme_metrics,
     current_momentum_quality_factor,
+    current_ticker_is_eligible,
     compute_current_ranking_snapshot,
     compute_theme_rankings,
     ticker_current_momentum_score,
@@ -925,6 +926,13 @@ class TestStandardizedCompositeScore(unittest.TestCase):
         stronger = float(ticker_current_momentum_score(16.0, 14.0, -8.0))
         weaker = float(ticker_current_momentum_score(16.0, 6.0, -28.0))
         self.assertGreater(stronger, weaker)
+
+    def test_current_ticker_is_eligible_matches_current_snapshot_rules(self):
+        self.assertTrue(current_ticker_is_eligible(12.0, 2_000_000.0, "active", snapshot_present=True))
+        self.assertFalse(current_ticker_is_eligible(0.5, 2_000_000.0, "active", snapshot_present=True))
+        self.assertFalse(current_ticker_is_eligible(12.0, 0.0, "active", snapshot_present=True))
+        self.assertFalse(current_ticker_is_eligible(12.0, 2_000_000.0, "refresh_suppressed", snapshot_present=True))
+        self.assertFalse(current_ticker_is_eligible(12.0, 2_000_000.0, "active", snapshot_present=False))
 
     def test_build_current_ranking_metrics_exposes_standardized_composite_alongside_legacy(self):
         raw = pd.DataFrame(
@@ -2947,6 +2955,23 @@ class TestTickerAssignmentEditing(unittest.TestCase):
         self.assertEqual(float(detail_members.iloc[1]["price"]), 50.0)
         conn.close()
 
+    def test_theme_ticker_metrics_can_include_suppressed_governed_members_for_detail_view_toggle(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table symbol_refresh_status(ticker varchar, status varchar, manual_suppressed boolean)")
+        conn.execute("insert into theme_membership values (1006, 'DOCN')")
+        conn.execute("insert into theme_membership values (1006, 'TWLO')")
+        conn.execute("insert into symbol_refresh_status values ('DOCN', 'refresh_suppressed', TRUE)")
+
+        default_members = theme_ticker_metrics(conn, 1006)
+        included_members = theme_ticker_metrics(conn, 1006, include_suppressed=True)
+
+        self.assertEqual(default_members["ticker"].tolist(), ["TWLO"])
+        self.assertEqual(included_members["ticker"].tolist(), ["DOCN", "TWLO"])
+        self.assertTrue(bool(included_members.loc[included_members["ticker"] == "DOCN", "manual_suppressed"].iloc[0]))
+        self.assertEqual(str(included_members.loc[included_members["ticker"] == "DOCN", "status"].iloc[0]), "refresh_suppressed")
+        conn.close()
+
 
 class TestThemesPageRemovalFlow(unittest.TestCase):
     def test_remove_ticker_uses_range_theme_predicate_for_live_manage_path(self):
@@ -3328,14 +3353,14 @@ class TestManualTickerSuppression(unittest.TestCase):
         page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
         content = page_source.read_text(encoding="utf-8")
 
-        self.assertIn("Bottom chart shows ticker-level composite history for the current top 5 governed tickers in this theme", content)
+        self.assertIn("Bottom chart shows ticker-level composite history for the current top 5 visible governed tickers in this theme", content)
         self.assertIn("Selected-theme history table below still shows preferred-source captured/reconstructed theme history", content)
         self.assertIn("movement tables above may prefer recent ticker-history-derived boundary rows", content)
         self.assertIn('c2.metric("Eligible/capped 1W"', content)
         self.assertIn('c3.metric("Eligible/capped 1M"', content)
         self.assertIn('c4.metric("Eligible/capped 3M"', content)
         self.assertIn("These current summary metrics match the current ranking pipeline", content)
-        self.assertIn("Ticker rows below are current governed-member snapshot rows", content)
+        self.assertIn("Ticker rows below use current preferred-source snapshot rows for governed members.", content)
         self.assertIn("This theme currently has no governed members, so there are no current member rows to display.", content)
         self.assertIn("no current governed-member rows are visible in the detail table", content)
         self.assertIn("Current enriched coverage is partial for this theme", content)
@@ -3414,7 +3439,15 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn("st.altair_chart(chart, use_container_width=True)", content)
         self.assertIn('"ticker_composite_score": "composite"', content)
         self.assertIn('"ticker_momentum_score": "momentum"', content)
-        self.assertIn("Bottom chart shows ticker-level composite history for the current top 5 governed tickers in this theme", content)
+        self.assertIn("Bottom chart shows ticker-level composite history for the current top 5 visible governed tickers in this theme", content)
+        self.assertIn("theme_ticker_metrics(conn, theme_id, include_suppressed=True)", content)
+        self.assertIn('include_suppressed_tickers = st.checkbox(', content)
+        self.assertIn('"Include suppressed tickers"', content)
+        self.assertIn('"eligible"', content)
+        self.assertIn('"manual_suppressed": "suppressed"', content)
+        self.assertIn("current_ticker_is_eligible(", content)
+        self.assertIn("Ticker rows below use current preferred-source snapshot rows for governed members.", content)
+        self.assertIn("The bottom chart is separate: it uses stored daily ticker history first", content)
         self.assertIn("Optional `rank_change` appears here only in delta view and uses prior daily 1W rank versus current 1W rank.", content)
         self.assertIn("Optional `rank_change` appears here only in delta view and uses prior daily 1M rank versus current 1M rank.", content)
         self.assertIn('display_df["rank"] = display_df.apply(', content)

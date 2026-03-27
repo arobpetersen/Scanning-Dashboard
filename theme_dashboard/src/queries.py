@@ -557,18 +557,37 @@ def preferred_ticker_snapshot_source(conn) -> str | None:
     return "live" if row else None
 
 
-def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
+def theme_ticker_metrics(conn, theme_id: int, *, include_suppressed: bool = False) -> pd.DataFrame:
     preferred_source = preferred_ticker_snapshot_source(conn)
-    manual_filter = _manual_suppression_filter_sql(conn, "m.ticker")
+    manual_filter = "" if include_suppressed else _manual_suppression_filter_sql(conn, "m.ticker")
+    suppression_table_exists = table_exists(conn, "symbol_refresh_status")
+    suppression_join_membership = (
+        "LEFT JOIN symbol_refresh_status sr ON upper(trim(sr.ticker)) = upper(trim(m.ticker))"
+        if suppression_table_exists
+        else ""
+    )
+    suppression_join_governed = (
+        "LEFT JOIN symbol_refresh_status sr ON upper(trim(sr.ticker)) = gm.ticker"
+        if suppression_table_exists
+        else ""
+    )
+    suppression_select = (
+        "COALESCE(sr.status, 'active') AS status,\n            COALESCE(sr.manual_suppressed, FALSE) AS manual_suppressed,"
+        if table_has_column(conn, "symbol_refresh_status", "manual_suppressed")
+        else "'active' AS status,\n            FALSE AS manual_suppressed,"
+    )
     if not preferred_source:
         return conn.execute(
             f"""
-            SELECT upper(trim(ticker)) AS ticker
+            SELECT
+                   upper(trim(m.ticker)) AS ticker,
+                   {suppression_select}
             FROM theme_membership m
+            {suppression_join_membership}
             WHERE theme_id BETWEEN ? AND ?
             {manual_filter}
-            GROUP BY upper(trim(ticker))
-            ORDER BY upper(trim(ticker))
+            GROUP BY upper(trim(m.ticker)), status, manual_suppressed
+            ORDER BY upper(trim(m.ticker))
             """,
             [int(theme_id), int(theme_id)],
         ).df()
@@ -634,6 +653,7 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
         )
         SELECT
             gm.ticker,
+            {suppression_select}
             cs.price,
             cs.perf_1w,
             cs.perf_1m,
@@ -647,6 +667,7 @@ def theme_ticker_metrics(conn, theme_id: int) -> pd.DataFrame:
             cs.snapshot_time,
             ? AS latest_refresh_time
         FROM governed_members gm
+        {suppression_join_governed}
         LEFT JOIN completed_snapshots cs
           ON gm.ticker = cs.ticker AND cs.rn = 1
         LEFT JOIN latest_nonnull_market_caps lmc

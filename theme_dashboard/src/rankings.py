@@ -136,6 +136,24 @@ def current_momentum_quality_factor(standardized_composite_score: int | float) -
     )
 
 
+def current_ticker_is_eligible(
+    price: int | float,
+    avg_volume: int | float,
+    status: object = "active",
+    *,
+    snapshot_present: bool = True,
+) -> bool:
+    if not snapshot_present:
+        return False
+    if pd.isna(price) or float(price) < CURRENT_RANKING_MIN_PRICE:
+        return False
+    if pd.isna(avg_volume) or float(avg_volume) <= 0:
+        return False
+    if float(price) * float(avg_volume) < CURRENT_RANKING_MIN_DOLLAR_VOLUME:
+        return False
+    return str(status or "active") != "refresh_suppressed"
+
+
 def ticker_standardized_composite_score(
     perf_1w: int | float,
     perf_1m: int | float,

@@ -22,6 +22,7 @@ from src.queries import baseline_status, ticker_history_last_n_snapshots, ticker
 from src.rankings import (
     CURRENT_MOMENTUM_WEIGHTS,
     current_momentum_quality_factor,
+    current_ticker_is_eligible,
     ticker_current_momentum_score,
     ticker_standardized_composite_score,
     standardized_participation_factor,
@@ -430,6 +431,20 @@ def _apply_ticker_model_scores(ticker_df: pd.DataFrame) -> pd.DataFrame:
     )
     out["ticker_momentum_score"] = out.apply(
         lambda row: ticker_current_momentum_score(row.get("perf_1w"), row.get("perf_1m"), row.get("perf_3m")),
+        axis=1,
+    )
+    out["eligible"] = out.apply(
+        lambda row: bool(
+            current_ticker_is_eligible(
+                row.get("price"),
+                row.get("avg_volume"),
+                row.get("status", "active"),
+                snapshot_present=(
+                    (row.get("snapshot_time") is not None and not pd.isna(row.get("snapshot_time")))
+                    or (row.get("price") is not None and not pd.isna(row.get("price")))
+                ),
+            )
+        ),
         axis=1,
     )
     return out
@@ -1551,19 +1566,44 @@ with explore_tab:
     st.caption(f"Selected from: {describe_selection_source(st.session_state.get(SELECTED_THEME_SOURCE_KEY))}")
 
     with get_conn() as conn:
-        ticker_df = theme_ticker_metrics(conn, theme_id)
+        ticker_df = theme_ticker_metrics(conn, theme_id, include_suppressed=True)
         history_df = theme_snapshot_history(conn, theme_id, limit=50)
         theme_current_row = current_theme_metrics[current_theme_metrics["theme_id"] == theme_id].copy()
 
     ticker_df = _apply_ticker_model_scores(ticker_df)
+    if not ticker_df.empty:
+        ticker_df = ticker_df.copy()
+        ticker_df["eligible"] = ticker_df.apply(
+            lambda row: current_ticker_is_eligible(
+                row.get("price"),
+                row.get("avg_volume"),
+                row.get("status", "active"),
+                snapshot_present=pd.notna(row.get("snapshot_time")),
+            ),
+            axis=1,
+        )
+        ticker_df["manual_suppressed"] = ticker_df.get("manual_suppressed", False).fillna(False).astype(bool)
+
+    include_suppressed_tickers = st.checkbox(
+        "Include suppressed tickers",
+        value=False,
+        key="themes_include_suppressed_tickers",
+        help="Show governed members that are manually suppressed from the default current detail view.",
+    )
+    visible_ticker_df = (
+        ticker_df.copy()
+        if include_suppressed_tickers
+        else ticker_df[~ticker_df.get("manual_suppressed", pd.Series(False, index=ticker_df.index)).fillna(False)].copy()
+    )
     with get_conn() as conn:
-        ticker_composite_history_chart_df, top_composite_tickers = _build_ticker_composite_history_chart_df(conn, ticker_df)
+        ticker_composite_history_chart_df, top_composite_tickers = _build_ticker_composite_history_chart_df(conn, visible_ticker_df)
 
     current_row = theme_current_row.iloc[0] if not theme_current_row.empty else None
     governed_count = int(current_row.get("ticker_count") or 0) if current_row is not None else int(len(ticker_df))
-    visible_member_rows = int(len(ticker_df))
-    enriched_basis_cols = [col for col in ["price", "perf_1w", "perf_1m", "perf_3m", "avg_volume", "snapshot_time"] if col in ticker_df.columns]
-    enriched_row_count = int(ticker_df[enriched_basis_cols].notna().any(axis=1).sum()) if enriched_basis_cols else 0
+    visible_member_rows = int(len(visible_ticker_df))
+    suppressed_hidden_count = max(int(len(ticker_df)) - visible_member_rows, 0)
+    enriched_basis_cols = [col for col in ["price", "perf_1w", "perf_1m", "perf_3m", "avg_volume", "snapshot_time"] if col in visible_ticker_df.columns]
+    enriched_row_count = int(visible_ticker_df[enriched_basis_cols].notna().any(axis=1).sum()) if enriched_basis_cols else 0
 
     if current_row is not None:
         qc1, qc2, qc3, qc4 = st.columns(4)
@@ -1586,11 +1626,17 @@ with explore_tab:
             "These current summary metrics match the current ranking pipeline: preferred-source contributors only, "
             "eligibility-filtered, and constituent returns capped before aggregation. Raw governed-member ticker rows remain below for inspection."
         )
-        st.caption("Ticker rows below are current governed-member snapshot rows. They are not recapped or re-filtered to match the summary cards exactly.")
+        st.caption(
+            "Ticker rows below use current preferred-source snapshot rows for governed members. "
+            "The bottom chart is separate: it uses stored daily ticker history first, with recent snapshot history only as a fallback when deeper daily history is missing."
+        )
+
+    if suppressed_hidden_count > 0 and not include_suppressed_tickers:
+        st.caption(f"{suppressed_hidden_count} suppressed ticker(s) are hidden from the default detail table.")
 
     if governed_count <= 0:
         st.info("This theme currently has no governed members, so there are no current member rows to display.")
-    elif ticker_df.empty:
+    elif visible_ticker_df.empty:
         st.warning(
             "This theme still has governed membership in current metrics, but no current governed-member rows are visible in the detail table. "
             "Manual suppression can remove tickers from this current member view while preserving governed membership/history semantics."
@@ -1605,14 +1651,14 @@ with explore_tab:
             f"Current enriched coverage is partial for this theme: `{enriched_row_count}` of `{visible_member_rows}` visible governed member row(s) currently have preferred-source snapshot values."
         )
 
-    if ticker_df.empty and governed_count > 0:
+    if visible_ticker_df.empty and governed_count > 0:
         st.caption(
             "If this looks unexpectedly empty, check ticker-level suppression/refresh status in the Themes management tools. "
             "Governed membership can still exist even when the current detail table has no visible member rows."
         )
 
-    if not ticker_df.empty:
-        display_ticker_df = format_theme_ticker_table(ticker_df)
+    if not visible_ticker_df.empty:
+        display_ticker_df = format_theme_ticker_table(visible_ticker_df)
         for perf_col in ("perf_1w", "perf_1m", "perf_3m"):
             if perf_col in display_ticker_df.columns:
                 display_ticker_df[perf_col] = display_ticker_df[perf_col].apply(
@@ -1628,6 +1674,8 @@ with explore_tab:
             c
             for c in [
                 "ticker",
+                "eligible",
+                "manual_suppressed" if include_suppressed_tickers else None,
                 "price",
                 "perf_1w",
                 "perf_1m",
@@ -1648,6 +1696,8 @@ with explore_tab:
         ]
 
         rename_map = {
+            "eligible": "eligible",
+            "manual_suppressed": "suppressed",
             "ticker_composite_score": "composite",
             "ticker_momentum_score": "momentum",
             "last_updated": "market_data_time",
@@ -1669,14 +1719,14 @@ with explore_tab:
 
     if not ticker_composite_history_chart_df.empty:
         st.caption(
-            "Bottom chart shows ticker-level composite history for the current top 5 governed tickers in this theme, ranked by current ticker composite. "
+            "Bottom chart shows ticker-level composite history for the current top 5 visible governed tickers in this theme, ranked by current ticker composite. "
             "Ticker composite uses the same baseline-strength philosophy as the standardized theme composite: 30% 1W, 70% 1M, with a 3M skepticism layer."
         )
         _render_ticker_composite_history_chart(ticker_composite_history_chart_df)
         st.caption(
             f"Top composite tickers used for the chart: {', '.join(top_composite_tickers)}."
         )
-    elif not ticker_df.empty:
+    elif not visible_ticker_df.empty:
         st.info(
             "Ticker composite history is unavailable for the current top governed tickers in this theme. "
             "This can happen when recent ticker snapshot history is sparse or missing for the preferred source."
