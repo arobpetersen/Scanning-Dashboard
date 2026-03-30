@@ -219,8 +219,8 @@ def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, mes
 
 st.set_page_config(page_title="Historical Performance", layout="wide")
 st.title("Historical Performance & Theme Momentum")
-st.caption("Audit historical theme movement, leadership rotation, and provenance-aware change across resolved boundary windows.")
-st.caption("Use the Themes page for current leadership and strongest-now views. This page is for what changed across a historical window and how trustworthy that change is.")
+st.caption("Secondary workflow: audit historical theme movement, leadership rotation, and provenance-aware change across resolved boundary windows.")
+st.caption("Start in Themes for current leadership and live drilldown. Use this page when you need to explain what changed across a historical window and how trustworthy that change is.")
 reset_perf_timings("historical_performance")
 
 try:
@@ -772,7 +772,7 @@ else:
         theme_ids_by_name,
     )
     labels = list(options.keys())
-    default_index = 0
+    default_index = None
     if selected_theme_id_default is not None:
         selected_label_default = theme_label_by_id.get(int(selected_theme_id_default))
         if selected_label_default in options:
@@ -781,89 +781,93 @@ else:
         "Theme",
         labels,
         index=default_index,
+        placeholder="Search and select a theme to inspect historical detail",
     )
-    if st.session_state.get("historical_selected_theme_name") != sel:
+    if not sel:
+        st.info("Search and select a theme to inspect historical detail.")
+    elif st.session_state.get("historical_selected_theme_name") != sel:
         st.session_state["historical_selected_theme_name"] = str(sel)
         st.session_state["historical_selected_theme_id"] = int(options[sel])
-    with get_conn() as conn:
-        single = theme_snapshot_history(conn, options[sel], limit=250, include_recent_ticker_history=True)
-        boundary_debug = historical_theme_boundary_debug(conn, options[sel], int(lookback_days))
-        movement_audit = historical_theme_movement_row_audit(conn, options[sel], int(lookback_days))
-    if single.empty:
-        st.info("No history for selected theme.")
-    else:
-        single = single.sort_values("snapshot_time")
-        single_points = int(single["snapshot_time"].nunique())
-        latest_snapshot = single.iloc[-1]
-        selected_summary_row = summary[summary["theme_id"] == int(options[sel])].copy()
-        selected_summary_row = selected_summary_row.iloc[0] if not selected_summary_row.empty else None
-        sm1, sm2, sm3, sm4 = st.columns(4)
-        sm1.metric("Latest composite", f"{float(latest_snapshot.get('composite_score') or 0):.2f}")
-        sm2.metric("Latest avg 1W", f"{float(latest_snapshot.get('avg_1w') or 0):.2f}%")
-        sm3.metric("Latest avg 1M", f"{float(latest_snapshot.get('avg_1m') or 0):.2f}%")
-        sm4.metric("Latest avg 3M", f"{float(latest_snapshot.get('avg_3m') or 0):.2f}%")
-        sm5, sm6, sm7, sm8 = st.columns(4)
-        sm5.metric("Window momentum", f"{float(selected_summary_row.get('momentum_score') or 0):.2f}" if selected_summary_row is not None else "-")
-        sm6.metric("End rank", int(selected_summary_row.get("rank_end") or 0) if selected_summary_row is not None and pd.notna(selected_summary_row.get("rank_end")) else "-")
-        sm7.metric("Rank change", f"{float(selected_summary_row.get('rank_change') or 0):+.0f}" if selected_summary_row is not None else "-")
-        sm8.metric("Contributors", int(latest_snapshot.get("ticker_count") or 0))
-        if single_points < 2:
-            st.caption(
-                f"Selected theme currently has {single_points} snapshot point(s). "
-                "At least 2 are needed for meaningful before/after comparison."
-            )
-        st.line_chart(single.set_index("snapshot_time")[["composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct"]])
-        st.dataframe(single, width="stretch")
-        with st.expander("Debug: Historical Source Lineage", expanded=False):
-            st.caption(
-                "Use this to verify which layer actually drove the selected theme's resolved movement boundary rows for the current lookback window."
-            )
-            st.caption(
-                f"Resolved boundary window: `{pd.to_datetime(boundary_debug.get('resolved_window_start')).strftime('%Y-%m-%d') if boundary_debug.get('resolved_window_start') is not None else '-'}` "
-                f"to `{pd.to_datetime(boundary_debug.get('resolved_window_end')).strftime('%Y-%m-%d') if boundary_debug.get('resolved_window_end') is not None else '-'}`"
-            )
-            st.caption(
-                f"Movement boundary precedence here is `ticker_history_derived > captured > reconstructed`; requested window=`{int(lookback_days)}`d, "
-                f"effective window=`{int(window_meta.get('effective_window_days') or 0)}`d, collapsed=`{'yes' if bool(window_meta.get('collapsed_to_available_history')) else 'no'}`."
-            )
-            boundary_summary = boundary_debug.get("boundary_summary", pd.DataFrame())
-            if boundary_summary.empty:
-                st.info("No boundary lineage rows are available for this selected theme/window.")
-            else:
-                st.dataframe(boundary_summary, width="stretch", hide_index=True)
-                winners = boundary_summary["winner_provenance_class"].dropna().astype(str).tolist()
-                if winners:
-                    st.caption(f"Displayed boundary driver(s): `{', '.join(winners)}`")
-            candidate_rows = boundary_debug.get("candidate_rows", pd.DataFrame())
-            if not candidate_rows.empty:
-                st.caption(
-                    "Candidate rows below include same-date source layers that either won precedence (`selected=True`) or were overridden by a higher-precedence row."
-                )
-                st.dataframe(candidate_rows, width="stretch", hide_index=True)
-        with st.expander("Debug: Movement Row Audit", expanded=False):
-            st.caption(
-                "Use this when a movement row looks surprising. It reuses the resolved movement boundary contract and, when available, shows the exact ticker-history-derived constituent set behind the row."
-            )
-            st.caption(
-                f"Resolved audit window: `{pd.to_datetime(movement_audit.get('resolved_window_start')).strftime('%Y-%m-%d') if movement_audit.get('resolved_window_start') is not None else '-'}` "
-                f"to `{pd.to_datetime(movement_audit.get('resolved_window_end')).strftime('%Y-%m-%d') if movement_audit.get('resolved_window_end') is not None else '-'}`"
-            )
-            st.caption(str(movement_audit.get("audit_reason") or ""))
-            aggregate_summary = movement_audit.get("aggregate_summary", pd.DataFrame())
-            if aggregate_summary.empty:
-                st.info("No constituent-level movement audit rows are available for this selected theme/window.")
-            else:
-                st.caption(
-                    "Boundary summary below shows the exact historical contributor counts, aggregate averages, and composite values used by the winning row contract."
-                )
-                st.dataframe(aggregate_summary, width="stretch", hide_index=True)
-            constituent_rows = movement_audit.get("constituent_rows", pd.DataFrame())
-            if not constituent_rows.empty:
-                st.caption(
-                    "Constituent rows below show governed membership, eligibility, raw vs capped returns, and whether the historical contributor gate passed at each resolved boundary."
-                )
-                st.dataframe(constituent_rows, width="stretch", hide_index=True)
+    if sel:
+        with get_conn() as conn:
+            single = theme_snapshot_history(conn, options[sel], limit=250, include_recent_ticker_history=True)
+            boundary_debug = historical_theme_boundary_debug(conn, options[sel], int(lookback_days))
+            movement_audit = historical_theme_movement_row_audit(conn, options[sel], int(lookback_days))
         selected_theme_name = str(themes.loc[themes["id"] == options[sel], "name"].iloc[0])
+        if single.empty:
+            st.info("No historical snapshot rows are available yet for the selected theme. Use Themes for current/live detail.")
+        else:
+            single = single.sort_values("snapshot_time")
+            single_points = int(single["snapshot_time"].nunique())
+            latest_snapshot = single.iloc[-1]
+            selected_summary_row = summary[summary["theme_id"] == int(options[sel])].copy()
+            selected_summary_row = selected_summary_row.iloc[0] if not selected_summary_row.empty else None
+            sm1, sm2, sm3, sm4 = st.columns(4)
+            sm1.metric("Latest composite", f"{float(latest_snapshot.get('composite_score') or 0):.2f}")
+            sm2.metric("Latest avg 1W", f"{float(latest_snapshot.get('avg_1w') or 0):.2f}%")
+            sm3.metric("Latest avg 1M", f"{float(latest_snapshot.get('avg_1m') or 0):.2f}%")
+            sm4.metric("Latest avg 3M", f"{float(latest_snapshot.get('avg_3m') or 0):.2f}%")
+            sm5, sm6, sm7, sm8 = st.columns(4)
+            sm5.metric("Window momentum", f"{float(selected_summary_row.get('momentum_score') or 0):.2f}" if selected_summary_row is not None else "-")
+            sm6.metric("End rank", int(selected_summary_row.get("rank_end") or 0) if selected_summary_row is not None and pd.notna(selected_summary_row.get("rank_end")) else "-")
+            sm7.metric("Rank change", f"{float(selected_summary_row.get('rank_change') or 0):+.0f}" if selected_summary_row is not None else "-")
+            sm8.metric("Contributors", int(latest_snapshot.get("ticker_count") or 0))
+            if single_points < 2:
+                st.caption(
+                    f"Selected theme currently has {single_points} snapshot point(s). "
+                    "At least 2 are needed for meaningful before/after comparison."
+                )
+            st.line_chart(single.set_index("snapshot_time")[["composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct"]])
+            st.dataframe(single, width="stretch")
+            with st.expander("Debug: Historical Source Lineage", expanded=False):
+                st.caption(
+                    "Use this to verify which layer actually drove the selected theme's resolved movement boundary rows for the current lookback window."
+                )
+                st.caption(
+                    f"Resolved boundary window: `{pd.to_datetime(boundary_debug.get('resolved_window_start')).strftime('%Y-%m-%d') if boundary_debug.get('resolved_window_start') is not None else '-'}` "
+                    f"to `{pd.to_datetime(boundary_debug.get('resolved_window_end')).strftime('%Y-%m-%d') if boundary_debug.get('resolved_window_end') is not None else '-'}`"
+                )
+                st.caption(
+                    f"Movement boundary precedence here is `ticker_history_derived > captured > reconstructed`; requested window=`{int(lookback_days)}`d, "
+                    f"effective window=`{int(window_meta.get('effective_window_days') or 0)}`d, collapsed=`{'yes' if bool(window_meta.get('collapsed_to_available_history')) else 'no'}`."
+                )
+                boundary_summary = boundary_debug.get("boundary_summary", pd.DataFrame())
+                if boundary_summary.empty:
+                    st.info("No boundary lineage rows are available for this selected theme/window.")
+                else:
+                    st.dataframe(boundary_summary, width="stretch", hide_index=True)
+                    winners = boundary_summary["winner_provenance_class"].dropna().astype(str).tolist()
+                    if winners:
+                        st.caption(f"Displayed boundary driver(s): `{', '.join(winners)}`")
+                candidate_rows = boundary_debug.get("candidate_rows", pd.DataFrame())
+                if not candidate_rows.empty:
+                    st.caption(
+                        "Candidate rows below include same-date source layers that either won precedence (`selected=True`) or were overridden by a higher-precedence row."
+                    )
+                    st.dataframe(candidate_rows, width="stretch", hide_index=True)
+            with st.expander("Debug: Movement Row Audit", expanded=False):
+                st.caption(
+                    "Use this when a movement row looks surprising. It reuses the resolved movement boundary contract and, when available, shows the exact ticker-history-derived constituent set behind the row."
+                )
+                st.caption(
+                    f"Resolved audit window: `{pd.to_datetime(movement_audit.get('resolved_window_start')).strftime('%Y-%m-%d') if movement_audit.get('resolved_window_start') is not None else '-'}` "
+                    f"to `{pd.to_datetime(movement_audit.get('resolved_window_end')).strftime('%Y-%m-%d') if movement_audit.get('resolved_window_end') is not None else '-'}`"
+                )
+                st.caption(str(movement_audit.get("audit_reason") or ""))
+                aggregate_summary = movement_audit.get("aggregate_summary", pd.DataFrame())
+                if aggregate_summary.empty:
+                    st.info("No constituent-level movement audit rows are available for this selected theme/window.")
+                else:
+                    st.caption(
+                        "Boundary summary below shows the exact historical contributor counts, aggregate averages, and composite values used by the winning row contract."
+                    )
+                    st.dataframe(aggregate_summary, width="stretch", hide_index=True)
+                constituent_rows = movement_audit.get("constituent_rows", pd.DataFrame())
+                if not constituent_rows.empty:
+                    st.caption(
+                        "Constituent rows below show governed membership, eligibility, raw vs capped returns, and whether the historical contributor gate passed at each resolved boundary."
+                    )
+                    st.dataframe(constituent_rows, width="stretch", hide_index=True)
         if st.button(f"Open current/live constituent view for `{selected_theme_name}`", key="open_historical_theme_current_view"):
             _open_theme_in_themes(options[sel], selected_theme_name, theme_label_by_id, theme_ids_by_name, "historical_detail")
 
@@ -873,9 +877,10 @@ with st.expander("Momentum score formula (deterministic)"):
 momentum_score =
     0.45 * delta_composite
   + 0.25 * delta_avg_1m
-  + 0.20 * delta_breadth
+  + 0.20 * (delta_breadth * breadth_confidence_factor)
   + 0.10 * rank_change
 
+breadth_confidence_factor = min(theme_confidence_factor(start_ticker_count), theme_confidence_factor(end_ticker_count))
 rank_change = start_rank - end_rank  (positive means rank improved)
 rotation_intensity_score = ((entered_top_n + exited_top_n) / top_n) * 100
         """.strip()

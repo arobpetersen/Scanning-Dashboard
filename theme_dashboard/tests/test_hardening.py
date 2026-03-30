@@ -65,6 +65,7 @@ from src.theme_health_audit import (
     theme_health_action_eligibility,
     theme_health_audit_counts,
 )
+from src.theme_selection import describe_selection_source
 from src.suggestions_service import (
     bulk_update_filtered_status,
     can_apply_queue_suggestion_row,
@@ -214,6 +215,27 @@ class TestLeaderboardUtils(unittest.TestCase):
         self.assertEqual(ranked.iloc[0]["theme"], "B")
         self.assertEqual(float(ranked.iloc[0]["momentum_score"]), 9.0)
 
+    def test_window_leaderboard_uses_displayed_metric_as_secondary_sort_when_momentum_is_primary(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-01-01", "theme_id": 1, "theme": "A", "avg_1w": 8.0, "avg_1m": 2.0, "avg_3m": 3.0},
+                {"snapshot_time": "2026-01-08", "theme_id": 1, "theme": "A", "avg_1w": 7.0, "avg_1m": 3.0, "avg_3m": 4.0},
+                {"snapshot_time": "2026-01-01", "theme_id": 2, "theme": "B", "avg_1w": 6.0, "avg_1m": 1.0, "avg_3m": 1.0},
+                {"snapshot_time": "2026-01-08", "theme_id": 2, "theme": "B", "avg_1w": 9.0, "avg_1m": 2.0, "avg_3m": 2.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "A", "momentum_score": 9, "rank_change": 1},
+                {"theme_id": 2, "theme": "B", "momentum_score": 9, "rank_change": 0},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary}
+
+        ranked, _ = build_window_leaderboard(momentum, "avg_1w", top_k=2, primary_sort_col="momentum_score")
+
+        self.assertEqual(ranked["theme"].tolist(), ["B", "A"])
+
     def test_window_leaderboard_allows_valid_thin_historical_themes(self):
         history = pd.DataFrame(
             [
@@ -238,6 +260,72 @@ class TestLeaderboardUtils(unittest.TestCase):
         )
 
         self.assertEqual(ranked["theme"].tolist(), ["Thin", "Healthy"])
+
+    @patch("src.momentum_engine.top_n_membership_changes", return_value=([], []))
+    @patch("src.momentum_engine.theme_history_window")
+    def test_compute_theme_momentum_damps_breadth_for_smaller_themes(self, mock_theme_history_window, _mock_membership):
+        mock_theme_history_window.return_value = pd.DataFrame(
+            [
+                {
+                    "snapshot_time": "2026-01-01",
+                    "theme_id": 1,
+                    "theme": "Thin",
+                    "category": "Cat",
+                    "composite_score": 0.0,
+                    "avg_1w": 0.0,
+                    "avg_1m": 0.0,
+                    "avg_3m": 0.0,
+                    "positive_1m_breadth_pct": 0.0,
+                    "ticker_count": 4,
+                },
+                {
+                    "snapshot_time": "2026-01-08",
+                    "theme_id": 1,
+                    "theme": "Thin",
+                    "category": "Cat",
+                    "composite_score": 0.0,
+                    "avg_1w": 0.0,
+                    "avg_1m": 0.0,
+                    "avg_3m": 0.0,
+                    "positive_1m_breadth_pct": 100.0,
+                    "ticker_count": 4,
+                },
+                {
+                    "snapshot_time": "2026-01-01",
+                    "theme_id": 2,
+                    "theme": "Broad",
+                    "category": "Cat",
+                    "composite_score": 0.0,
+                    "avg_1w": 0.0,
+                    "avg_1m": 0.0,
+                    "avg_3m": 0.0,
+                    "positive_1m_breadth_pct": 0.0,
+                    "ticker_count": 8,
+                },
+                {
+                    "snapshot_time": "2026-01-08",
+                    "theme_id": 2,
+                    "theme": "Broad",
+                    "category": "Cat",
+                    "composite_score": 0.0,
+                    "avg_1w": 0.0,
+                    "avg_1m": 0.0,
+                    "avg_3m": 0.0,
+                    "positive_1m_breadth_pct": 100.0,
+                    "ticker_count": 8,
+                },
+            ]
+        )
+
+        out = compute_theme_momentum(conn=None, lookback_days=7)
+        summary = out["window_summary"].set_index("theme")
+
+        self.assertAlmostEqual(float(summary.loc["Thin", "breadth_confidence_factor"]), 0.71, places=2)
+        self.assertAlmostEqual(float(summary.loc["Broad", "breadth_confidence_factor"]), 1.0, places=2)
+        self.assertAlmostEqual(float(summary.loc["Thin", "effective_delta_breadth"]), 70.71, places=2)
+        self.assertAlmostEqual(float(summary.loc["Broad", "effective_delta_breadth"]), 100.0, places=2)
+        self.assertAlmostEqual(float(summary.loc["Thin", "momentum_score"]), 14.14, places=2)
+        self.assertAlmostEqual(float(summary.loc["Broad", "momentum_score"]), 20.0, places=2)
 
 
 class TestHistoricalAnalyticsConnectionIsolation(unittest.TestCase):
@@ -3755,7 +3843,7 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('_render_summary_metric("Composite", _metric_value(current_row.get("composite_score")))', content)
         self.assertIn('_render_summary_metric("Momentum", _metric_value(current_row.get("current_momentum_score")))', content)
         self.assertIn('_render_summary_metric("Rank", current_rank)', content)
-        self.assertIn('_render_summary_metric("1W rank change", window_rank_change)', content)
+        self.assertIn('_render_summary_metric("1W hist rank Δ", window_rank_change)', content)
         self.assertIn('_render_summary_metric(', content)
         self.assertIn('"Contributors"', content)
         self.assertIn('_render_summary_metric("Avg 1W", _metric_value(current_row.get("avg_1w"), suffix="%"))', content)
@@ -3765,6 +3853,8 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn("no current governed-member rows are visible in the detail table", content)
         self.assertIn("Current enriched coverage is partial for this theme", content)
         self.assertIn("none currently have preferred-source enriched snapshot fields populated", content)
+        self.assertIn("turn on `Include suppressed tickers` to inspect them", content)
+        self.assertIn("No preferred-source theme history rows are available yet for this selected theme.", content)
         self.assertIn('render_feedback_message(st.session_state, "themes_refresh_feedback")', content)
         self.assertIn('freshness_c1.metric("Current tables snapshot"', content)
         self.assertIn('freshness_c2.metric("1W movement end"', content)
@@ -3772,12 +3862,16 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('show_leadership_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_leadership")', content)
         self.assertIn('show_current_1w_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_current_1w")', content)
         self.assertIn('show_current_1m_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_current_1m")', content)
-        self.assertIn('show_movement_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_movement")', content)
+        self.assertIn('show_movement_deltas = st.toggle("Show window deltas", value=False, key="themes_show_daily_deltas_movement")', content)
         self.assertIn("def _resolve_prior_daily_endpoint(history: pd.DataFrame)", content)
         self.assertIn("Current Market Leadership deltas compare against the prior daily movement endpoint", content)
         self.assertIn("Current 1W deltas compare against the prior daily movement endpoint", content)
         self.assertIn("Current 1M deltas compare against the prior daily movement endpoint", content)
-        self.assertIn("Theme Movement Snapshot deltas compare each theme table against its own prior daily movement endpoint", content)
+        self.assertIn("Theme Movement Snapshot deltas compare the resolved window start against the resolved window end for that table.", content)
+        self.assertIn('def _apply_window_delta_display(', content)
+        self.assertIn('"avg_1w": "delta_avg_1w"', content)
+        self.assertIn('"avg_1m": "delta_avg_1m"', content)
+        self.assertIn('"avg_3m": "delta_avg_3m"', content)
         self.assertIn("def _historical_table_column_config(columns: list[str], *, text_columns: set[str] | None = None) -> dict[str, object]:", content)
         self.assertIn('current_rankings = current_snapshot.get("standardized_rankings", current_snapshot["rankings"]).copy()', content)
         self.assertIn('current_theme_metrics["composite_score"] = current_theme_metrics["standardized_composite_score"]', content)
@@ -3863,6 +3957,10 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn("unsafe_allow_html=True", content)
         self.assertIn("color:var(--text-color)", content)
         self.assertIn('st.markdown("<div style=\'height:0.25rem;\'></div>", unsafe_allow_html=True)', content)
+        self.assertIn('explore_tab, manage_tab = st.tabs(["Explore Themes", "Manage & Ops"])', content)
+        self.assertIn("Start here: review current leadership or current top themes, then click any theme row to open detail below.", content)
+        self.assertIn('with st.expander("Internal testing quick guide", expanded=False):', content)
+        self.assertIn("Most useful feedback: confusing labels/states, drilldown or selection bugs, trust/reconciliation issues", content)
         self.assertIn('selected_theme_id = st.session_state.get(SELECTED_THEME_ID_KEY)', content)
         self.assertIn('selected_theme_label = st.session_state.get(SELECTED_THEME_LABEL_KEY)', content)
         self.assertIn('l6.metric("Current coverage", str(current_coverage_status))', content)
@@ -3910,6 +4008,8 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('if col not in comparison.columns:', content)
         self.assertIn('if st.button("Reload latest DB state", key="themes_force_refresh")', content)
         self.assertIn('if st.button("Materialize latest historical day", key="themes_force_latest_day_refresh")', content)
+        self.assertIn('with st.expander("Advanced refresh controls", expanded=False):', content)
+        self.assertIn("Use these only when you intentionally want to refresh cached page analytics or advance historical movement history.", content)
         self.assertIn("def _active_daily_historical_append_runs() -> pd.DataFrame:", content)
         self.assertIn("AND run_kind = 'daily_historical_append'", content)
         self.assertIn('active["likely_stale"] = age_minutes >= float(DAILY_HISTORICAL_APPEND_STALE_MINUTES)', content)
@@ -3992,9 +4092,15 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('"Visible window end"', content)
         self.assertIn('if st.button("Reload latest DB state", key="historical_force_refresh")', content)
         self.assertIn("This recomputes historical movement, leaderboard, and inflection tables in-memory from stored data only", content)
+        self.assertIn("Secondary workflow: audit historical theme movement, leadership rotation, and provenance-aware change across resolved boundary windows.", content)
+        self.assertIn("Start in Themes for current leadership and live drilldown.", content)
         self.assertIn("Historical Performance tables are driven by the resolved boundary window shown above", content)
         self.assertIn('sel = st.selectbox(', content)
         self.assertIn('index=default_index,', content)
+        self.assertIn('default_index = None', content)
+        self.assertIn('placeholder="Search and select a theme to inspect historical detail"', content)
+        self.assertIn('st.info("Search and select a theme to inspect historical detail.")', content)
+        self.assertIn("No historical snapshot rows are available yet for the selected theme. Use Themes for current/live detail.", content)
         self.assertIn('with st.expander("Debug: Movement Row Audit", expanded=False):', content)
         self.assertIn('movement_audit = historical_theme_movement_row_audit(conn, options[sel], int(lookback_days))', content)
         self.assertIn("Constituent rows below show governed membership, eligibility, raw vs capped returns", content)
@@ -4003,6 +4109,13 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('leaders_cols.extend(["concentration", "delta_avg_1m", "delta_breadth"])', content)
         self.assertIn('"eligible_contributor_count"', content)
         self.assertIn('"covered_eligible_constituent_count"', content)
+
+    def test_theme_selection_source_labels_cover_current_and_historical_click_paths(self):
+        self.assertEqual(describe_selection_source("current_leadership"), "Current Market Leadership")
+        self.assertEqual(describe_selection_source("current_top_1w"), "Current Top Themes 1W")
+        self.assertEqual(describe_selection_source("current_top_1m"), "Current Top Themes 1M")
+        self.assertEqual(describe_selection_source("historical_top_momentum"), "Historical top momentum")
+        self.assertEqual(describe_selection_source("historical_detail"), "Historical detail")
 
     def test_suggestions_page_source_uses_clickable_queue_and_scanner_selection(self):
         page_source = Path(__file__).resolve().parents[1] / "pages" / "3_Suggestions.py"

@@ -7,13 +7,18 @@ SELECTED_THEME_SOURCE_KEY = "selected_theme_source"
 
 
 SELECTION_SOURCE_LABELS = {
+    "current_leadership": "Current Market Leadership",
+    "current_top_1w": "Current Top Themes 1W",
+    "current_top_1m": "Current Top Themes 1M",
     "top_1w": "Top 10 1W",
     "top_1m": "Top 10 1M",
     "manual_dropdown": "Manual dropdown",
     "default": "Default theme",
     "historical_overview": "Historical overview",
+    "historical_top_momentum": "Historical top momentum",
     "historical_signal": "Historical signal",
     "historical_table": "Historical table",
+    "historical_detail": "Historical detail",
     "health_theme": "Health theme",
 }
 

@@ -137,8 +137,9 @@ def build_window_leaderboard(
 
     Sorting is deterministic and window-specific:
     1) selected primary sort column,
-    2) momentum_score,
-    3) rank_change.
+    2) displayed window metric when momentum_score is primary,
+    3) momentum_score,
+    4) rank_change.
     """
     history, summary, msg = _validate_window_leaderboard_inputs(momentum)
     if msg:
@@ -147,7 +148,9 @@ def build_window_leaderboard(
     latest = history.sort_values(["snapshot_time", "theme"]).groupby("theme_id", as_index=False).tail(1)
     sort_col = primary_sort_col or perf_col
     sort_cols = [sort_col]
-    if sort_col != "momentum_score":
+    if sort_col == "momentum_score":
+        sort_cols.append(perf_col)
+    else:
         sort_cols.append("momentum_score")
     sort_cols.extend(["rank_change", "theme"])
     ascending = [False] * (len(sort_cols) - 1) + [True]

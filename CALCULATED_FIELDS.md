@@ -507,10 +507,16 @@ Derived fields:
 Momentum score:
 
 ```text
+breadth_confidence_factor =
+    min(theme_confidence_factor(ticker_count_start), theme_confidence_factor(ticker_count_end))
+
+effective_delta_breadth =
+    delta_breadth * breadth_confidence_factor
+
 momentum_score =
     0.45 * delta_composite
   + 0.25 * delta_avg_1m
-  + 0.20 * delta_breadth
+  + 0.20 * effective_delta_breadth
   + 0.10 * rank_change
 ```
 

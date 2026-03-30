@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .config import THEME_CONFIDENCE_FULL_COUNT
 from .queries import theme_history_window, top_n_membership_changes
 
 METRIC_COLS = [
@@ -36,6 +37,12 @@ def _empty_result() -> dict:
             "collapsed_to_available_history": False,
         },
     }
+
+
+def _historical_theme_confidence_factor(ticker_count: int | float) -> float:
+    if pd.isna(ticker_count) or float(ticker_count) <= 0:
+        return 0.0
+    return min(1.0, (float(ticker_count) / float(THEME_CONFIDENCE_FULL_COUNT)) ** 0.5)
 
 
 def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
@@ -98,12 +105,20 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
     merged["delta_breadth"] = merged["positive_1m_breadth_pct_end"] - merged["positive_1m_breadth_pct_start"]
     merged["delta_ticker_count"] = merged["ticker_count_end"] - merged["ticker_count_start"]
     merged["rank_change"] = merged["rank_start"] - merged["rank_end"]
+    merged["breadth_confidence_factor"] = [
+        min(
+            _historical_theme_confidence_factor(start_count),
+            _historical_theme_confidence_factor(end_count),
+        )
+        for start_count, end_count in zip(merged["ticker_count_start"], merged["ticker_count_end"])
+    ]
+    merged["effective_delta_breadth"] = merged["delta_breadth"] * merged["breadth_confidence_factor"]
 
     # Deterministic, auditable momentum score
     merged["momentum_score"] = (
         0.45 * merged["delta_composite"]
         + 0.25 * merged["delta_avg_1m"]
-        + 0.20 * merged["delta_breadth"]
+        + 0.20 * merged["effective_delta_breadth"]
         + 0.10 * merged["rank_change"]
     )
 
