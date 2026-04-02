@@ -1,25 +1,175 @@
+import json
+import inspect
+from contextlib import contextmanager
 import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import duckdb
 import pandas as pd
 
-from src.fetch_data import run_refresh
+from src.fetch_data import RefreshBlockedError, mark_refresh_run_interrupted, mark_stale_running_runs, running_refresh_runs, run_refresh
+from src.database import get_conn, get_db_connection
+from src.db_introspection import table_exists, table_has_column
 from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
-from src.leaderboard_utils import build_window_leaderboard
+from src.leaderboard_utils import (
+    build_category_leaderboard,
+    build_category_theme_breakdown,
+    build_current_leadership_table,
+    build_current_performance_table,
+    build_window_leaderboard,
+    disambiguate_theme_labels,
+    historical_concentration_label,
+)
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
-from src.queries import latest_ticker_snapshots, theme_history_last_n_snapshots, theme_history_window, theme_ticker_metrics, ticker_history_last_n_snapshots
-from src.symbol_hygiene import apply_refresh_failure, apply_refresh_success
-from src.theme_service import seed_if_needed
+from src.momentum_engine import compute_theme_momentum
+from src.rotation_engine import compute_theme_rotation
+from src.queries import (
+    _recent_ticker_history_theme_history,
+    historical_theme_movement_row_audit,
+    latest_ticker_snapshots,
+    refresh_history,
+    snapshot_counts,
+    source_audit_status,
+    ticker_lookup_memberships,
+    ticker_lookup_summary,
+    theme_health_overview,
+    theme_history_last_n_snapshots,
+    theme_history_window,
+    theme_member_hygiene_context,
+    theme_ticker_metrics,
+    ticker_history_last_n_snapshots,
+    top_n_membership_changes,
+    top_theme_movers,
+)
+from src.symbol_hygiene import (
+    OVERRIDE_ACTIONS,
+    STAGED_ACTIONS,
+    apply_refresh_failure,
+    apply_refresh_success,
+    apply_staged_symbol_hygiene_actions,
+    clear_symbol_hygiene_staged_state,
+    filter_symbol_hygiene_queue,
+    resolve_staged_symbol_hygiene_action,
+    sync_symbol_hygiene_staged_action,
+    sort_symbol_hygiene_queue,
+    symbol_hygiene_queue,
+)
+from src.theme_health_audit import (
+    apply_theme_health_audit_preset,
+    enrich_theme_health_for_audit,
+    sort_theme_health_audit,
+    theme_health_action_eligibility,
+    theme_health_audit_counts,
+)
+from src.theme_selection import describe_selection_source
+from src.suggestions_service import (
+    bulk_update_filtered_status,
+    can_apply_queue_suggestion_row,
+    can_fast_path_create_governed_theme_row,
+    can_follow_up_applied_scanner_audit_review_row,
+    fast_path_create_governed_theme_and_assign_ticker,
+    list_suggestions,
+    review_suggestion,
+    update_suggestion_status,
+)
+from src.scanner_audit import (
+    apply_scanner_candidate_selected_themes,
+    promote_scanner_candidate_to_theme_review,
+    scanner_candidate_summary,
+    send_preserved_applied_scanner_audit_theme_to_review,
+)
+from src.suggestions_page_state import (
+    apply_generated_theme_idea_checkbox_selection,
+    add_theme_to_selected_existing,
+    default_selected_existing_theme_ids,
+    finalize_possible_new_theme_category_state,
+    finalize_possible_new_theme_state,
+    has_meaningful_theme_review_selection,
+    join_possible_new_theme_ideas,
+    merge_generated_theme_ideas_with_custom,
+    merge_suggested_and_custom_theme_ids,
+    normalize_theme_id_list,
+    prepare_possible_new_theme_category_prefill,
+    prepare_possible_new_theme_prefill,
+    reconcile_possible_new_theme_from_generated_checkbox_state,
+    resolve_active_suggestions_tab,
+    resolve_scanner_audit_ticker,
+    split_possible_new_theme_ideas,
+    split_selected_existing_theme_ids,
+    sync_generated_theme_idea_checkbox_state,
+    sync_suggested_theme_checkbox_state,
+)
+from src.suggestions_service import recent_applied_suggestions
+from src.theme_service import add_ticker, clear_manual_ticker_suppression, get_theme_members, list_themes, refresh_active_ticker_universe, remove_ticker, replace_ticker_in_theme, seed_if_needed, set_manual_ticker_suppression, theme_membership_export, ticker_manual_suppression_state
+from src.theme_service import set_ticker_theme_assignments
+from src.ticker_onboarding import governed_ticker_onboarding_counts, list_governed_ticker_onboarding
 from src.provider_live import LiveProvider
+from src.scanner_research import (
+    _description_theme_generation_draft,
+    get_scanner_research_review,
+    save_scanner_research_review,
+    scanner_research_review_summary,
+)
+from src.streamlit_utils import _load_theme_inflections_cached, _load_theme_momentum_cached, resolve_valid_selectbox_value
+from src import streamlit_utils
 from src.eod_refresh import has_eod_run_for_date, run_scheduled_eod_refresh
+from src.rankings import (
+    _build_current_ranking_metrics,
+    _compute_theme_metrics,
+    current_momentum_quality_factor,
+    current_ticker_coverage_status,
+    current_ticker_is_eligible,
+    compute_current_ranking_snapshot,
+    compute_theme_rankings,
+    ticker_current_momentum_score,
+    ticker_standardized_composite_score,
+    standardized_participation_factor,
+    standardized_recovery_factor,
+    standardized_three_month_guardrail_factor,
+    theme_confidence_factor,
+    visible_ticker_suppressed,
+)
 
 
 class TestLeaderboardUtils(unittest.TestCase):
+    def test_historical_concentration_label_interprets_single_name_thin_narrow_and_broad(self):
+        self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 1, "positive_1m_breadth_pct": 100.0})), "Single-name")
+        self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 2, "positive_1m_breadth_pct": 100.0})), "Thin")
+        self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 3, "positive_1m_breadth_pct": 66.67})), "Narrow")
+        self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 5, "positive_1m_breadth_pct": 80.0})), "Broad")
+        self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 5, "positive_1m_breadth_pct": 40.0})), "Narrow")
+
+    def test_historical_concentration_label_prefers_historical_contributor_counts_over_ticker_count(self):
+        self.assertEqual(
+            historical_concentration_label(
+                pd.Series(
+                    {
+                        "ticker_count": 8,
+                        "eligible_contributor_count": 2,
+                        "covered_eligible_constituent_count": 1,
+                        "positive_1m_breadth_pct": 100.0,
+                    }
+                )
+            ),
+            "Single-name",
+        )
+        self.assertEqual(
+            historical_concentration_label(
+                pd.Series(
+                    {
+                        "ticker_count": 8,
+                        "eligible_contributor_count": 2,
+                        "positive_1m_breadth_pct": 100.0,
+                    }
+                )
+            ),
+            "Thin",
+        )
+
     def test_window_specific_sorting_prefers_window_metric(self):
         history = pd.DataFrame(
             [
@@ -43,8 +193,1670 @@ class TestLeaderboardUtils(unittest.TestCase):
         self.assertEqual(ranked_1w.iloc[0]["theme"], "B")
         self.assertEqual(ranked_1m.iloc[0]["theme"], "A")
 
+    def test_window_leaderboard_can_use_momentum_as_primary_sort_driver(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-01-01", "theme_id": 1, "theme": "A", "avg_1w": 8.0, "avg_1m": 2.0, "avg_3m": 3.0},
+                {"snapshot_time": "2026-01-08", "theme_id": 1, "theme": "A", "avg_1w": 8.0, "avg_1m": 3.0, "avg_3m": 4.0},
+                {"snapshot_time": "2026-01-01", "theme_id": 2, "theme": "B", "avg_1w": 6.0, "avg_1m": 1.0, "avg_3m": 1.0},
+                {"snapshot_time": "2026-01-08", "theme_id": 2, "theme": "B", "avg_1w": 6.0, "avg_1m": 2.0, "avg_3m": 2.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "A", "momentum_score": 5, "rank_change": 1},
+                {"theme_id": 2, "theme": "B", "momentum_score": 9, "rank_change": 1},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary}
+
+        ranked, _ = build_window_leaderboard(momentum, "avg_1w", top_k=2, primary_sort_col="momentum_score")
+
+        self.assertEqual(ranked.iloc[0]["theme"], "B")
+        self.assertEqual(float(ranked.iloc[0]["momentum_score"]), 9.0)
+
+    def test_window_leaderboard_uses_displayed_metric_as_secondary_sort_when_momentum_is_primary(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-01-01", "theme_id": 1, "theme": "A", "avg_1w": 8.0, "avg_1m": 2.0, "avg_3m": 3.0},
+                {"snapshot_time": "2026-01-08", "theme_id": 1, "theme": "A", "avg_1w": 7.0, "avg_1m": 3.0, "avg_3m": 4.0},
+                {"snapshot_time": "2026-01-01", "theme_id": 2, "theme": "B", "avg_1w": 6.0, "avg_1m": 1.0, "avg_3m": 1.0},
+                {"snapshot_time": "2026-01-08", "theme_id": 2, "theme": "B", "avg_1w": 9.0, "avg_1m": 2.0, "avg_3m": 2.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "A", "momentum_score": 9, "rank_change": 1},
+                {"theme_id": 2, "theme": "B", "momentum_score": 9, "rank_change": 0},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary}
+
+        ranked, _ = build_window_leaderboard(momentum, "avg_1w", top_k=2, primary_sort_col="momentum_score")
+
+        self.assertEqual(ranked["theme"].tolist(), ["B", "A"])
+
+    def test_window_leaderboard_allows_valid_thin_historical_themes(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-01-01", "theme_id": 1, "theme": "Thin", "avg_1w": 4.0, "ticker_count": 2},
+                {"snapshot_time": "2026-01-08", "theme_id": 1, "theme": "Thin", "avg_1w": 8.0, "ticker_count": 2},
+                {"snapshot_time": "2026-01-01", "theme_id": 2, "theme": "Healthy", "avg_1w": 3.0, "ticker_count": 3},
+                {"snapshot_time": "2026-01-08", "theme_id": 2, "theme": "Healthy", "avg_1w": 6.0, "ticker_count": 3},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "Thin", "momentum_score": 99, "rank_change": 2},
+                {"theme_id": 2, "theme": "Healthy", "momentum_score": 5, "rank_change": 1},
+            ]
+        )
+
+        ranked, _ = build_window_leaderboard(
+            {"history": history, "window_summary": summary},
+            "avg_1w",
+            top_k=10,
+            primary_sort_col="momentum_score",
+        )
+
+        self.assertEqual(ranked["theme"].tolist(), ["Thin", "Healthy"])
+
+    @patch("src.momentum_engine.top_n_membership_changes", return_value=([], []))
+    @patch("src.momentum_engine.theme_history_window")
+    def test_compute_theme_momentum_damps_breadth_for_smaller_themes(self, mock_theme_history_window, _mock_membership):
+        mock_theme_history_window.return_value = pd.DataFrame(
+            [
+                {
+                    "snapshot_time": "2026-01-01",
+                    "theme_id": 1,
+                    "theme": "Thin",
+                    "category": "Cat",
+                    "composite_score": 0.0,
+                    "avg_1w": 0.0,
+                    "avg_1m": 0.0,
+                    "avg_3m": 0.0,
+                    "positive_1m_breadth_pct": 0.0,
+                    "ticker_count": 4,
+                },
+                {
+                    "snapshot_time": "2026-01-08",
+                    "theme_id": 1,
+                    "theme": "Thin",
+                    "category": "Cat",
+                    "composite_score": 0.0,
+                    "avg_1w": 0.0,
+                    "avg_1m": 0.0,
+                    "avg_3m": 0.0,
+                    "positive_1m_breadth_pct": 100.0,
+                    "ticker_count": 4,
+                },
+                {
+                    "snapshot_time": "2026-01-01",
+                    "theme_id": 2,
+                    "theme": "Broad",
+                    "category": "Cat",
+                    "composite_score": 0.0,
+                    "avg_1w": 0.0,
+                    "avg_1m": 0.0,
+                    "avg_3m": 0.0,
+                    "positive_1m_breadth_pct": 0.0,
+                    "ticker_count": 8,
+                },
+                {
+                    "snapshot_time": "2026-01-08",
+                    "theme_id": 2,
+                    "theme": "Broad",
+                    "category": "Cat",
+                    "composite_score": 0.0,
+                    "avg_1w": 0.0,
+                    "avg_1m": 0.0,
+                    "avg_3m": 0.0,
+                    "positive_1m_breadth_pct": 100.0,
+                    "ticker_count": 8,
+                },
+            ]
+        )
+
+        out = compute_theme_momentum(conn=None, lookback_days=7)
+        summary = out["window_summary"].set_index("theme")
+
+        self.assertAlmostEqual(float(summary.loc["Thin", "breadth_confidence_factor"]), 0.71, places=2)
+        self.assertAlmostEqual(float(summary.loc["Broad", "breadth_confidence_factor"]), 1.0, places=2)
+        self.assertAlmostEqual(float(summary.loc["Thin", "effective_delta_breadth"]), 70.71, places=2)
+        self.assertAlmostEqual(float(summary.loc["Broad", "effective_delta_breadth"]), 100.0, places=2)
+        self.assertAlmostEqual(float(summary.loc["Thin", "momentum_score"]), 14.14, places=2)
+        self.assertAlmostEqual(float(summary.loc["Broad", "momentum_score"]), 20.0, places=2)
+
+
+class TestHistoricalAnalyticsConnectionIsolation(unittest.TestCase):
+    def test_theme_momentum_cached_loader_uses_fresh_connections(self):
+        _load_theme_momentum_cached.clear()
+        seen_connections: list[object] = []
+
+        class _FreshConn:
+            pass
+
+        class _FreshConnContext:
+            def __init__(self):
+                self.conn = _FreshConn()
+
+            def __enter__(self):
+                return self.conn
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with patch("src.streamlit_utils.get_conn", side_effect=AssertionError("shared connection should not be used")):
+            with patch("src.streamlit_utils.get_fresh_read_conn", side_effect=lambda: _FreshConnContext()):
+                with patch("src.streamlit_utils.compute_theme_momentum", side_effect=lambda conn, lookback_days, top_n=20: seen_connections.append(conn) or {"history": pd.DataFrame(), "window_summary": pd.DataFrame()}):
+                    _load_theme_momentum_cached(("db", 1), 30, 20)
+                    _load_theme_momentum_cached(("db", 1), 31, 20)
+
+        self.assertEqual(len(seen_connections), 2)
+        self.assertIsNot(seen_connections[0], seen_connections[1])
+
+    def test_theme_inflections_cached_loader_uses_fresh_connections(self):
+        _load_theme_inflections_cached.clear()
+        seen_connections: list[object] = []
+
+        class _FreshConn:
+            pass
+
+        class _FreshConnContext:
+            def __init__(self):
+                self.conn = _FreshConn()
+
+            def __enter__(self):
+                return self.conn
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with patch("src.streamlit_utils.get_conn", side_effect=AssertionError("shared connection should not be used")):
+            with patch("src.streamlit_utils.get_fresh_read_conn", side_effect=lambda: _FreshConnContext()):
+                with patch("src.streamlit_utils.compute_theme_inflections", side_effect=lambda conn, lookback_days, top_n=20: {"leaders": pd.DataFrame(), "laggards": pd.DataFrame(), "turnarounds": pd.DataFrame(), "momentum": seen_connections.append(conn) or {"history": pd.DataFrame(), "window_summary": pd.DataFrame()}}):
+                    _load_theme_inflections_cached(("db", 1), 30, 20)
+                    _load_theme_inflections_cached(("db", 1), 31, 20)
+
+        self.assertEqual(len(seen_connections), 2)
+        self.assertIsNot(seen_connections[0], seen_connections[1])
+
+
+class TestSuggestionsPageState(unittest.TestCase):
+    def test_resolve_active_suggestions_tab_preserves_valid_selection(self):
+        options = ["Manual", "Queue", "Rules", "AI", "Scanner Audit"]
+        self.assertEqual(
+            resolve_active_suggestions_tab("Scanner Audit", options, "Manual"),
+            "Scanner Audit",
+        )
+
+    def test_resolve_active_suggestions_tab_falls_back_to_default(self):
+        options = ["Manual", "Queue", "Rules", "AI", "Scanner Audit"]
+        self.assertEqual(
+            resolve_active_suggestions_tab("Unknown", options, "Manual"),
+            "Manual",
+        )
+
+    def test_resolve_scanner_audit_ticker_preserves_valid_selection(self):
+        self.assertEqual(
+            resolve_scanner_audit_ticker("NVDA", ["AAPL", "NVDA", "PLTR"]),
+            "NVDA",
+        )
+
+    def test_resolve_scanner_audit_ticker_falls_back_to_first_option(self):
+        self.assertEqual(
+            resolve_scanner_audit_ticker("MISSING", ["AAPL", "NVDA", "PLTR"]),
+            "AAPL",
+        )
+
+    def test_clicking_suggested_theme_adds_it_to_selected_existing_state(self):
+        selected = add_theme_to_selected_existing([], 7, {1, 7, 9})
+        self.assertEqual(selected, [7])
+
+    def test_duplicate_clicks_do_not_create_duplicate_selected_existing_themes(self):
+        selected = add_theme_to_selected_existing([7], 7, {1, 7, 9})
+        self.assertEqual(selected, [7])
+
+    def test_default_selected_existing_theme_ids_keeps_top_suggested_ids(self):
+        self.assertEqual(default_selected_existing_theme_ids([7, 9, 11], limit=2), [7, 9])
+
+    def test_selected_existing_theme_state_persists_cleanly_across_rerun_normalization(self):
+        normalized = normalize_theme_id_list([7, "9", 7, "bad"], {7, 9, 10})
+        self.assertEqual(normalized, [7, 9])
+
+    def test_manual_selection_and_click_to_add_work_together(self):
+        selected = add_theme_to_selected_existing([3], 7, {3, 7, 9})
+        suggested_ids, custom_ids = split_selected_existing_theme_ids(selected, [7, 9])
+        self.assertEqual(suggested_ids, [7])
+        self.assertEqual(custom_ids, [3])
+
+    def test_unchecking_suggested_theme_removes_it_from_selected_existing_state(self):
+        merged = merge_suggested_and_custom_theme_ids([], [3, 7], [7, 9], {3, 7, 9})
+        self.assertEqual(merged, [3])
+
+    def test_suggestion_checkboxes_sync_from_multiselect_selection(self):
+        synced = sync_suggested_theme_checkbox_state([3, 7], [7, 9])
+        self.assertEqual(synced, {7: True, 9: False})
+
+    def test_possible_new_theme_prefills_input_when_present(self):
+        value, state = prepare_possible_new_theme_prefill(None, "Optical Interconnects", None)
+        self.assertEqual(value, "Optical Interconnects")
+        self.assertEqual(state["auto_value"], "Optical Interconnects")
+        self.assertFalse(bool(state["user_edited"]))
+
+    def test_no_possible_new_theme_leaves_input_blank(self):
+        value, state = prepare_possible_new_theme_prefill(None, None, None)
+        self.assertEqual(value, "")
+        self.assertEqual(state["auto_value"], "")
+        self.assertFalse(bool(state["user_edited"]))
+
+    def test_manual_possible_new_theme_edit_persists_across_reruns(self):
+        value, state = prepare_possible_new_theme_prefill(None, "Optical Interconnects", None)
+        self.assertEqual(value, "Optical Interconnects")
+        state = finalize_possible_new_theme_state("Custom Theme", state)
+        rerun_value, rerun_state = prepare_possible_new_theme_prefill("Custom Theme", "Data Center Optics", state)
+        self.assertEqual(rerun_value, "Custom Theme")
+        self.assertTrue(bool(rerun_state["user_edited"]))
+
+    def test_regenerate_updates_possible_new_theme_if_field_is_still_untouched(self):
+        value, state = prepare_possible_new_theme_prefill(None, "Optical Interconnects", None)
+        self.assertEqual(value, "Optical Interconnects")
+        state = finalize_possible_new_theme_state("Optical Interconnects", state)
+        rerun_value, rerun_state = prepare_possible_new_theme_prefill("Optical Interconnects", "Data Center Optics", state)
+        self.assertEqual(rerun_value, "Data Center Optics")
+        self.assertEqual(rerun_state["auto_value"], "Data Center Optics")
+        self.assertFalse(bool(rerun_state["user_edited"]))
+
+    def test_checking_first_generated_theme_idea_adds_it(self):
+        value, state = prepare_possible_new_theme_prefill(None, "Optical Interconnects", None)
+        self.assertEqual(value, "Optical Interconnects")
+        selected_value, selected_state = apply_generated_theme_idea_checkbox_selection(
+            "",
+            ["Data Center Optics"],
+            ["Data Center Optics", "Optical Interconnects"],
+            state,
+        )
+        finalized_state = finalize_possible_new_theme_state(selected_value, selected_state)
+
+        self.assertEqual(selected_value, "Data Center Optics")
+        self.assertTrue(bool(finalized_state["user_edited"]))
+        self.assertTrue(bool(finalized_state["forced_user_edited"]))
+        self.assertEqual(split_possible_new_theme_ideas(selected_value), ["Data Center Optics"])
+
+    def test_checking_second_generated_theme_idea_adds_it(self):
+        selected_value, selected_state = apply_generated_theme_idea_checkbox_selection(
+            "Data Center Optics",
+            ["Data Center Optics", "Optical Interconnects"],
+            ["Data Center Optics", "Optical Interconnects"],
+            {"auto_value": "Optical Interconnects", "user_edited": True},
+        )
+
+        self.assertEqual(
+            split_possible_new_theme_ideas(selected_value),
+            ["Data Center Optics", "Optical Interconnects"],
+        )
+        self.assertEqual(
+            join_possible_new_theme_ideas(split_possible_new_theme_ideas(selected_value)),
+            "Data Center Optics, Optical Interconnects",
+        )
+        self.assertTrue(bool(selected_state["user_edited"]))
+
+    def test_unchecking_generated_theme_idea_removes_it(self):
+        selected_value, selected_state = apply_generated_theme_idea_checkbox_selection(
+            "Data Center Optics, Optical Interconnects",
+            ["Optical Interconnects"],
+            ["Data Center Optics", "Optical Interconnects"],
+            {"auto_value": "Optical Interconnects", "user_edited": True},
+        )
+
+        self.assertEqual(split_possible_new_theme_ideas(selected_value), ["Optical Interconnects"])
+        self.assertTrue(bool(selected_state["user_edited"]))
+
+    def test_generated_theme_menu_add_updates_canonical_proposed_new_theme_value(self):
+        updated_value, updated_state = reconcile_possible_new_theme_from_generated_checkbox_state(
+            "",
+            ["Data Center Optics", "Optical Interconnects"],
+            {"Data Center Optics": True, "Optical Interconnects": False},
+            {},
+        )
+
+        self.assertEqual(updated_value, "Data Center Optics")
+        self.assertTrue(bool(updated_state["user_edited"]))
+        self.assertTrue(bool(updated_state["forced_user_edited"]))
+
+    def test_generated_theme_menu_add_is_visible_in_input_value_after_rerun(self):
+        updated_value, updated_state = reconcile_possible_new_theme_from_generated_checkbox_state(
+            "",
+            ["Data Center Optics", "Optical Interconnects"],
+            {"Data Center Optics": True, "Optical Interconnects": False},
+            {},
+        )
+
+        rerun_value, rerun_state = prepare_possible_new_theme_prefill(
+            updated_value,
+            "Optical Interconnects",
+            updated_state,
+        )
+
+        self.assertEqual(rerun_value, "Data Center Optics")
+        self.assertTrue(bool(rerun_state["user_edited"]))
+
+    def test_manual_text_and_generated_theme_menu_merge_without_duplicates(self):
+        updated_value, _ = reconcile_possible_new_theme_from_generated_checkbox_state(
+            "Custom Theme, Data Center Optics",
+            ["Data Center Optics", "Optical Interconnects"],
+            {"Data Center Optics": True, "Optical Interconnects": True},
+            {"auto_value": "Optical Interconnects", "user_edited": True},
+        )
+
+        self.assertEqual(
+            split_possible_new_theme_ideas(updated_value),
+            ["Data Center Optics", "Optical Interconnects", "Custom Theme"],
+        )
+
+    def test_generated_theme_menu_remove_updates_same_canonical_value(self):
+        updated_value, _ = reconcile_possible_new_theme_from_generated_checkbox_state(
+            "Custom Theme, Data Center Optics, Optical Interconnects",
+            ["Data Center Optics", "Optical Interconnects"],
+            {"Data Center Optics": False, "Optical Interconnects": True},
+            {"auto_value": "Optical Interconnects", "user_edited": True},
+        )
+
+        self.assertEqual(
+            split_possible_new_theme_ideas(updated_value),
+            ["Optical Interconnects", "Custom Theme"],
+        )
+
+    def test_generated_theme_idea_checkbox_state_syncs_from_existing_input_on_rerun(self):
+        synced = sync_generated_theme_idea_checkbox_state(
+            "Data Center Optics, Custom Theme",
+            ["Data Center Optics", "Optical Interconnects"],
+        )
+
+        self.assertEqual(
+            synced,
+            {
+                "Data Center Optics": True,
+                "Optical Interconnects": False,
+            },
+        )
+
+    def test_generated_theme_idea_checkbox_merge_preserves_custom_manual_items(self):
+        merged = merge_generated_theme_ideas_with_custom(
+            "Custom Theme, Data Center Optics",
+            ["Optical Interconnects"],
+            ["Data Center Optics", "Optical Interconnects"],
+        )
+
+        self.assertEqual(merged, "Optical Interconnects, Custom Theme")
+
+    def test_regenerate_still_respects_explicit_generated_theme_checkbox_selections(self):
+        value, state = prepare_possible_new_theme_prefill(None, "Optical Interconnects", None)
+        self.assertEqual(value, "Optical Interconnects")
+        selected_value, selected_state = apply_generated_theme_idea_checkbox_selection(
+            "Optical Interconnects",
+            ["Optical Interconnects", "Data Center Optics"],
+            ["Data Center Optics", "Optical Interconnects"],
+            state,
+        )
+        finalized_state = finalize_possible_new_theme_state(selected_value, selected_state)
+        rerun_value, rerun_state = prepare_possible_new_theme_prefill(selected_value, "Semiconductor Substrates", finalized_state)
+
+        self.assertEqual(rerun_value, "Data Center Optics, Optical Interconnects")
+        self.assertTrue(bool(rerun_state["user_edited"]))
+
+    def test_possible_new_theme_category_prefills_input_when_present(self):
+        value, state = prepare_possible_new_theme_category_prefill(None, "Optical Networking", None)
+        self.assertEqual(value, "Optical Networking")
+        self.assertEqual(state["auto_value"], "Optical Networking")
+        self.assertFalse(bool(state["user_edited"]))
+
+    def test_manual_possible_new_theme_category_edit_persists_across_reruns(self):
+        value, state = prepare_possible_new_theme_category_prefill(None, "Optical Networking", None)
+        self.assertEqual(value, "Optical Networking")
+        state = finalize_possible_new_theme_category_state("Communications Infrastructure", state)
+        rerun_value, rerun_state = prepare_possible_new_theme_category_prefill(
+            "Communications Infrastructure",
+            "Financial Technology",
+            state,
+        )
+        self.assertEqual(rerun_value, "Communications Infrastructure")
+        self.assertTrue(bool(rerun_state["user_edited"]))
+
+    def test_window_leaderboard_explains_true_boundary_requirement(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-11", "theme": "A", "avg_1w": 1.0},
+                {"snapshot_time": "2026-03-11", "theme": "B", "avg_1w": 2.0},
+            ]
+        )
+        momentum = {"history": history, "window_summary": pd.DataFrame(), "source_preference": "live"}
+
+        ranked, msg = build_window_leaderboard(momentum, "avg_1w", top_k=10)
+
+        self.assertTrue(ranked.empty)
+        self.assertIn("two boundary snapshots", msg)
+        self.assertIn("currently 1 available", msg)
+        self.assertIn("two same-day imports may still be insufficient", msg)
+
+    def test_category_leaderboard_groups_full_window_and_falls_back_to_theme_name(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme": "AI Infra", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 50.0},
+                {"snapshot_time": "2026-03-08", "theme": "AI Infra", "category": "Tech", "avg_1w": 8.0, "positive_1m_breadth_pct": 70.0},
+                {"snapshot_time": "2026-03-01", "theme": "Semis", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0},
+                {"snapshot_time": "2026-03-08", "theme": "Semis", "category": "Tech", "avg_1w": 6.0, "positive_1m_breadth_pct": 60.0},
+                {"snapshot_time": "2026-03-01", "theme": "Oil Services", "category": "", "avg_1w": 1.0, "positive_1m_breadth_pct": 30.0},
+                {"snapshot_time": "2026-03-08", "theme": "Oil Services", "category": "", "avg_1w": 7.0, "positive_1m_breadth_pct": 50.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme": "AI Infra", "momentum_score": 5.0, "rank_change": 2},
+                {"theme": "Semis", "momentum_score": 4.0, "rank_change": 1},
+                {"theme": "Oil Services", "momentum_score": 3.0, "rank_change": 1},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary, "source_preference": "live"}
+
+        out, msg = build_category_leaderboard(momentum, "avg_1w", top_k=10)
+
+        self.assertIsNone(msg)
+        self.assertEqual(out.iloc[0]["category"], "Tech")
+        self.assertEqual(int(out.iloc[0]["contributing_themes"]), 2)
+        self.assertEqual(float(out.iloc[0]["performance"]), 7.0)
+        self.assertEqual(float(out.iloc[0]["momentum_score"]), 4.5)
+        self.assertEqual(float(out.iloc[0]["breadth_1m"]), 65.0)
+        self.assertEqual(out.iloc[0]["top_themes"], "AI Infra, Semis")
+        self.assertIn("Oil Services", out["category"].tolist())
+
+    def test_category_leaderboard_uses_full_eligible_theme_universe_not_top_theme_sample(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme": "Alpha", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0},
+                {"snapshot_time": "2026-03-08", "theme": "Alpha", "category": "Tech", "avg_1w": 10.0, "positive_1m_breadth_pct": 80.0},
+                {"snapshot_time": "2026-03-01", "theme": "Beta", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0},
+                {"snapshot_time": "2026-03-08", "theme": "Beta", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0},
+                {"snapshot_time": "2026-03-01", "theme": "Gamma", "category": "Energy", "avg_1w": 1.0, "positive_1m_breadth_pct": 70.0},
+                {"snapshot_time": "2026-03-08", "theme": "Gamma", "category": "Energy", "avg_1w": 9.0, "positive_1m_breadth_pct": 70.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme": "Alpha", "momentum_score": 5.0, "rank_change": 2},
+                {"theme": "Beta", "momentum_score": 0.0, "rank_change": 0},
+                {"theme": "Gamma", "momentum_score": 4.0, "rank_change": 1},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary, "source_preference": "live"}
+
+        theme_ranked, msg = build_window_leaderboard(momentum, "avg_1w", top_k=2)
+        self.assertIsNone(msg)
+        self.assertEqual(theme_ranked["theme"].tolist(), ["Alpha", "Gamma"])
+
+        category_ranked, category_msg = build_category_leaderboard(momentum, "avg_1w", top_k=10)
+        self.assertIsNone(category_msg)
+        self.assertEqual(category_ranked.iloc[0]["category"], "Energy")
+        self.assertEqual(float(category_ranked.iloc[0]["performance"]), 9.0)
+        self.assertEqual(category_ranked.iloc[0]["top_themes"], "Gamma")
+
+    def test_category_leaderboard_top_theme_preview_truncates_cleanly(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme": "A", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "A", "category": "Tech", "avg_1w": 9.0, "positive_1m_breadth_pct": 90.0},
+                {"snapshot_time": "2026-03-01", "theme": "B", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "B", "category": "Tech", "avg_1w": 8.0, "positive_1m_breadth_pct": 80.0},
+                {"snapshot_time": "2026-03-01", "theme": "C", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "C", "category": "Tech", "avg_1w": 7.0, "positive_1m_breadth_pct": 70.0},
+                {"snapshot_time": "2026-03-01", "theme": "D", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "D", "category": "Tech", "avg_1w": 6.0, "positive_1m_breadth_pct": 60.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme": "A", "momentum_score": 9.0, "rank_change": 4},
+                {"theme": "B", "momentum_score": 8.0, "rank_change": 3},
+                {"theme": "C", "momentum_score": 7.0, "rank_change": 2},
+                {"theme": "D", "momentum_score": 6.0, "rank_change": 1},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary, "source_preference": "live"}
+
+        out, msg = build_category_leaderboard(momentum, "avg_1w", top_k=10)
+
+        self.assertIsNone(msg)
+        self.assertEqual(out.iloc[0]["top_themes"], "A, B, C")
+        self.assertNotIn("+", out.iloc[0]["top_themes"])
+
+    def test_category_theme_breakdown_returns_ranked_underlying_themes(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme": "Alpha", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "Alpha", "category": "Tech", "avg_1w": 9.0, "positive_1m_breadth_pct": 90.0},
+                {"snapshot_time": "2026-03-01", "theme": "Beta", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "Beta", "category": "Tech", "avg_1w": 7.0, "positive_1m_breadth_pct": 70.0},
+                {"snapshot_time": "2026-03-01", "theme": "Gamma", "category": "", "avg_1w": 1.0, "positive_1m_breadth_pct": 10.0},
+                {"snapshot_time": "2026-03-08", "theme": "Gamma", "category": "", "avg_1w": 8.0, "positive_1m_breadth_pct": 80.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme": "Alpha", "momentum_score": 5.0, "rank_change": 2},
+                {"theme": "Beta", "momentum_score": 4.0, "rank_change": 1},
+                {"theme": "Gamma", "momentum_score": 4.5, "rank_change": 1},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary, "source_preference": "live"}
+
+        out, msg = build_category_theme_breakdown(momentum, "avg_1w")
+
+        self.assertIsNone(msg)
+        tech = out[out["category"] == "Tech"]
+        self.assertEqual(tech["theme"].tolist(), ["Alpha", "Beta"])
+        self.assertIn("Gamma", out[out["category"] == "Gamma"]["theme"].tolist())
+
+    def test_window_leaderboard_keeps_duplicate_theme_names_distinct_by_theme_id(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme_id": 1, "theme": "AI", "category": "Software", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 1, "theme": "AI", "category": "Software", "avg_1w": 9.0, "positive_1m_breadth_pct": 70.0},
+                {"snapshot_time": "2026-03-01", "theme_id": 2, "theme": "AI", "category": "Hardware", "avg_1w": 1.0, "positive_1m_breadth_pct": 35.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 2, "theme": "AI", "category": "Hardware", "avg_1w": 8.0, "positive_1m_breadth_pct": 60.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "AI", "momentum_score": 5.0, "rank_change": 2},
+                {"theme_id": 2, "theme": "AI", "momentum_score": 4.0, "rank_change": 1},
+            ]
+        )
+
+        out, msg = build_window_leaderboard({"history": history, "window_summary": summary}, "avg_1w", top_k=10)
+
+        self.assertIsNone(msg)
+        self.assertEqual(out["theme"].tolist(), ["AI", "AI"])
+        self.assertEqual(out["theme_id"].tolist(), [1, 2])
+
+    def test_category_outputs_keep_duplicate_theme_names_distinct_by_theme_id(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme_id": 1, "theme": "AI", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 1, "theme": "AI", "category": "Tech", "avg_1w": 9.0, "positive_1m_breadth_pct": 80.0},
+                {"snapshot_time": "2026-03-01", "theme_id": 2, "theme": "AI", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 30.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 2, "theme": "AI", "category": "Tech", "avg_1w": 7.0, "positive_1m_breadth_pct": 60.0},
+                {"snapshot_time": "2026-03-01", "theme_id": 3, "theme": "Robotics", "category": "Industrials", "avg_1w": 1.0, "positive_1m_breadth_pct": 20.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 3, "theme": "Robotics", "category": "Industrials", "avg_1w": 6.0, "positive_1m_breadth_pct": 50.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "AI", "momentum_score": 5.0, "rank_change": 2},
+                {"theme_id": 2, "theme": "AI", "momentum_score": 4.0, "rank_change": 1},
+                {"theme_id": 3, "theme": "Robotics", "momentum_score": 3.0, "rank_change": 1},
+            ]
+        )
+
+        category_out, category_msg = build_category_leaderboard({"history": history, "window_summary": summary}, "avg_1w", top_k=10)
+        breakdown_out, breakdown_msg = build_category_theme_breakdown({"history": history, "window_summary": summary}, "avg_1w")
+
+        self.assertIsNone(category_msg)
+        self.assertIsNone(breakdown_msg)
+        self.assertEqual(int(category_out.loc[category_out["category"] == "Tech", "contributing_themes"].iloc[0]), 2)
+        self.assertEqual(sorted(breakdown_out.loc[breakdown_out["category"] == "Tech", "theme_id"].tolist()), [1, 2])
+        self.assertIn("AI (Tech) [#1]", category_out.loc[category_out["category"] == "Tech", "top_themes"].iloc[0])
+        self.assertIn("AI (Tech) [#2]", category_out.loc[category_out["category"] == "Tech", "top_themes"].iloc[0])
+        self.assertEqual(sorted(breakdown_out.loc[breakdown_out["category"] == "Tech", "theme_display"].tolist()), ["AI (Tech) [#1]", "AI (Tech) [#2]"])
+
+    def test_category_outputs_allow_valid_thin_historical_themes(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme_id": 1, "theme": "Thin", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 40.0, "ticker_count": 2},
+                {"snapshot_time": "2026-03-08", "theme_id": 1, "theme": "Thin", "category": "Tech", "avg_1w": 8.0, "positive_1m_breadth_pct": 70.0, "ticker_count": 2},
+                {"snapshot_time": "2026-03-01", "theme_id": 2, "theme": "Healthy", "category": "Tech", "avg_1w": 1.0, "positive_1m_breadth_pct": 50.0, "ticker_count": 3},
+                {"snapshot_time": "2026-03-08", "theme_id": 2, "theme": "Healthy", "category": "Tech", "avg_1w": 6.0, "positive_1m_breadth_pct": 60.0, "ticker_count": 3},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "Thin", "momentum_score": 99.0, "rank_change": 2},
+                {"theme_id": 2, "theme": "Healthy", "momentum_score": 4.0, "rank_change": 1},
+            ]
+        )
+        momentum = {"history": history, "window_summary": summary, "source_preference": "live"}
+
+        category_out, category_msg = build_category_leaderboard(momentum, "avg_1w", top_k=10)
+        breakdown_out, breakdown_msg = build_category_theme_breakdown(momentum, "avg_1w")
+
+        self.assertIsNone(category_msg)
+        self.assertIsNone(breakdown_msg)
+        self.assertIn("Thin", category_out.iloc[0]["top_themes"])
+        self.assertEqual(sorted(breakdown_out["theme"].tolist()), ["Healthy", "Thin"])
+
+    def test_disambiguate_theme_labels_only_changes_collisions(self):
+        df = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "AI", "category": "Software"},
+                {"theme_id": 2, "theme": "AI", "category": "Hardware"},
+                {"theme_id": 3, "theme": "Solar", "category": "Energy"},
+            ]
+        )
+
+        out = disambiguate_theme_labels(df)
+
+        self.assertEqual(out.loc[out["theme_id"] == 1, "theme_display"].iloc[0], "AI (Software)")
+        self.assertEqual(out.loc[out["theme_id"] == 2, "theme_display"].iloc[0], "AI (Hardware)")
+        self.assertEqual(out.loc[out["theme_id"] == 3, "theme_display"].iloc[0], "Solar")
+
+    def test_top_n_membership_changes_uses_theme_id_for_duplicate_name_turnover(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'AI', 'Software', true)")
+        conn.execute("insert into themes values (2, 'AI', 'Hardware', true)")
+        conn.execute("insert into themes values (3, 'Robotics', 'Industrials', true)")
+        conn.execute(
+            """
+            insert into theme_snapshots values
+            (1, '2026-03-01 00:00:00', 1, 5, 1, 1, 1, 50, 10, 'live'),
+            (1, '2026-03-01 00:00:00', 2, 5, 1, 1, 1, 45, 8, 'live'),
+            (1, '2026-03-01 00:00:00', 3, 5, 1, 1, 1, 40, 7, 'live'),
+            (2, '2026-03-08 00:00:00', 1, 5, 1, 1, 1, 40, 6, 'live'),
+            (2, '2026-03-08 00:00:00', 2, 5, 1, 1, 1, 60, 11, 'live'),
+            (2, '2026-03-08 00:00:00', 3, 5, 1, 1, 1, 50, 7, 'live')
+            """
+        )
+
+        entered, dropped = top_n_membership_changes(conn, 7, top_n=1)
+        momentum = compute_theme_momentum(conn, 7, top_n=1)
+        rotation = compute_theme_rotation(momentum["window_summary"], 1, momentum["new_leaders"], momentum["dropped_leaders"])
+
+        self.assertEqual(entered, ["AI"])
+        self.assertEqual(dropped, ["AI"])
+        self.assertEqual(rotation["rotation_intensity"]["entered_top_n"], 1)
+        self.assertEqual(rotation["rotation_intensity"]["exited_top_n"], 1)
+        self.assertEqual(rotation["rotation_intensity"]["rotation_intensity_score"], 200.0)
+        conn.close()
+
+    @patch("src.inflection_engine.compute_theme_momentum")
+    def test_compute_theme_inflections_keeps_duplicate_theme_names_distinct_by_theme_id(self, mock_momentum):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-03-01", "theme_id": 1, "theme": "AI", "category": "Software", "composite_score": 5.0, "avg_1m": 1.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 1, "theme": "AI", "category": "Software", "composite_score": 7.0, "avg_1m": 2.0},
+                {"snapshot_time": "2026-03-15", "theme_id": 1, "theme": "AI", "category": "Software", "composite_score": 9.0, "avg_1m": 3.0},
+                {"snapshot_time": "2026-03-22", "theme_id": 1, "theme": "AI", "category": "Software", "composite_score": 11.0, "avg_1m": 4.0},
+                {"snapshot_time": "2026-03-01", "theme_id": 2, "theme": "AI", "category": "Hardware", "composite_score": 8.0, "avg_1m": 4.0},
+                {"snapshot_time": "2026-03-08", "theme_id": 2, "theme": "AI", "category": "Hardware", "composite_score": 7.0, "avg_1m": 3.0},
+                {"snapshot_time": "2026-03-15", "theme_id": 2, "theme": "AI", "category": "Hardware", "composite_score": 6.0, "avg_1m": 2.0},
+                {"snapshot_time": "2026-03-22", "theme_id": 2, "theme": "AI", "category": "Hardware", "composite_score": 5.0, "avg_1m": 1.0},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "AI",
+                    "rank_start": 6,
+                    "rank_end": 1,
+                    "rank_change": 5,
+                    "delta_composite": 6.0,
+                    "delta_avg_1m": 3.0,
+                    "delta_breadth": 4.0,
+                    "momentum_score": 5.0,
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "AI",
+                    "rank_start": 1,
+                    "rank_end": 6,
+                    "rank_change": -5,
+                    "delta_composite": -3.0,
+                    "delta_avg_1m": -3.0,
+                    "delta_breadth": -4.0,
+                    "momentum_score": -3.0,
+                },
+            ]
+        )
+        mock_momentum.return_value = {
+            "history": history,
+            "window_summary": summary,
+            "new_leaders": ["AI"],
+            "dropped_leaders": ["AI"],
+        }
+
+        out = compute_theme_inflections(object(), 30, top_n=20)
+
+        self.assertEqual(sorted(out["signals"]["theme_id"].tolist()), [1, 2])
+        self.assertEqual(len(out["signals"]), 2)
+
+    def test_current_leadership_table_uses_composite_strength_and_quality_context(self):
+        rankings = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Broad Tech",
+                    "category": "Tech",
+                    "is_active": True,
+                    "composite_score": 12.0,
+                    "avg_1w": 4.0,
+                    "avg_1m": 8.0,
+                    "avg_3m": 6.0,
+                    "positive_1m_breadth_pct": 72.0,
+                    "ticker_count": 10,
+                    "eligible_composite_count": 6,
+                    "eligible_breadth_pct": 90.0,
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Narrow Spike",
+                    "category": "Spec",
+                    "is_active": True,
+                    "composite_score": 11.5,
+                    "avg_1w": 10.0,
+                    "avg_1m": 9.0,
+                    "avg_3m": 2.0,
+                    "positive_1m_breadth_pct": 30.0,
+                    "ticker_count": 8,
+                    "eligible_composite_count": 2,
+                    "eligible_breadth_pct": 100.0,
+                },
+                {
+                    "theme_id": 3,
+                    "theme": "Turning Up",
+                    "category": "Macro",
+                    "is_active": True,
+                    "composite_score": 10.0,
+                    "avg_1w": 3.0,
+                    "avg_1m": 6.0,
+                    "avg_3m": 5.0,
+                    "positive_1m_breadth_pct": 55.0,
+                    "ticker_count": 6,
+                    "eligible_composite_count": 3,
+                    "eligible_breadth_pct": 83.3,
+                },
+                {
+                    "theme_id": 4,
+                    "theme": "Small But Broad",
+                    "category": "SMID",
+                    "is_active": True,
+                    "composite_score": 9.0,
+                    "avg_1w": 2.5,
+                    "avg_1m": 4.0,
+                    "avg_3m": 3.0,
+                    "positive_1m_breadth_pct": 66.0,
+                    "ticker_count": 5,
+                    "eligible_composite_count": 4,
+                    "eligible_breadth_pct": 80.0,
+                },
+            ]
+        )
+
+        out = build_current_leadership_table(rankings, top_k=10)
+
+        self.assertEqual(out["theme"].tolist(), ["Broad Tech", "Narrow Spike", "Turning Up", "Small But Broad"])
+        self.assertEqual(out.iloc[0]["leadership_quality"], "Broad leader")
+        self.assertEqual(out.iloc[1]["leadership_quality"], "Thin / filtered")
+        self.assertEqual(out.iloc[2]["leadership_quality"], "Narrow leader")
+        self.assertEqual(out.iloc[3]["leadership_quality"], "Broad leader")
+        self.assertEqual(int(out.iloc[0]["eligible_contributor_count"]), 6)
+
+    def test_current_performance_table_uses_metric_specific_eligible_counts(self):
+        rankings = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Deep Bench",
+                    "category": "Tech",
+                    "is_active": True,
+                    "avg_1w": 8.0,
+                    "avg_1m": 12.0,
+                    "composite_score": 10.0,
+                    "positive_1m_breadth_pct": 70.0,
+                    "ticker_count": 8,
+                    "eligible_1w_count": 6,
+                    "eligible_1m_count": 5,
+                    "eligible_3m_count": 5,
+                    "eligible_composite_count": 5,
+                    "eligible_breadth_pct": 75.0,
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Thin Bench",
+                    "category": "Spec",
+                    "is_active": True,
+                    "avg_1w": 30.0,
+                    "avg_1m": 15.0,
+                    "composite_score": 8.0,
+                    "positive_1m_breadth_pct": 60.0,
+                    "ticker_count": 4,
+                    "eligible_1w_count": 2,
+                    "eligible_1m_count": 4,
+                    "eligible_3m_count": 4,
+                    "eligible_composite_count": 4,
+                    "eligible_breadth_pct": 100.0,
+                },
+            ]
+        )
+
+        out = build_current_performance_table(rankings, "avg_1w", top_k=10)
+
+        self.assertEqual(out["theme"].tolist(), ["Deep Bench"])
+        self.assertEqual(int(out.iloc[0]["eligible_contributor_count"]), 6)
+
+
+class TestThemeConfidenceAdjustment(unittest.TestCase):
+    def test_theme_confidence_factor_has_no_penalty_at_threshold(self):
+        self.assertEqual(theme_confidence_factor(8), 1.0)
+        self.assertEqual(theme_confidence_factor(12), 1.0)
+
+    def test_theme_confidence_factor_softly_penalizes_small_themes(self):
+        self.assertEqual(theme_confidence_factor(2), 0.5)
+        self.assertAlmostEqual(theme_confidence_factor(4), 0.70710678, places=6)
+
+    def test_compute_theme_metrics_applies_small_theme_confidence_adjustment(self):
+        raw = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "Small", "category": "Tech", "is_active": True, "ticker": "A", "perf_1w": 10.0, "perf_1m": 10.0, "perf_3m": 10.0},
+                {"theme_id": 1, "theme": "Small", "category": "Tech", "is_active": True, "ticker": "B", "perf_1w": 10.0, "perf_1m": 10.0, "perf_3m": 10.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "C", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "D", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "E", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "F", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "G", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "H", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "I", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+                {"theme_id": 2, "theme": "Broad", "category": "Tech", "is_active": True, "ticker": "J", "perf_1w": 9.0, "perf_1m": 9.0, "perf_3m": 9.0},
+            ]
+        )
+
+        out = _compute_theme_metrics(raw).sort_values("composite_score", ascending=False).reset_index(drop=True)
+
+        self.assertEqual(out.iloc[0]["theme"], "Broad")
+        self.assertEqual(float(out[out["theme"] == "Small"]["composite_score"].iloc[0]), 5.0)
+        self.assertEqual(float(out[out["theme"] == "Broad"]["composite_score"].iloc[0]), 9.0)
+
+
+class TestStandardizedCompositeScore(unittest.TestCase):
+    def test_standardized_participation_factor_uses_ratio_not_fixed_count(self):
+        self.assertEqual(float(standardized_participation_factor(0.50)), 1.0)
+        self.assertEqual(float(standardized_participation_factor(0.25)), 0.75)
+        self.assertEqual(float(standardized_participation_factor(0.10)), 0.60)
+
+    def test_standardized_three_month_guardrail_is_soft_penalty_not_weighted_component(self):
+        self.assertEqual(float(standardized_three_month_guardrail_factor(-10.0)), 1.0)
+        self.assertAlmostEqual(float(standardized_three_month_guardrail_factor(-15.0)), 0.825, places=6)
+        self.assertEqual(float(standardized_three_month_guardrail_factor(-20.0)), 0.65)
+        self.assertAlmostEqual(float(standardized_three_month_guardrail_factor(-25.0)), 0.475, places=6)
+        self.assertEqual(float(standardized_three_month_guardrail_factor(-30.0)), 0.30)
+        self.assertEqual(float(standardized_three_month_guardrail_factor(-35.0)), 0.30)
+
+    def test_standardized_recovery_factor_requires_standout_base_when_3m_is_weak(self):
+        self.assertEqual(float(standardized_recovery_factor(8.0, -8.0)), 1.0)
+        self.assertEqual(float(standardized_recovery_factor(15.0, -15.0)), 1.0)
+        self.assertAlmostEqual(float(standardized_recovery_factor(12.0, -15.0)), 0.80, places=6)
+        self.assertEqual(float(standardized_recovery_factor(5.0, -25.0)), 0.50)
+
+    def test_current_momentum_quality_factor_softly_penalizes_low_standardized_composite(self):
+        self.assertEqual(float(current_momentum_quality_factor(10.5)), 1.0)
+        self.assertAlmostEqual(float(current_momentum_quality_factor(7.5)), 0.80, places=6)
+        self.assertEqual(float(current_momentum_quality_factor(5.0)), 0.60)
+
+    def test_ticker_standardized_composite_score_uses_same_baseline_strength_philosophy(self):
+        self.assertAlmostEqual(float(ticker_standardized_composite_score(10.0, 20.0, 5.0)), 17.0, places=6)
+        self.assertLess(float(ticker_standardized_composite_score(10.0, 20.0, -25.0)), 17.0)
+
+    def test_ticker_current_momentum_score_uses_composite_quality_check(self):
+        stronger = float(ticker_current_momentum_score(16.0, 14.0, -8.0))
+        weaker = float(ticker_current_momentum_score(16.0, 6.0, -28.0))
+        self.assertGreater(stronger, weaker)
+
+    def test_current_ticker_is_eligible_matches_current_snapshot_rules(self):
+        self.assertTrue(current_ticker_is_eligible(12.0, 2_000_000.0, "active", snapshot_present=True))
+        self.assertFalse(current_ticker_is_eligible(0.5, 2_000_000.0, "active", snapshot_present=True))
+        self.assertFalse(current_ticker_is_eligible(12.0, 0.0, "active", snapshot_present=True))
+        self.assertFalse(current_ticker_is_eligible(12.0, 2_000_000.0, "refresh_suppressed", snapshot_present=True))
+        self.assertFalse(current_ticker_is_eligible(12.0, 2_000_000.0, "active", snapshot_present=False))
+
+    def test_current_ticker_coverage_status_distinguishes_limbo_state_from_suppressed_and_healthy(self):
+        self.assertEqual(
+            current_ticker_coverage_status(
+                governed_membership=True,
+                suppressed=False,
+                eligible=True,
+                has_current_usable_snapshot=True,
+            ),
+            "healthy current coverage",
+        )
+        self.assertEqual(
+            current_ticker_coverage_status(
+                governed_membership=True,
+                suppressed=True,
+                eligible=False,
+                has_current_usable_snapshot=False,
+            ),
+            "suppressed",
+        )
+        self.assertEqual(
+            current_ticker_coverage_status(
+                governed_membership=True,
+                suppressed=False,
+                eligible=False,
+                has_current_usable_snapshot=False,
+            ),
+            "needs refresh check",
+        )
+        self.assertEqual(
+            current_ticker_coverage_status(
+                governed_membership=True,
+                suppressed=False,
+                eligible=False,
+                has_current_usable_snapshot=True,
+            ),
+            "current but ineligible",
+        )
+
+    def test_visible_ticker_suppressed_treats_manual_and_operational_suppression_as_same_user_facing_truth(self):
+        self.assertTrue(visible_ticker_suppressed("active", True))
+        self.assertTrue(visible_ticker_suppressed("refresh_suppressed", False))
+        self.assertTrue(visible_ticker_suppressed("refresh_suppressed", True))
+        self.assertFalse(visible_ticker_suppressed("active", False))
+
+    def test_build_current_ranking_metrics_exposes_standardized_composite_alongside_legacy(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Small but Participating",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "AAA",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 10.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 12.0,
+                    "perf_1m": 18.0,
+                    "perf_3m": -8.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Small but Participating",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "BBB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 11.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 10.0,
+                    "perf_1m": 16.0,
+                    "perf_3m": -8.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Small but Participating",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "CCC",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 12.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 8.0,
+                    "perf_1m": 14.0,
+                    "perf_3m": -8.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Small but Participating",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "DDD",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 13.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": None,
+                    "perf_1m": 12.0,
+                    "perf_3m": -8.0,
+                    "status": "active",
+                },
+            ]
+        )
+
+        out = _build_current_ranking_metrics(raw)
+
+        self.assertIn("legacy_composite_score", out.columns)
+        self.assertIn("standardized_composite_score", out.columns)
+        self.assertIn("eligible_standardized_count", out.columns)
+        self.assertEqual(int(out.iloc[0]["eligible_standardized_count"]), 3)
+        self.assertEqual(float(out.iloc[0]["standardized_participation_ratio"]), 0.75)
+        self.assertEqual(float(out.iloc[0]["standardized_participation_factor"]), 1.0)
+        self.assertEqual(float(out.iloc[0]["standardized_guardrail_factor"]), 1.0)
+        self.assertEqual(float(out.iloc[0]["standardized_recovery_factor"]), 1.0)
+        self.assertIn("current_momentum_score", out.columns)
+        self.assertIn("current_momentum_quality_factor", out.columns)
+        self.assertGreater(float(out.iloc[0]["standardized_composite_score"]), float(out.iloc[0]["legacy_composite_score"]))
+
+    def test_standardized_composite_requires_stronger_base_to_overcome_bad_3m(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Weak 3M But Standout",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "AAA",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 10.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 16.0,
+                    "perf_1m": 20.0,
+                    "perf_3m": -25.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Weak 3M But Standout",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "AAB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 11.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 14.0,
+                    "perf_1m": 18.0,
+                    "perf_3m": -25.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Weak 3M And Middling",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "BBB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 12.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 10.0,
+                    "perf_1m": 12.0,
+                    "perf_3m": -25.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Weak 3M And Middling",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "BBC",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 13.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 8.0,
+                    "perf_1m": 10.0,
+                    "perf_3m": -25.0,
+                    "status": "active",
+                },
+            ]
+        )
+
+        out = _build_current_ranking_metrics(raw).sort_values("standardized_composite_score", ascending=False).reset_index(drop=True)
+
+        self.assertEqual(out.iloc[0]["theme"], "Weak 3M But Standout")
+        self.assertEqual(float(out[out["theme"] == "Weak 3M But Standout"]["standardized_recovery_factor"].iloc[0]), 1.0)
+        self.assertAlmostEqual(
+            float(out[out["theme"] == "Weak 3M And Middling"]["standardized_recovery_factor"].iloc[0]),
+            0.69,
+            places=2,
+        )
+        self.assertGreater(
+            float(out[out["theme"] == "Weak 3M But Standout"]["standardized_composite_score"].iloc[0]),
+            float(out[out["theme"] == "Weak 3M And Middling"]["standardized_composite_score"].iloc[0]),
+        )
+
+    def test_current_momentum_uses_recent_thrust_with_standardized_quality_guardrail(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Low Quality Spike",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "AAA",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 10.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 20.0,
+                    "perf_1m": 6.0,
+                    "perf_3m": -28.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Low Quality Spike",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "AAB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 11.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 18.0,
+                    "perf_1m": 8.0,
+                    "perf_3m": -28.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Credible Thrust",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "BBB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 12.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 17.0,
+                    "perf_1m": 14.0,
+                    "perf_3m": -8.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 2,
+                    "theme": "Credible Thrust",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "BBC",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 13.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 15.0,
+                    "perf_1m": 12.0,
+                    "perf_3m": -8.0,
+                    "status": "active",
+                },
+            ]
+        )
+
+        out = _build_current_ranking_metrics(raw)
+
+        low_quality = out[out["theme"] == "Low Quality Spike"].iloc[0]
+        credible = out[out["theme"] == "Credible Thrust"].iloc[0]
+
+        self.assertGreater(float(low_quality["avg_1w"]), float(credible["avg_1w"]))
+        self.assertLess(float(low_quality["current_momentum_quality_factor"]), 1.0)
+        self.assertEqual(float(credible["current_momentum_quality_factor"]), 1.0)
+        self.assertGreater(float(credible["current_momentum_score"]), float(low_quality["current_momentum_score"]))
+
+    def test_standardized_composite_stays_null_when_no_pairwise_1w_1m_inputs_exist(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Missing Pairs",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "AAA",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 10.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": None,
+                    "perf_1m": 18.0,
+                    "perf_3m": -25.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Missing Pairs",
+                    "category": "Spec",
+                    "is_active": True,
+                    "ticker": "BBB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 11.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 10.0,
+                    "perf_1m": None,
+                    "perf_3m": -25.0,
+                    "status": "active",
+                },
+            ]
+        )
+
+        out = _build_current_ranking_metrics(raw)
+
+        self.assertEqual(int(out.iloc[0]["eligible_standardized_count"]), 0)
+        self.assertTrue(pd.isna(out.iloc[0]["standardized_composite_score"]))
+
+
+class TestCurrentThemeRankingHardening(unittest.TestCase):
+    def _build_conn(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint,
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint,
+                ticker varchar,
+                price double,
+                perf_1w double,
+                perf_1m double,
+                perf_3m double,
+                market_cap double,
+                avg_volume double,
+                short_interest_pct double,
+                float_shares double,
+                adr_pct double,
+                last_updated timestamp,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1w_breadth_pct double,
+                positive_1m_breadth_pct double,
+                positive_3m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar,
+                status varchar
+            )
+            """
+        )
+        conn.execute("insert into refresh_runs values (1, 'live', '2026-03-12 20:00:00', '2026-03-12 22:00:00', 'success')")
+        conn.execute("insert into themes values (1, 'Quality', 'Tech', true)")
+        conn.execute("insert into themes values (2, 'Thin', 'Spec', true)")
+        return conn
+
+    def test_build_current_ranking_metrics_excludes_low_price_low_volume_and_suppressed_names(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "AAA",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 10.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 5.0,
+                    "perf_1m": 10.0,
+                    "perf_3m": 15.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "PENNY",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 0.5,
+                    "avg_volume": 50_000_000.0,
+                    "perf_1w": 200.0,
+                    "perf_1m": 250.0,
+                    "perf_3m": 300.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "ILLIQ",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 2.0,
+                    "avg_volume": 1_000_000.0,
+                    "perf_1w": 40.0,
+                    "perf_1m": 40.0,
+                    "perf_3m": 40.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "SUPR",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 8.0,
+                    "avg_volume": 3_000_000.0,
+                    "perf_1w": 20.0,
+                    "perf_1m": 20.0,
+                    "perf_3m": 20.0,
+                    "status": "refresh_suppressed",
+                },
+            ]
+        )
+
+        out = _build_current_ranking_metrics(raw)
+
+        self.assertEqual(int(out.iloc[0]["ticker_count"]), 4)
+        self.assertEqual(int(out.iloc[0]["eligible_ticker_count"]), 1)
+        self.assertEqual(int(out.iloc[0]["eligible_composite_count"]), 1)
+        self.assertEqual(float(out.iloc[0]["avg_1w"]), 5.0)
+
+    def test_build_current_ranking_metrics_caps_outlier_returns_before_aggregation(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "AAA",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 10.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 10.0,
+                    "perf_1m": 10.0,
+                    "perf_3m": 10.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "BBB",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 12.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": 200.0,
+                    "perf_1m": 200.0,
+                    "perf_3m": 200.0,
+                    "status": "active",
+                },
+                {
+                    "theme_id": 1,
+                    "theme": "Quality",
+                    "category": "Tech",
+                    "is_active": True,
+                    "ticker": "CCC",
+                    "run_id": 1,
+                    "snapshot_time": "2026-03-12 22:00:00",
+                    "price": 14.0,
+                    "avg_volume": 2_000_000.0,
+                    "perf_1w": -20.0,
+                    "perf_1m": -20.0,
+                    "perf_3m": -20.0,
+                    "status": "active",
+                },
+            ]
+        )
+
+        out = _build_current_ranking_metrics(raw)
+
+        self.assertEqual(float(out.iloc[0]["avg_1w"]), 13.33)
+        self.assertEqual(float(out.iloc[0]["avg_1m"]), 13.33)
+
+    def test_compute_theme_rankings_excludes_themes_with_too_few_eligible_contributors(self):
+        conn = self._build_conn()
+        try:
+            conn.execute("insert into theme_membership values (1, 'AAA'), (1, 'BBB'), (1, 'CCC')")
+            conn.execute("insert into theme_membership values (2, 'XXX'), (2, 'YYY')")
+            conn.execute(
+                """
+                insert into ticker_snapshots values
+                (1, 'AAA', 10, 5, 6, 7, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'BBB', 12, 6, 7, 8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'CCC', 14, 7, 8, 9, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'XXX', 9, 30, 30, 30, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'YYY', 9, 25, 25, 25, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live')
+                """
+            )
+            conn.execute(
+                """
+                insert into theme_snapshots values
+                (1, '2026-03-12 22:00:00', 1, 3, 1, 1, 1, 50, 50, 50, 1, 'live'),
+                (1, '2026-03-12 22:00:00', 2, 2, 1, 1, 1, 50, 50, 50, 1, 'live')
+                """
+            )
+
+            out = compute_theme_rankings(conn)
+
+            self.assertEqual(out["theme"].tolist(), ["Quality"])
+            self.assertEqual(int(out.iloc[0]["eligible_composite_count"]), 3)
+        finally:
+            conn.close()
+
+    def test_compute_current_ranking_snapshot_exposes_standardized_validation_outputs(self):
+        conn = self._build_conn()
+        try:
+            conn.execute("insert into theme_membership values (1, 'AAA'), (1, 'BBB'), (1, 'CCC'), (1, 'DDD')")
+            conn.execute("insert into theme_membership values (2, 'XXX'), (2, 'YYY'), (2, 'ZZZ')")
+            conn.execute(
+                """
+                insert into ticker_snapshots values
+                (1, 'AAA', 10, 14, 20, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'BBB', 11, 13, 19, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'CCC', 12, 12, 18, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'DDD', 13, null, 17, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'XXX', 10, 8, 10, 12, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'YYY', 10, 7, 9, 12, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'ZZZ', 10, 6, 8, 12, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live')
+                """
+            )
+            conn.execute(
+                """
+                insert into theme_snapshots(
+                    run_id, snapshot_time, theme_id, ticker_count,
+                    avg_1w, avg_1m, avg_3m,
+                    positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                    composite_score, snapshot_source
+                ) values
+                (1, '2026-03-12 22:00:00', 1, 4, 10, 15, -8, 75, 75, 75, 12, 'live'),
+                (1, '2026-03-12 22:00:00', 2, 3, 6, 9, 12, 100, 100, 100, 9, 'live')
+                """
+            )
+
+            snapshot = compute_current_ranking_snapshot(conn)
+
+            self.assertIn("standardized_rankings", snapshot)
+            self.assertIn("standardized_comparison", snapshot)
+            self.assertIn("current_momentum_rankings", snapshot)
+            self.assertIn("current_momentum_comparison", snapshot)
+            self.assertFalse(snapshot["standardized_rankings"].empty)
+            self.assertFalse(snapshot["standardized_comparison"].empty)
+            self.assertFalse(snapshot["current_momentum_rankings"].empty)
+            self.assertFalse(snapshot["current_momentum_comparison"].empty)
+            self.assertIn("rank_shift_vs_legacy", snapshot["standardized_comparison"].columns)
+            self.assertIn("standardized_recovery_factor", snapshot["standardized_comparison"].columns)
+            self.assertIn("current_momentum_quality_factor", snapshot["current_momentum_comparison"].columns)
+        finally:
+            conn.close()
 
 class TestBoundarySelection(unittest.TestCase):
+    def test_recent_ticker_history_theme_history_caps_outlier_returns_and_allows_valid_thin_themes(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_daily_history(
+                ticker varchar,
+                trading_date date,
+                close double,
+                market_data_source varchar,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Capped Theme', 'Tech', true), (2, 'Thin Theme', 'Tech', true)")
+        conn.execute("insert into theme_membership values (1, 'AAA'), (1, 'BBB'), (1, 'CCC'), (2, 'XXX'), (2, 'YYY')")
+
+        dates = pd.bdate_range("2025-12-15", periods=70)
+        history_rows: list[dict[str, object]] = []
+        for trading_date in dates:
+            for ticker in ("BBB", "CCC", "XXX", "YYY"):
+                history_rows.append(
+                    {
+                        "ticker": ticker,
+                        "trading_date": trading_date.date(),
+                        "close": 1.0,
+                        "market_data_source": "live",
+                        "updated_at": pd.Timestamp(trading_date),
+                    }
+                )
+            history_rows.append(
+                {
+                    "ticker": "AAA",
+                    "trading_date": trading_date.date(),
+                    "close": 3.0 if trading_date == dates[-1] else 1.0,
+                    "market_data_source": "live",
+                    "updated_at": pd.Timestamp(trading_date),
+                }
+            )
+
+        history_df = pd.DataFrame(history_rows)
+        conn.register("ticker_daily_history_incoming", history_df)
+        conn.execute("insert into ticker_daily_history select * from ticker_daily_history_incoming")
+        conn.unregister("ticker_daily_history_incoming")
+
+        out = _recent_ticker_history_theme_history(conn, "live")
+
+        latest = out.sort_values("snapshot_time").groupby("theme_id", as_index=False).tail(1)
+        capped_theme = latest[latest["theme_id"] == 1].iloc[0]
+
+        self.assertAlmostEqual(float(capped_theme["avg_1w"]), 16.67, places=2)
+        self.assertAlmostEqual(float(capped_theme["avg_1m"]), 16.67, places=2)
+        self.assertAlmostEqual(float(capped_theme["avg_3m"]), 16.67, places=2)
+        self.assertIn(2, latest["theme_id"].tolist())
+        conn.close()
+
+    def test_historical_theme_movement_row_audit_reuses_derived_boundary_contract(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table symbol_refresh_status(ticker varchar, status varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1w_breadth_pct double,
+                positive_1m_breadth_pct double,
+                positive_3m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table ticker_daily_history(
+                ticker varchar,
+                trading_date date,
+                close double,
+                market_data_source varchar,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Audit Theme', 'Tech')")
+        conn.execute("insert into theme_membership values (1, 'AAA'), (1, 'BBB'), (1, 'CCC')")
+        conn.execute("insert into symbol_refresh_status values ('AAA', 'active'), ('BBB', 'active'), ('CCC', 'active')")
+        conn.execute(
+            """
+            insert into theme_snapshots values
+            (1, '2026-03-13 22:00:00', 1, 3, -5.0, -5.0, -5.0, 0.0, 0.0, 0.0, -5.0, 'live'),
+            (2, '2026-03-20 22:00:00', 1, 3, 1.0, 1.0, 1.0, 33.33, 33.33, 33.33, 1.0, 'live')
+            """
+        )
+
+        dates = pd.bdate_range("2025-12-15", periods=70)
+        history_rows: list[dict[str, object]] = []
+        for trading_date in dates:
+            history_rows.extend(
+                [
+                    {"ticker": "AAA", "trading_date": trading_date.date(), "close": 3.0 if trading_date == pd.Timestamp("2026-03-20") else 1.0, "market_data_source": "live", "updated_at": pd.Timestamp(trading_date)},
+                    {"ticker": "BBB", "trading_date": trading_date.date(), "close": 1.0, "market_data_source": "live", "updated_at": pd.Timestamp(trading_date)},
+                    {"ticker": "CCC", "trading_date": trading_date.date(), "close": 1.0, "market_data_source": "live", "updated_at": pd.Timestamp(trading_date)},
+                ]
+            )
+        history_df = pd.DataFrame(history_rows)
+        conn.register("ticker_daily_history_incoming", history_df)
+        conn.execute("insert into ticker_daily_history select * from ticker_daily_history_incoming")
+        conn.unregister("ticker_daily_history_incoming")
+
+        audit = historical_theme_movement_row_audit(conn, 1, 7)
+
+        self.assertTrue(audit["audit_available"])
+        self.assertEqual(set(audit["aggregate_summary"]["boundary_label"].tolist()), {"start", "end"})
+        end_row = audit["aggregate_summary"][audit["aggregate_summary"]["boundary_label"] == "end"].iloc[0]
+        self.assertTrue(bool(end_row["passed_historical_gate"]))
+        self.assertAlmostEqual(float(end_row["avg_1m"]), 16.67, places=2)
+        constituent_rows = audit["constituent_rows"]
+        aaa_end = constituent_rows[(constituent_rows["boundary_label"] == "end") & (constituent_rows["ticker"] == "AAA")].iloc[0]
+        self.assertAlmostEqual(float(aaa_end["perf_1m_capped"]), 50.0, places=6)
+        self.assertIn("-> 50.00", str(aaa_end["raw_vs_capped_1m"]))
+        conn.close()
+
     def test_theme_history_window_uses_boundary_snapshot(self):
         conn = duckdb.connect(":memory:")
         conn.execute("create table themes(id bigint, name varchar, category varchar)")
@@ -59,7 +1871,8 @@ class TestBoundarySelection(unittest.TestCase):
                 avg_1m double,
                 avg_3m double,
                 positive_1m_breadth_pct double,
-                composite_score double
+                composite_score double,
+                snapshot_source varchar
             )
             """
         )
@@ -69,16 +1882,307 @@ class TestBoundarySelection(unittest.TestCase):
         # Weekly cadence: latest and prior boundary should both be included for 7d window.
         for run_id, ts in [(1, "2026-03-01"), (2, "2026-03-08")]:
             conn.execute(
-                "insert into theme_snapshots values (?, ?, 1, 10, 1, 1, 1, 50, 1)",
+                "insert into theme_snapshots values (?, ?, 1, 10, 1, 1, 1, 50, 1, 'live')",
                 [run_id, ts],
             )
             conn.execute(
-                "insert into theme_snapshots values (?, ?, 2, 10, 1, 1, 1, 50, 1)",
+                "insert into theme_snapshots values (?, ?, 2, 10, 1, 1, 1, 50, 1, 'live')",
                 [run_id, ts],
             )
 
         out = theme_history_window(conn, 7)
         self.assertEqual(int(out["snapshot_time"].nunique()), 2)
+        conn.close()
+
+    def test_compute_theme_momentum_reports_effective_boundary_window_meta(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'A', 'Cat')")
+        conn.execute("insert into themes values (2, 'B', 'Cat')")
+
+        for run_id, ts in [(1, "2026-03-01"), (2, "2026-03-08")]:
+            conn.execute(
+                "insert into theme_snapshots values (?, ?, 1, 10, 1, 1, 1, 50, 1, 'live')",
+                [run_id, ts],
+            )
+            conn.execute(
+                "insert into theme_snapshots values (?, ?, 2, 10, 1, 1, 1, 50, 1, 'live')",
+                [run_id, ts],
+            )
+
+        out = compute_theme_momentum(conn, 30)
+        self.assertEqual(int(out["meta"]["boundary_snapshot_count"]), 2)
+        self.assertEqual(str(pd.to_datetime(out["meta"]["window_start"]).date()), "2026-03-01")
+        self.assertEqual(str(pd.to_datetime(out["meta"]["window_end"]).date()), "2026-03-08")
+        self.assertTrue(out["meta"]["collapsed_to_available_history"])
+        conn.close()
+
+    def test_top_theme_movers_uses_preferred_source_boundary_window(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1w_breadth_pct double,
+                positive_1m_breadth_pct double,
+                positive_3m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'AI', 'Tech')")
+        conn.execute("insert into themes values (2, 'Energy', 'Macro')")
+
+        conn.execute(
+            "insert into theme_snapshots values (1, '2026-03-01 22:00:00', 1, 10, 1, 2, 3, 40, 40, 40, 10, 'live')"
+        )
+        conn.execute(
+            "insert into theme_snapshots values (2, '2026-03-10 22:00:00', 1, 10, 1, 2, 3, 50, 50, 50, 20, 'live')"
+        )
+        conn.execute(
+            "insert into theme_snapshots values (1, '2026-03-01 22:00:00', 2, 10, 1, 2, 3, 20, 20, 20, 5, 'live')"
+        )
+        conn.execute(
+            "insert into theme_snapshots values (2, '2026-03-10 22:00:00', 2, 10, 1, 2, 3, 30, 30, 30, 15, 'live')"
+        )
+        # Later mock residue should not override the current live-facing movers view.
+        conn.execute(
+            "insert into theme_snapshots values (3, '2026-03-11 22:00:00', 1, 10, 1, 2, 3, 99, 99, 99, 999, 'mock')"
+        )
+
+        out = top_theme_movers(conn, 7, top_n=5)
+
+        self.assertEqual(out.iloc[0]["theme"], "AI")
+        self.assertEqual(float(out.iloc[0]["start_composite"]), 10.0)
+        self.assertEqual(float(out.iloc[0]["end_composite"]), 20.0)
+        self.assertEqual(float(out.iloc[0]["delta_composite"]), 10.0)
+        conn.close()
+
+    def test_theme_health_overview_uses_preferred_source_snapshot_time(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1w_breadth_pct double,
+                positive_1m_breadth_pct double,
+                positive_3m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_runs(run_id bigint, provider varchar)")
+        conn.execute(
+            "create table refresh_failures(run_id bigint, ticker varchar, error_message varchar, failure_category varchar, created_at timestamp)"
+        )
+
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership values (1, 'NVDA')")
+        conn.execute(
+            "insert into theme_snapshots values (1, '2026-03-10 22:00:00', 1, 1, 1, 2, 3, 50, 60, 70, 10, 'live')"
+        )
+        conn.execute(
+            "insert into theme_snapshots values (2, '2026-03-11 22:00:00', 1, 1, 1, 2, 3, 50, 60, 70, 10, 'mock')"
+        )
+
+        out = theme_health_overview(conn, low_constituent_threshold=3, failure_window_days=14)
+
+        self.assertEqual(str(out.iloc[0]["latest_snapshot_time"]), "2026-03-10 22:00:00")
+        conn.close()
+
+    def test_theme_health_overview_counts_normalized_members_and_failures(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean, updated_at timestamp)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table theme_snapshots(run_id bigint, snapshot_time timestamp, theme_id bigint, ticker_count bigint, avg_1w double, avg_1m double, avg_3m double, positive_1w_breadth_pct double, positive_1m_breadth_pct double, positive_3m_breadth_pct double, composite_score double, snapshot_source varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, provider varchar)")
+        conn.execute("create table refresh_failures(run_id bigint, ticker varchar, error_message varchar, failure_category varchar, created_at timestamp)")
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true, '2026-03-20 10:00:00')")
+        conn.execute("insert into theme_membership values (1, 'DOCN')")
+        conn.execute("insert into theme_membership values (1, 'docn')")
+        conn.execute("insert into refresh_runs values (10, 'live')")
+        conn.execute("insert into refresh_failures values (10, 'DOCN', 'timeout', 'TIMEOUT', '2026-03-21 10:00:00')")
+
+        out = theme_health_overview(conn, low_constituent_threshold=3, failure_window_days=14)
+
+        self.assertEqual(int(out.iloc[0]["constituent_count"]), 1)
+        self.assertEqual(int(out.iloc[0]["live_failure_count_recent"]), 1)
+        conn.close()
+
+    def test_theme_health_audit_enrichment_derives_flags_counts_and_actions(self):
+        now = datetime.now(UTC).replace(tzinfo=None)
+        health = pd.DataFrame(
+            [
+                {
+                    "theme_id": 1,
+                    "theme_name": "Empty Active",
+                    "category": "AI",
+                    "is_active": True,
+                    "updated_at": now - pd.Timedelta(hours=10),
+                    "constituent_count": 0,
+                    "low_count_flag": False,
+                    "empty_theme_flag": True,
+                    "live_failure_count_recent": 0,
+                    "latest_snapshot_time": None,
+                },
+                {
+                    "theme_id": 2,
+                    "theme_name": "Stale Failure",
+                    "category": "Energy",
+                    "is_active": True,
+                    "updated_at": now - pd.Timedelta(days=10),
+                    "constituent_count": 2,
+                    "low_count_flag": True,
+                    "empty_theme_flag": False,
+                    "live_failure_count_recent": 4,
+                    "latest_snapshot_time": now - pd.Timedelta(days=3),
+                },
+                {
+                    "theme_id": 3,
+                    "theme_name": "Inactive Members",
+                    "category": "Software",
+                    "is_active": False,
+                    "updated_at": now - pd.Timedelta(hours=5),
+                    "constituent_count": 3,
+                    "low_count_flag": False,
+                    "empty_theme_flag": False,
+                    "live_failure_count_recent": 0,
+                    "latest_snapshot_time": now - pd.Timedelta(hours=2),
+                },
+            ]
+        )
+
+        audit = enrich_theme_health_for_audit(health, stale_hours=24)
+        counts = theme_health_audit_counts(audit)
+        stale_view = apply_theme_health_audit_preset(audit, "Stale")
+        sorted_view = sort_theme_health_audit(audit, "Most failures")
+
+        self.assertEqual(counts.empty_themes, 1)
+        self.assertEqual(counts.low_count_themes, 1)
+        self.assertEqual(counts.recent_failure_themes, 1)
+        self.assertEqual(counts.active_zero_member_themes, 1)
+        self.assertEqual(counts.inactive_with_members, 1)
+        self.assertEqual(str(audit.iloc[0]["why_flagged"]), "empty active theme; no recent snapshot")
+        self.assertEqual(str(audit.iloc[0]["next_action"]), "review assignments or deactivate")
+        self.assertEqual(stale_view["theme_name"].tolist(), ["Empty Active", "Stale Failure"])
+        self.assertEqual(str(sorted_view.iloc[0]["theme_name"]), "Stale Failure")
+
+    def test_theme_health_action_eligibility_scopes_rebuild_backfill_and_deactivate(self):
+        selection = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme_name": "Empty Active", "is_active": True, "constituent_count": 0},
+                {"theme_id": 2, "theme_name": "Stale Failure", "is_active": True, "constituent_count": 2},
+                {"theme_id": 3, "theme_name": "Inactive Members", "is_active": False, "constituent_count": 3},
+            ]
+        )
+
+        out = theme_health_action_eligibility(selection)
+
+        self.assertEqual(int(out["selected_count"]), 3)
+        self.assertEqual(out["rebuild_theme_ids"], [2, 3])
+        self.assertEqual(out["backfill_theme_ids"], [2, 3])
+        self.assertEqual(out["deactivate_theme_ids"], [1])
+
+    def test_health_page_theme_health_uses_audit_presets_and_explanatory_columns(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "4_Health.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('preset = st.radio("Audit preset", AUDIT_PRESETS, horizontal=True, index=0)', content)
+        self.assertIn('view = apply_theme_health_audit_preset(audit, preset)', content)
+        self.assertIn('"why_flagged"', content)
+        self.assertIn('"next_action"', content)
+        self.assertIn('st.caption(f"Why flagged: `{picked.get(\'why_flagged\') or \'healthy\'}`")', content)
+        self.assertIn('st.caption(f"Next action: `{picked.get(\'next_action\') or \'monitor\'}`")', content)
+        self.assertIn('theme_export_df = theme_membership_export(conn)', content)
+        self.assertIn('st.download_button(', content)
+        self.assertIn('file_name="theme_membership_audit_export.csv"', content)
+        self.assertIn('st.multiselect(', content)
+        self.assertIn('"Audit queue selection"', content)
+        self.assertIn('action_state = theme_health_action_eligibility(selected_queue)', content)
+        self.assertIn('Rebuild recent selected', content)
+        self.assertIn('Backfill + reconstruct selected', content)
+        self.assertIn('Deactivate selected empty active', content)
+        self.assertIn('prepare_post_mutation_refresh(', content)
+        self.assertIn('def _add_theme_to_audit_queue(session_state, theme_id: int, theme_name: str)', content)
+        self.assertIn('"Add to queue"', content)
+        self.assertIn('Queue recommended: rebuild', content)
+        self.assertIn('Queue recommended: deactivate', content)
+        self.assertIn('is already in the audit queue.', content)
+        self.assertIn('Confirm deactivation of selected empty active themes', content)
+        self.assertIn('Confirm deactivation before running this action.', content)
+
+    def test_theme_member_hygiene_context_sorts_recent_failures_first(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into theme_membership values (1, 'AAA')")
+        conn.execute("insert into theme_membership values (1, 'BBB')")
+        conn.execute("insert into theme_membership values (1, 'CCC')")
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, last_failure_category, consecutive_failure_count, last_failure_at
+            ) values
+            ('BBB', 'watch', 'TIMEOUT', 2, '2026-03-11 22:00:00'),
+            ('AAA', 'inactive_candidate', 'NO_CANDLES', 5, '2026-03-10 22:00:00')
+            """
+        )
+
+        out = theme_member_hygiene_context(conn, 1)
+
+        self.assertEqual(out["ticker"].tolist(), ["BBB", "AAA", "CCC"])
+        self.assertEqual(str(out.iloc[0]["last_failure_category"]), "TIMEOUT")
+        self.assertTrue(pd.isna(out.iloc[2]["last_failure_at"]))
         conn.close()
 
 
@@ -183,6 +2287,473 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
         self.assertIsNone(recovered[2])
         conn.close()
 
+    def test_symbol_hygiene_queue_includes_last_valid_market_data_context(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp default current_timestamp
+            )
+            """
+        )
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, suggested_status, suggested_reason, last_failure_category,
+                consecutive_failure_count, rolling_failure_count, last_failure_at, last_success_at, last_run_id
+            )
+            values ('XYZ', 'inactive_candidate', 'refresh_suppressed', 'Repeated no candles.', 'NO_CANDLES', 4, 4, '2026-03-11 22:00:00', '2026-03-01 22:00:00', 7)
+            """
+        )
+        conn.execute("insert into refresh_runs values (7, 'success', '2026-03-01 22:00:00')")
+        conn.execute(
+            "insert into ticker_snapshots values (7, 'XYZ', 10, 1, 2, 3, 1000000, 10000, null, null, null, '2026-02-28 21:00:00', 'live')"
+        )
+
+        out = symbol_hygiene_queue(conn, limit=50)
+
+        self.assertEqual(str(out.iloc[0]["last_market_data_at"]), "2026-02-28 21:00:00")
+        self.assertGreaterEqual(int(out.iloc[0]["days_since_last_valid_data"]), 0)
+        conn.close()
+
+    def test_sort_symbol_hygiene_queue_supports_operational_priorities(self):
+        queue = pd.DataFrame(
+            [
+                {
+                    "ticker": "AAA",
+                    "status": "inactive_candidate",
+                    "suggested_status": "refresh_suppressed",
+                    "suggested_reason": "review",
+                    "last_failure_category": "NO_CANDLES",
+                    "consecutive_failure_count": 5,
+                    "rolling_failure_count": 8,
+                    "last_success_at": None,
+                    "last_failure_at": "2026-03-10 22:00:00",
+                    "last_run_id": 5,
+                    "last_market_data_at": "2026-02-01 21:00:00",
+                    "days_since_last_valid_data": 40,
+                },
+                {
+                    "ticker": "BBB",
+                    "status": "watch",
+                    "suggested_status": None,
+                    "suggested_reason": None,
+                    "last_failure_category": "TIMEOUT",
+                    "consecutive_failure_count": 1,
+                    "rolling_failure_count": 12,
+                    "last_success_at": "2026-03-10 22:00:00",
+                    "last_failure_at": "2026-03-11 22:00:00",
+                    "last_run_id": 6,
+                    "last_market_data_at": "2026-03-10 21:00:00",
+                    "days_since_last_valid_data": 2,
+                },
+            ]
+        )
+
+        by_confidence = sort_symbol_hygiene_queue(queue, "Highest confidence")
+        by_rolling = sort_symbol_hygiene_queue(queue, "Most rolling failures")
+
+        self.assertEqual(by_confidence.iloc[0]["ticker"], "AAA")
+        self.assertEqual(by_rolling.iloc[0]["ticker"], "BBB")
+
+    def test_filter_symbol_hygiene_queue_hides_resolved_suppressions_by_default(self):
+        queue = pd.DataFrame(
+            [
+                {"ticker": "AAA", "status": "inactive_candidate", "suggested_status": "refresh_suppressed"},
+                {"ticker": "BBB", "status": "watch", "suggested_status": None},
+                {"ticker": "CCC", "status": "refresh_suppressed", "suggested_status": None},
+            ]
+        )
+
+        pending = filter_symbol_hygiene_queue(queue, "Pending review")
+        resolved = filter_symbol_hygiene_queue(queue, "Suppressed / resolved")
+
+        self.assertEqual(pending["ticker"].tolist(), ["AAA", "BBB"])
+        self.assertEqual(resolved["ticker"].tolist(), ["CCC"])
+
+    def test_apply_staged_symbol_hygiene_actions_updates_multiple_rows(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into symbol_refresh_status(ticker, status, suggested_status, consecutive_failure_count, rolling_failure_count)
+            values
+            ('AAA', 'inactive_candidate', 'refresh_suppressed', 5, 8),
+            ('BBB', 'watch', null, 1, 3),
+            ('CCC', 'inactive_candidate', 'refresh_suppressed', 4, 6)
+            """
+        )
+
+        out = apply_staged_symbol_hygiene_actions(
+            conn,
+            {"AAA": "suppress", "BBB": "keep_active", "CCC": "watch", "DDD": "none"},
+        )
+        rows = conn.execute(
+            "select ticker, status, suggested_status from symbol_refresh_status order by ticker"
+        ).fetchall()
+
+        self.assertEqual(int(out["applied_count"]), 3)
+        self.assertEqual(out["by_action"]["suppress"], 1)
+        self.assertEqual(out["by_action"]["keep_active"], 1)
+        self.assertEqual(out["by_action"]["watch"], 1)
+        self.assertEqual(rows, [("AAA", "refresh_suppressed", None), ("BBB", "active", None), ("CCC", "watch", None)])
+        self.assertEqual(STAGED_ACTIONS["reset"], "Stage reset history")
+        conn.close()
+
+    def test_symbol_hygiene_queue_includes_membership_context(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, '3D Printing', 'Emerging Tech', true)")
+        conn.execute("insert into theme_membership values (1, 'DDD')")
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, suggested_status, last_failure_category, consecutive_failure_count, rolling_failure_count
+            ) values ('DDD', 'inactive_candidate', 'refresh_suppressed', 'NO_CANDLES', 4, 7)
+            """
+        )
+
+        out = symbol_hygiene_queue(conn, limit=20)
+
+        self.assertEqual(out.iloc[0]["current_theme_names"], "3D Printing")
+        self.assertEqual(out.iloc[0]["current_categories"], "Emerging Tech")
+        conn.close()
+
+    def test_symbol_hygiene_queue_flags_calculation_outliers_and_keeps_membership_visible(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp default current_timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Meme Stocks', 'Spec', true)")
+        conn.execute("insert into theme_membership values (1, 'BBIG')")
+        conn.execute("insert into refresh_runs values (7, 'success', '2026-03-12 22:00:00')")
+        conn.execute(
+            """
+            insert into ticker_snapshots values
+            (7, 'BBIG', 2.0, 180.0, 240.0, 300.0, 10000000, 1000000, null, null, null, '2026-03-12 21:00:00', 'live')
+            """
+        )
+
+        queue = symbol_hygiene_queue(conn, limit=20)
+
+        self.assertEqual(queue.iloc[0]["ticker"], "BBIG")
+        self.assertEqual(queue.iloc[0]["suggested_status"], "refresh_suppressed")
+        self.assertEqual(queue.iloc[0]["last_failure_category"], "CALC_OUTLIER")
+        self.assertIn("Meme Stocks", str(queue.iloc[0]["current_theme_names"]))
+        self.assertIn("current rankings, historical movement", str(queue.iloc[0]["affected_calculation_surfaces"]))
+        self.assertIn("Extreme", str(queue.iloc[0]["outlier_reason"]))
+
+        apply_staged_symbol_hygiene_actions(conn, {"BBIG": "suppress"})
+        member_context = theme_member_hygiene_context(conn, 1)
+
+        self.assertEqual(member_context.iloc[0]["ticker"], "BBIG")
+        self.assertEqual(member_context.iloc[0]["symbol_hygiene_status"], "refresh_suppressed")
+        conn.close()
+
+    def test_symbol_hygiene_queue_still_renders_when_outlier_calculation_fails(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp default current_timestamp
+            )
+            """
+        )
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, suggested_status, suggested_reason, last_failure_category,
+                consecutive_failure_count, rolling_failure_count, last_failure_at, last_success_at, last_run_id
+            )
+            values ('XYZ', 'inactive_candidate', 'refresh_suppressed', 'Repeated no candles.', 'NO_CANDLES', 4, 4, '2026-03-11 22:00:00', '2026-03-01 22:00:00', 7)
+            """
+        )
+
+        with patch("src.symbol_hygiene._calculation_outlier_candidates", side_effect=duckdb.InternalException("Attempted to dereference unique_ptr that is NULL!")):
+            out = symbol_hygiene_queue(conn, limit=50)
+
+        self.assertEqual(out.iloc[0]["ticker"], "XYZ")
+        self.assertTrue(out.attrs.get("warnings"))
+        self.assertIn("temporarily unavailable", str(out.attrs["warnings"][0]))
+        conn.close()
+
+    def test_symbol_hygiene_queue_falls_back_when_isolated_read_path_fails(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp default current_timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Meme Stocks', 'Spec', true)")
+        conn.execute("insert into theme_membership values (1, 'BBIG')")
+        conn.execute("insert into refresh_runs values (7, 'success', '2026-03-12 22:00:00')")
+        conn.execute(
+            """
+            insert into ticker_snapshots values
+            (7, 'BBIG', 2.0, 180.0, 240.0, 300.0, 10000000, 1000000, null, null, null, '2026-03-12 21:00:00', 'live')
+            """
+        )
+
+        @contextmanager
+        def failing_read_conn():
+            raise duckdb.InternalException("isolated read failed")
+            yield conn
+
+        queue = symbol_hygiene_queue(conn, limit=20, outlier_read_conn_factory=failing_read_conn)
+
+        self.assertEqual(queue.iloc[0]["ticker"], "BBIG")
+        self.assertEqual(queue.iloc[0]["suggested_status"], "refresh_suppressed")
+        self.assertIn("falling back to the shared connection", " ".join(queue.attrs.get("warnings", [])))
+        self.assertIn("Extreme", str(queue.iloc[0]["outlier_reason"]))
+        conn.close()
+
+    def test_symbol_hygiene_queue_isolated_read_path_does_not_regress_outlier_behavior(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp default current_timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Meme Stocks', 'Spec', true)")
+        conn.execute("insert into theme_membership values (1, 'BBIG')")
+        conn.execute("insert into refresh_runs values (7, 'success', '2026-03-12 22:00:00')")
+        conn.execute(
+            """
+            insert into ticker_snapshots values
+            (7, 'BBIG', 2.0, 180.0, 240.0, 300.0, 10000000, 1000000, null, null, null, '2026-03-12 21:00:00', 'live')
+            """
+        )
+
+        @contextmanager
+        def isolated_read_conn():
+            try:
+                yield conn
+            finally:
+                pass
+
+        queue = symbol_hygiene_queue(conn, limit=20, outlier_read_conn_factory=isolated_read_conn)
+
+        self.assertEqual(queue.iloc[0]["ticker"], "BBIG")
+        self.assertEqual(queue.iloc[0]["last_failure_category"], "CALC_OUTLIER")
+        self.assertIn("Meme Stocks", str(queue.iloc[0]["current_theme_names"]))
+        self.assertIn("Extreme", str(queue.iloc[0]["outlier_reason"]))
+        self.assertFalse(queue.attrs.get("warnings"))
+        conn.close()
+
+    def test_live_health_page_source_explicitly_wires_symbol_hygiene_queue_to_fresh_read_path(self):
+        health_page_source = Path("pages/4_Health.py").read_text()
+
+        self.assertIn(
+            "symbol_hygiene_queue(conn, limit=250, outlier_read_conn_factory=get_fresh_read_conn)",
+            health_page_source,
+        )
+
+    def test_live_symbol_hygiene_queue_path_has_no_df_materialization_in_queue_or_outlier_helpers(self):
+        import src.symbol_hygiene as symbol_hygiene_module
+
+        outlier_source = inspect.getsource(symbol_hygiene_module._calculation_outlier_candidates)
+        base_queue_source = inspect.getsource(symbol_hygiene_module._base_symbol_hygiene_queue)
+
+        self.assertNotIn(".df(", outlier_source)
+        self.assertNotIn(".df(", base_queue_source)
+
+    def test_resolve_staged_symbol_hygiene_action_prefers_override(self):
+        self.assertEqual(resolve_staged_symbol_hygiene_action(True, "none"), "suppress")
+        self.assertEqual(resolve_staged_symbol_hygiene_action(False, "keep_active"), "keep_active")
+        self.assertEqual(resolve_staged_symbol_hygiene_action(True, "watch"), "watch")
+        self.assertEqual(resolve_staged_symbol_hygiene_action(False, "none"), "none")
+        self.assertEqual(OVERRIDE_ACTIONS["reset"], "Reset history")
+
+    def test_sync_and_clear_symbol_hygiene_staged_state_use_one_source_of_truth(self):
+        session_state = {
+            "symbol_hygiene_staged": {},
+            "stage_approve_AAA": True,
+            "stage_override_AAA": "none",
+            "stage_approve_BBB": True,
+            "stage_override_BBB": "watch",
+        }
+
+        first = sync_symbol_hygiene_staged_action(session_state, "AAA")
+        second = sync_symbol_hygiene_staged_action(session_state, "BBB")
+
+        self.assertEqual(first, "suppress")
+        self.assertEqual(second, "watch")
+        self.assertEqual(session_state["symbol_hygiene_staged"], {"AAA": "suppress", "BBB": "watch"})
+
+        clear_symbol_hygiene_staged_state(session_state, ["AAA", "BBB"])
+
+        self.assertEqual(session_state["symbol_hygiene_staged"], {})
+        self.assertFalse(bool(session_state["stage_approve_AAA"]))
+        self.assertEqual(session_state["stage_override_AAA"], "none")
+        self.assertFalse(bool(session_state["stage_approve_BBB"]))
+        self.assertEqual(session_state["stage_override_BBB"], "none")
+
 
 class TestMetricFormattingAndReturnSafety(unittest.TestCase):
     def test_human_readable_number(self):
@@ -217,6 +2788,3598 @@ class TestMetricFormattingAndReturnSafety(unittest.TestCase):
         self.assertIsNone(LiveProvider._calc_return([1, 2, 3], 5))
 
 
+class TestTickerLookup(unittest.TestCase):
+    def test_ticker_lookup_reports_assigned_membership(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership values (1, 'NVDA')")
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-10 22:00:00')")
+        conn.execute(
+            "insert into ticker_snapshots values (1, 'NVDA', 120, 1, 2, 3, 1000000000, 5000000, null, null, null, '2026-03-10 21:00:00', 'live')"
+        )
+
+        summary = ticker_lookup_summary(conn, " nvda ")
+        memberships = ticker_lookup_memberships(conn, "nvda")
+
+        self.assertEqual(summary.iloc[0]["lookup_status"], "In DB and assigned")
+        self.assertTrue(bool(summary.iloc[0]["exists_in_theme_membership"]))
+        self.assertTrue(bool(summary.iloc[0]["exists_in_ticker_snapshots"]))
+        self.assertEqual(memberships.iloc[0]["theme_name"], "AI")
+        conn.close()
+
+    def test_ticker_lookup_normalizes_trimmed_membership_rows_consistently_across_summary_and_table(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'Cloud Security', 'Software', true)")
+        conn.execute("insert into themes values (2, 'Data Infrastructure', 'Software', true)")
+        conn.execute("insert into themes values (3, 'Legacy Theme', 'Software', false)")
+        conn.execute("insert into theme_membership values (1, ' DOCN ')")
+        conn.execute("insert into theme_membership values (2, 'DOCN')")
+        conn.execute("insert into theme_membership values (3, 'docn')")
+
+        summary = ticker_lookup_summary(conn, "DOCN")
+        memberships = ticker_lookup_memberships(conn, "DOCN")
+
+        self.assertEqual(int(summary.iloc[0]["assigned_theme_count"]), 3)
+        self.assertEqual(int(summary.iloc[0]["active_assigned_theme_count"]), 2)
+        self.assertEqual(int(summary.iloc[0]["inactive_assigned_theme_count"]), 1)
+        self.assertTrue(bool(summary.iloc[0]["exists_in_theme_membership"]))
+        self.assertEqual(len(memberships), 3)
+        self.assertEqual(sorted(memberships["theme_name"].tolist()), ["Cloud Security", "Data Infrastructure", "Legacy Theme"])
+        conn.close()
+
+    def test_ticker_lookup_reports_snapshots_only(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-10 22:00:00')")
+        conn.execute(
+            "insert into ticker_snapshots values (1, 'PLTR', 25, 1, 2, 3, 25000000000, 10000000, null, null, null, '2026-03-10 21:00:00', 'live')"
+        )
+
+        summary = ticker_lookup_summary(conn, "PLTR")
+
+        self.assertEqual(summary.iloc[0]["lookup_status"], "Seen in snapshots only")
+        self.assertFalse(bool(summary.iloc[0]["exists_in_theme_membership"]))
+        self.assertTrue(bool(summary.iloc[0]["exists_in_ticker_snapshots"]))
+        conn.close()
+
+    def test_ticker_lookup_reports_not_found(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        summary = ticker_lookup_summary(conn, "ZZZZ")
+        memberships = ticker_lookup_memberships(conn, "ZZZZ")
+
+        self.assertEqual(summary.iloc[0]["lookup_status"], "Not found")
+        self.assertTrue(memberships.empty)
+        conn.close()
+
+
+class TestTickerAssignmentEditing(unittest.TestCase):
+    def test_remove_ticker_deletes_theme_membership_and_returns_refreshed_members(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into theme_membership values (1, 'IONQ')")
+        conn.execute("insert into theme_membership values (1, 'RGTI')")
+
+        result = remove_ticker(conn, 1, " ionq ")
+        remaining = conn.execute(
+            "select ticker from theme_membership where theme_id = 1 order by ticker"
+        ).fetchall()
+
+        self.assertTrue(bool(result["removed"]))
+        self.assertEqual(int(result["removed_count"]), 1)
+        self.assertEqual(result["ticker"], "IONQ")
+        self.assertEqual(result["remaining_tickers"], ["RGTI"])
+        self.assertEqual(result["members"]["ticker"].tolist(), ["RGTI"])
+        self.assertEqual(remaining, [("RGTI",)])
+        conn.close()
+
+    def test_remove_ticker_uses_selected_value_passed_to_handler(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into theme_membership values (1, 'IONQ')")
+        conn.execute("insert into theme_membership values (1, 'QBTS')")
+
+        result = remove_ticker(conn, 1, "QBTS")
+        remaining = conn.execute(
+            "select ticker from theme_membership where theme_id = 1 order by ticker"
+        ).fetchall()
+
+        self.assertEqual(result["ticker"], "QBTS")
+        self.assertEqual(remaining, [("IONQ",)])
+        conn.close()
+
+    def test_remove_ticker_surfaces_noop_instead_of_silent_success(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into theme_membership values (1, 'IONQ')")
+
+        result = remove_ticker(conn, 1, "RGTI")
+        remaining = conn.execute(
+            "select ticker from theme_membership where theme_id = 1 order by ticker"
+        ).fetchall()
+
+        self.assertFalse(bool(result["removed"]))
+        self.assertEqual(int(result["removed_count"]), 0)
+        self.assertEqual(result["remaining_tickers"], ["IONQ"])
+        self.assertEqual(result["members"]["ticker"].tolist(), ["IONQ"])
+        self.assertEqual(remaining, [("IONQ",)])
+        conn.close()
+
+    def test_add_remove_roundtrip_still_works(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute(
+            """
+            create table governed_ticker_onboarding(
+                ticker varchar primary key,
+                added_at timestamp,
+                onboarding_source varchar,
+                history_readiness_status varchar,
+                backfill_status varchar,
+                last_backfill_attempt_at timestamp,
+                last_backfill_error varchar,
+                downstream_refresh_needed boolean,
+                history_row_count bigint,
+                history_target_days bigint,
+                history_market_data_source varchar,
+                history_latest_trading_date date,
+                updated_at timestamp
+            )
+            """
+        )
+
+        added = add_ticker(conn, 1, "IONQ", onboarding_source="test_roundtrip")
+        removed = remove_ticker(conn, 1, "IONQ")
+        remaining = conn.execute(
+            "select ticker from theme_membership where theme_id = 1 order by ticker"
+        ).fetchall()
+
+        self.assertTrue(bool(added["added_to_theme"]))
+        self.assertTrue(bool(removed["removed"]))
+        self.assertEqual(remaining, [])
+        self.assertEqual(removed["remaining_tickers"], [])
+        conn.close()
+
+    def test_replace_ticker_in_theme_swaps_membership_for_selected_theme_only(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into theme_membership values (1, 'CRSPR')")
+        conn.execute("insert into theme_membership values (2, 'CRSPR')")
+
+        result = replace_ticker_in_theme(conn, 1, " crspr ", " crsp ")
+        theme_one = conn.execute(
+            "select ticker from theme_membership where theme_id = 1 order by ticker"
+        ).fetchall()
+        theme_two = conn.execute(
+            "select ticker from theme_membership where theme_id = 2 order by ticker"
+        ).fetchall()
+
+        self.assertEqual(result["removed_ticker"], "CRSPR")
+        self.assertEqual(result["added_ticker"], "CRSP")
+        self.assertEqual(theme_one, [("CRSP",)])
+        self.assertEqual(theme_two, [("CRSPR",)])
+        conn.close()
+
+    def test_replace_ticker_in_theme_rejects_duplicate_or_unchanged_replacement(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into theme_membership values (1, 'CRSPR')")
+        conn.execute("insert into theme_membership values (1, 'CRSP')")
+
+        with self.assertRaisesRegex(ValueError, "already assigned to this theme"):
+            replace_ticker_in_theme(conn, 1, "CRSPR", "CRSP")
+
+        with self.assertRaisesRegex(ValueError, "must be different"):
+            replace_ticker_in_theme(conn, 1, "CRSPR", "crspr")
+        conn.close()
+
+    def test_set_ticker_theme_assignments_requires_at_least_one_theme(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
+
+        with self.assertRaisesRegex(ValueError, "Select at least one theme assignment"):
+            set_ticker_theme_assignments(conn, "nvda", [])
+        conn.close()
+
+    def test_set_ticker_theme_assignments_upserts_without_duplicates(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into themes values (2, 'Robotics', 'Tech', true)")
+        conn.execute("insert into theme_membership values (1, 'NVDA')")
+
+        first = set_ticker_theme_assignments(conn, " nvda ", [1, 2, 2])
+        members = conn.execute(
+            "select theme_id, ticker from theme_membership where ticker='NVDA' order by theme_id"
+        ).fetchall()
+
+        self.assertEqual(first["ticker"], "NVDA")
+        self.assertEqual(int(first["added_count"]), 1)
+        self.assertEqual(int(first["removed_count"]), 0)
+        self.assertEqual(members, [(1, "NVDA"), (2, "NVDA")])
+
+        second = set_ticker_theme_assignments(conn, "NVDA", [2])
+        members_after = conn.execute(
+            "select theme_id, ticker from theme_membership where ticker='NVDA' order by theme_id"
+        ).fetchall()
+
+        self.assertEqual(int(second["added_count"]), 0)
+        self.assertEqual(int(second["removed_count"]), 1)
+        self.assertEqual(members_after, [(2, "NVDA")])
+        conn.close()
+
+    def test_set_ticker_theme_assignments_surfaces_changed_flag_and_onboarding_state(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, primary key(theme_id, ticker))")
+        conn.execute(
+            """
+            create table governed_ticker_onboarding(
+                ticker varchar primary key,
+                added_at timestamp default current_timestamp,
+                onboarding_source varchar,
+                history_readiness_status varchar,
+                backfill_status varchar,
+                last_backfill_attempt_at timestamp,
+                last_backfill_error varchar,
+                downstream_refresh_needed boolean,
+                history_row_count bigint,
+                history_target_days bigint,
+                history_market_data_source varchar,
+                history_latest_trading_date date,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("create table ticker_daily_history(ticker varchar, trading_date date, market_data_source varchar, updated_at timestamp)")
+        conn.execute("create table refresh_runs(run_id bigint, provider varchar, status varchar, started_at timestamp, finished_at timestamp)")
+        conn.execute("create table refresh_failures(run_id bigint, ticker varchar, error_message varchar, failure_category varchar, created_at timestamp)")
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table symbol_refresh_status(ticker varchar, status varchar, updated_at timestamp)")
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
+
+        with patch("src.theme_service.record_new_governed_ticker_onboarding", return_value={"history_readiness_status": "needs_backfill", "backfill_status": "needed", "downstream_refresh_needed": False}):
+            result = set_ticker_theme_assignments(conn, "DOCN", [1])
+
+        self.assertTrue(bool(result["changed"]))
+        self.assertEqual(result["onboarding_state"]["history_readiness_status"], "needs_backfill")
+
+        noop = set_ticker_theme_assignments(conn, "DOCN", [1])
+        self.assertFalse(bool(noop["changed"]))
+        self.assertIsNone(noop["onboarding_state"])
+        conn.close()
+
+    def test_get_theme_members_normalizes_governed_membership_for_manage_theme_views(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("insert into theme_membership values (1, ' docn ')")
+        conn.execute("insert into theme_membership values (1, 'DOCN')")
+        conn.execute("insert into theme_membership values (1, 'docn')")
+        conn.execute("insert into theme_membership values (1, 'NVDA')")
+
+        members = get_theme_members(conn, 1)
+
+        self.assertEqual(members["ticker"].tolist(), ["DOCN", "NVDA"])
+        conn.close()
+
+    def test_get_theme_members_uses_range_theme_predicate_for_live_manage_path(self):
+        conn = MagicMock()
+        result = MagicMock()
+        result.df.return_value = pd.DataFrame({"ticker": ["DOCN"]})
+        conn.execute.return_value = result
+
+        members = get_theme_members(conn, 1006)
+
+        sql, params = conn.execute.call_args[0]
+        self.assertIn("WHERE theme_id BETWEEN ? AND ?", sql)
+        self.assertEqual(params, [1006, 1006])
+        self.assertEqual(members["ticker"].tolist(), ["DOCN"])
+
+    def test_theme_membership_export_returns_normalized_member_counts_and_lists(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("insert into themes values (1, 'AI - Agentic', 'AI', true)")
+        conn.execute("insert into themes values (2, 'Empty Theme', 'Custom', false)")
+        conn.execute("insert into theme_membership values (1, ' docn ')")
+        conn.execute("insert into theme_membership values (1, 'DOCN')")
+        conn.execute("insert into theme_membership values (1, 'twlo')")
+
+        out = theme_membership_export(conn)
+
+        self.assertEqual(out["theme_name"].tolist(), ["AI - Agentic", "Empty Theme"])
+        self.assertEqual(int(out.iloc[0]["governed_member_count"]), 2)
+        self.assertEqual(str(out.iloc[0]["governed_members"]), "DOCN, TWLO")
+        self.assertEqual(int(out.iloc[1]["governed_member_count"]), 0)
+        self.assertEqual(str(out.iloc[1]["governed_members"]), "")
+        conn.close()
+
+    def test_manage_theme_member_source_matches_ticker_lookup_normalized_membership(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'AI - Agentic', 'AI', true)")
+        conn.execute("insert into themes values (2, 'Cloud Software', 'Software', true)")
+        conn.execute("insert into theme_membership values (1, ' DOCN ')")
+        conn.execute("insert into theme_membership values (1, 'docn')")
+        conn.execute("insert into theme_membership values (2, 'DOCN')")
+
+        summary = ticker_lookup_summary(conn, "DOCN")
+        memberships = ticker_lookup_memberships(conn, "DOCN")
+        manage_members = get_theme_members(conn, 1)
+
+        self.assertTrue(bool(summary.iloc[0]["exists_in_theme_membership"]))
+        self.assertEqual(int(summary.iloc[0]["assigned_theme_count"]), 3)
+        self.assertEqual(sorted(memberships["theme_name"].tolist()), ["AI - Agentic", "AI - Agentic", "Cloud Software"])
+        self.assertEqual(manage_members["ticker"].tolist(), ["DOCN"])
+        conn.close()
+
+    def test_theme_ticker_metrics_matches_manage_theme_membership_without_snapshots(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("insert into theme_membership values (1006, ' DOCN ')")
+        conn.execute("insert into theme_membership values (1006, 'docn')")
+        conn.execute("insert into theme_membership values (1006, 'TWLO')")
+
+        manage_members = get_theme_members(conn, 1006)
+        detail_members = theme_ticker_metrics(conn, 1006)
+
+        self.assertEqual(manage_members["ticker"].tolist(), ["DOCN", "TWLO"])
+        self.assertEqual(detail_members["ticker"].tolist(), ["DOCN", "TWLO"])
+        conn.close()
+
+    def test_theme_ticker_metrics_uses_normalized_governed_membership_with_snapshots(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp, provider varchar)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+
+        conn.execute("insert into theme_membership values (1006, ' DOCN ')")
+        conn.execute("insert into theme_membership values (1006, 'TWLO')")
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-22 10:00:00', 'live')")
+        conn.execute(
+            """
+            insert into ticker_snapshots values
+            (1, 'DOCN', 40, 1, 2, 3, 1000, 2000, null, null, null, '2026-03-22 09:59:00', 'live'),
+            (1, ' twlo ', 50, 4, 5, 6, 2000, 3000, null, null, null, '2026-03-22 09:59:00', 'live')
+            """
+        )
+
+        detail_members = theme_ticker_metrics(conn, 1006)
+
+        self.assertEqual(detail_members["ticker"].tolist(), ["DOCN", "TWLO"])
+        self.assertEqual(float(detail_members.iloc[0]["price"]), 40.0)
+        self.assertEqual(float(detail_members.iloc[1]["price"]), 50.0)
+        conn.close()
+
+    def test_theme_ticker_metrics_can_include_suppressed_governed_members_for_detail_view_toggle(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table symbol_refresh_status(ticker varchar, status varchar, manual_suppressed boolean)")
+        conn.execute("insert into theme_membership values (1006, 'DOCN')")
+        conn.execute("insert into theme_membership values (1006, 'TWLO')")
+        conn.execute("insert into symbol_refresh_status values ('DOCN', 'refresh_suppressed', TRUE)")
+
+        default_members = theme_ticker_metrics(conn, 1006)
+        included_members = theme_ticker_metrics(conn, 1006, include_suppressed=True)
+
+        self.assertEqual(default_members["ticker"].tolist(), ["TWLO"])
+        self.assertEqual(included_members["ticker"].tolist(), ["DOCN", "TWLO"])
+        self.assertTrue(bool(included_members.loc[included_members["ticker"] == "DOCN", "manual_suppressed"].iloc[0]))
+        self.assertEqual(str(included_members.loc[included_members["ticker"] == "DOCN", "status"].iloc[0]), "refresh_suppressed")
+        conn.close()
+
+
+class TestThemesPageRemovalFlow(unittest.TestCase):
+    def test_remove_ticker_uses_range_theme_predicate_for_live_manage_path(self):
+        conn = MagicMock()
+        delete_result = MagicMock()
+        delete_result.fetchone.return_value = ("DOCN",)
+        members_result = MagicMock()
+        members_result.df.return_value = pd.DataFrame({"ticker": ["TWLO"]})
+        conn.execute.side_effect = [delete_result, members_result]
+
+        with patch("src.theme_service._manual_suppression_enabled", return_value=False):
+            result = remove_ticker(conn, 1006, " docn ")
+
+        delete_sql, delete_params = conn.execute.call_args_list[0][0]
+        members_sql, members_params = conn.execute.call_args_list[1][0]
+        self.assertIn("WHERE theme_id BETWEEN ? AND ? AND upper(trim(ticker)) = ?", delete_sql)
+        self.assertEqual(delete_params, [1006, 1006, "DOCN"])
+        self.assertIn("WHERE theme_id BETWEEN ? AND ?", members_sql)
+        self.assertEqual(members_params, [1006, 1006])
+        self.assertTrue(bool(result["removed"]))
+        self.assertEqual(result["members"]["ticker"].tolist(), ["TWLO"])
+
+    def test_resolve_valid_selectbox_value_prefers_current_then_first_valid_option(self):
+        self.assertEqual(resolve_valid_selectbox_value("QBTS", ["IONQ", "QBTS"]), "QBTS")
+        self.assertEqual(resolve_valid_selectbox_value("RGTI", ["IONQ", "QBTS"]), "IONQ")
+        self.assertIsNone(resolve_valid_selectbox_value("RGTI", []))
+
+    def test_themes_page_remove_handler_uses_pre_widget_hydration_and_safe_rerun(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("selected_id = labels[selected_label]", content)
+        self.assertIn("next_remove_value = resolve_valid_selectbox_value(st.session_state.get(remove_select_key), remove_options)", content)
+        self.assertIn("remove_result = remove_ticker(conn, selected_id, remove_tkr)", content)
+        self.assertIn('members = remove_result["members"]', content)
+        self.assertIn('remove_options = members["ticker"].tolist()', content)
+        self.assertIn('render_dataframe("manage_theme_members", members, width="stretch")', content)
+        self.assertIn("prepare_post_mutation_refresh(", content)
+        self.assertIn('"manage_ticker_feedback"', content)
+        self.assertIn('st.warning(f"No membership row was removed for {remove_result[\'ticker\']} in {selected[\'name\']} [{selected_id}].")', content)
+        self.assertNotIn('st.session_state[remove_select_key] = next_remove_ticker', content)
+        self.assertNotIn('st.session_state.pop(remove_select_key, None)\n                        else:', content)
+
+    def test_health_page_uses_safe_snapshot_metric_helper(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "4_Health.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("def _first_metric_value(df: pd.DataFrame, column: str) -> int:", content)
+        self.assertIn('c1.metric("Ticker snapshots", _first_metric_value(snaps, "ticker_snapshot_rows"))', content)
+        self.assertIn('c2.metric("Theme snapshots", _first_metric_value(snaps, "theme_snapshot_rows"))', content)
+        self.assertIn('c3.metric("Runs w/theme snapshots", _first_metric_value(snaps, "runs_with_theme_snapshots"))', content)
+        self.assertNotIn('snaps.iloc[0]["ticker_snapshot_rows"]', content)
+
+    def test_suggestions_page_guards_missing_existing_theme_selection(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "3_Suggestions.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("if selected_existing_theme is not None:", content)
+        self.assertIn("Create a theme first, or wait for theme seeding to finish", content)
+        self.assertIn('raise ValueError("Select an existing theme before creating this suggestion.")', content)
+        self.assertNotIn('current_members = get_theme_members(conn, int(selected_existing_theme["id"]))["ticker"].tolist()\n\n    if suggestion_type == "add_ticker_to_theme":', content)
+
+
+class TestStreamlitHealthMutationState(unittest.TestCase):
+    def test_unique_normalized_select_options_dedupes_case_and_whitespace_variants(self):
+        options = streamlit_utils.unique_normalized_select_options(
+            [
+                "Artificial Intelligence",
+                " artificial intelligence ",
+                "ARTIFICIAL INTELLIGENCE",
+                "Autos & EV",
+                " Autos & EV ",
+                "autos & ev",
+                "",
+                None,
+            ]
+        )
+
+        self.assertEqual(options, ["Artificial Intelligence", "Autos & EV"])
+
+    def test_themes_page_category_drill_uses_unique_normalized_category_options(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('category_options = unique_normalized_select_options(breakdown_df["category"].tolist())', content)
+        self.assertIn('breakdown_df["category"].fillna("").astype(str).str.strip().str.casefold() == picked_category_key', content)
+
+    def test_sync_valid_multiselect_state_prefers_session_state_selection(self):
+        session_state = {"governed_onboarding_reconstruction_tickers": ["LPTH"]}
+
+        selected = streamlit_utils.sync_valid_multiselect_state(
+            session_state,
+            "governed_onboarding_reconstruction_tickers",
+            ["LPTH", "AAOI"],
+            default=["AAOI"],
+        )
+
+        self.assertEqual(selected, ["LPTH"])
+        self.assertEqual(session_state["governed_onboarding_reconstruction_tickers"], ["LPTH"])
+
+    def test_sync_valid_multiselect_state_preserves_selection_across_rerun_until_options_change(self):
+        session_state = {"governed_onboarding_reconstruction_tickers": ["LPTH", "AAOI"]}
+
+        selected = streamlit_utils.sync_valid_multiselect_state(
+            session_state,
+            "governed_onboarding_reconstruction_tickers",
+            ["LPTH", "AAOI", "NVDA"],
+            default=["NVDA"],
+        )
+
+        self.assertEqual(selected, ["LPTH", "AAOI"])
+        self.assertEqual(streamlit_utils.get_canonical_multiselect_values(session_state, "governed_onboarding_reconstruction_tickers"), ["LPTH", "AAOI"])
+
+    def test_queue_feedback_message_persists_success_payload_for_post_rerun_render(self):
+        session_state = {}
+
+        streamlit_utils.queue_feedback_message(
+            session_state,
+            "governed_onboarding_feedback",
+            level="success",
+            message="Affected-theme reconstruction finished.",
+        )
+
+        payload = session_state["governed_onboarding_feedback"]
+        self.assertEqual(payload["level"], "success")
+        self.assertEqual(payload["message"], "Affected-theme reconstruction finished.")
+        self.assertIn("occurred_at", payload)
+
+    def test_clear_current_market_view_caches_clears_theme_analytics_loaders(self):
+        with patch.object(streamlit_utils._load_current_ranking_snapshot_cached, "clear") as clear_current, patch.object(
+            streamlit_utils._load_theme_rankings_cached, "clear"
+        ) as clear_rankings, patch.object(streamlit_utils._load_theme_momentum_cached, "clear") as clear_momentum, patch.object(
+            streamlit_utils._load_theme_inflections_cached, "clear"
+        ) as clear_inflections, patch.object(streamlit_utils._load_theme_health_overview_cached, "clear") as clear_health:
+            streamlit_utils.clear_current_market_view_caches()
+
+        clear_current.assert_called_once()
+        clear_rankings.assert_called_once()
+        clear_momentum.assert_called_once()
+        clear_inflections.assert_called_once()
+        clear_health.assert_called_once()
+
+
+class TestRefreshUniverseSemantics(unittest.TestCase):
+    def test_refresh_active_ticker_universe_excludes_suppressed_symbols(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership values (1, 'NVDA')")
+        conn.execute("insert into theme_membership values (1, 'PLTR')")
+        conn.execute(
+            "insert into symbol_refresh_status(ticker, status, consecutive_failure_count, rolling_failure_count) values ('PLTR', 'refresh_suppressed', 5, 8)"
+        )
+
+        out = refresh_active_ticker_universe(conn)
+
+        self.assertEqual(out, ["NVDA"])
+        conn.close()
+
+
+class TestManualTickerSuppression(unittest.TestCase):
+    def test_manual_ticker_suppression_round_trip_persists_reason_and_restores(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                manual_suppressed boolean default false,
+                manual_suppression_reason varchar,
+                manual_suppressed_at timestamp,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        set_result = set_manual_ticker_suppression(conn, " docn ", "moved to pink sheets")
+        state = ticker_manual_suppression_state(conn, "DOCN")
+
+        self.assertTrue(bool(set_result["changed"]))
+        self.assertTrue(bool(state["manual_suppressed"]))
+        self.assertEqual(state["manual_suppression_reason"], "moved to pink sheets")
+        self.assertIsNotNone(state["manual_suppressed_at"])
+
+        clear_result = clear_manual_ticker_suppression(conn, "DOCN")
+        restored = ticker_manual_suppression_state(conn, " docn ")
+
+        self.assertTrue(bool(clear_result["changed"]))
+        self.assertFalse(bool(restored["manual_suppressed"]))
+        self.assertIsNone(restored["manual_suppression_reason"])
+        self.assertIsNone(restored["manual_suppressed_at"])
+        conn.close()
+
+    def test_manual_suppression_excludes_governed_views_but_preserves_raw_lookup_context(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean, updated_at timestamp)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table theme_snapshots(run_id bigint, theme_id bigint, snapshot_time timestamp, ticker_count bigint, avg_1w double, avg_1m double, avg_3m double, positive_1m_breadth_pct double, composite_score double, snapshot_source varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp, provider varchar)")
+        conn.execute("create table refresh_failures(run_id bigint, ticker varchar, error_message varchar, failure_category varchar, created_at timestamp)")
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                manual_suppressed boolean default false,
+                manual_suppression_reason varchar,
+                manual_suppressed_at timestamp,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'AI - Agentic', 'AI', true, '2026-03-22 10:00:00')")
+        conn.execute("insert into themes values (2, 'Cloud Software', 'Software', true, '2026-03-22 10:00:00')")
+        conn.execute("insert into theme_membership values (1, ' DOCN ')")
+        conn.execute("insert into theme_membership values (2, 'DOCN')")
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-22 11:00:00', 'live')")
+        conn.execute("insert into theme_snapshots values (1, 1, '2026-03-22 11:00:00', 1, 1, 1, 1, 50, 55, 'live')")
+        conn.execute("insert into refresh_failures values (1, 'DOCN', 'temporary', 'transient', '2026-03-22 11:30:00')")
+        conn.execute("insert into refresh_run_tickers values (1, 'DOCN')")
+        conn.execute(
+            "insert into ticker_snapshots values (1, 'DOCN', 40, 1, 2, 3, 1000, 2000, null, null, null, '2026-03-22 10:59:00', 'live')"
+        )
+
+        set_manual_ticker_suppression(conn, "DOCN", "pink sheets / out of universe")
+
+        summary = ticker_lookup_summary(conn, "DOCN")
+        memberships = ticker_lookup_memberships(conn, "DOCN")
+        members = get_theme_members(conn, 1)
+        theme_detail = theme_ticker_metrics(conn, 1)
+        health = theme_health_overview(conn, low_constituent_threshold=2, failure_window_days=14)
+
+        self.assertTrue(bool(summary.iloc[0]["manually_suppressed"]))
+        self.assertEqual(summary.iloc[0]["lookup_status"], "Suppressed operationally")
+        self.assertFalse(bool(summary.iloc[0]["exists_in_theme_membership"]))
+        self.assertEqual(int(summary.iloc[0]["assigned_theme_count"]), 2)
+        self.assertEqual(summary.iloc[0]["manual_suppression_reason"], "pink sheets / out of universe")
+        self.assertEqual(sorted(memberships["theme_name"].tolist()), ["AI - Agentic", "Cloud Software"])
+        self.assertTrue(members.empty)
+        self.assertTrue(theme_detail.empty)
+        self.assertEqual(int(health.loc[health["theme_id"] == 1, "constituent_count"].iloc[0]), 0)
+        conn.close()
+
+    def test_manual_suppression_excludes_onboarding_and_refresh_universe_until_cleared(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp, provider varchar)")
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                manual_suppressed boolean default false,
+                manual_suppression_reason varchar,
+                manual_suppressed_at timestamp,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table governed_ticker_onboarding(
+                ticker varchar primary key,
+                added_at timestamp,
+                onboarding_source varchar,
+                history_readiness_status varchar,
+                backfill_status varchar,
+                last_backfill_attempt_at timestamp,
+                last_backfill_error varchar,
+                downstream_refresh_needed boolean,
+                history_row_count bigint,
+                history_target_days bigint,
+                history_market_data_source varchar,
+                history_latest_trading_date date,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'AI - Agentic', 'AI', true)")
+        conn.execute("insert into theme_membership values (1, ' DOCN ')")
+        conn.execute("insert into governed_ticker_onboarding values ('DOCN', '2026-03-22 11:00:00', 'manual_add', 'ready', 'completed', null, null, true, 61, 30, 'live', '2026-03-21', '2026-03-22 11:00:00')")
+
+        active_before = refresh_active_ticker_universe(conn)
+        onboarding_before = list_governed_ticker_onboarding(conn, limit=10)
+        counts_before = governed_ticker_onboarding_counts(conn)
+
+        self.assertEqual(active_before, [" DOCN "])
+        self.assertEqual(onboarding_before["ticker"].tolist(), ["DOCN"])
+        self.assertEqual(int(counts_before["cnt"].sum()), 1)
+
+        set_manual_ticker_suppression(conn, "DOCN", "manual cleanup")
+
+        active_after = refresh_active_ticker_universe(conn)
+        onboarding_after = list_governed_ticker_onboarding(conn, limit=10)
+        counts_after = governed_ticker_onboarding_counts(conn)
+
+        self.assertEqual(active_after, [])
+        self.assertTrue(onboarding_after.empty)
+        self.assertEqual(int(counts_after["cnt"].sum()) if not counts_after.empty else 0, 0)
+
+        clear_manual_ticker_suppression(conn, "DOCN")
+
+        active_restored = refresh_active_ticker_universe(conn)
+        onboarding_restored = list_governed_ticker_onboarding(conn, limit=10)
+
+        self.assertEqual(active_restored, [" DOCN "])
+        self.assertEqual(onboarding_restored["ticker"].tolist(), ["DOCN"])
+        conn.close()
+
+    def test_ticker_lookup_summary_distinguishes_any_snapshot_from_usable_current_preferred_snapshot(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp, provider varchar)")
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                manual_suppressed boolean default false,
+                manual_suppression_reason varchar,
+                manual_suppressed_at timestamp,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'AI - Agentic', 'AI', true)")
+        conn.execute("insert into theme_membership values (1, 'DOCN')")
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-20 16:00:00', 'live')")
+        conn.execute("insert into refresh_runs values (2, 'success', '2026-03-21 16:00:00', 'mock')")
+        conn.execute("insert into ticker_snapshots values (1, 'NVDA', 100, 1, 2, 3, null, 1000000, null, null, null, '2026-03-20 15:59:00', 'live')")
+        conn.execute("insert into ticker_snapshots values (2, 'DOCN', 40, 1, 2, 3, null, 2000000, null, null, null, '2026-03-21 15:59:00', 'mock')")
+
+        summary = ticker_lookup_summary(conn, "DOCN")
+
+        self.assertEqual(str(summary.iloc[0]["latest_snapshot_source"]), "mock")
+        self.assertFalse(bool(summary.iloc[0]["has_current_preferred_snapshot"]))
+        self.assertFalse(bool(summary.iloc[0]["has_current_usable_preferred_snapshot"]))
+        conn.close()
+
+    def test_ticker_lookup_summary_exposes_operational_refresh_suppression_even_without_manual_suppression(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp, provider varchar)")
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                manual_suppressed boolean default false,
+                manual_suppression_reason varchar,
+                manual_suppressed_at timestamp,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'AI - Edge Computing', 'AI', true)")
+        conn.execute("insert into theme_membership values (1, 'ACIA')")
+        conn.execute("""insert into symbol_refresh_status(
+            ticker, status, manual_suppressed, last_failure_category, consecutive_failure_count, rolling_failure_count
+        ) values ('ACIA', 'refresh_suppressed', FALSE, 'NO_CANDLES', 3, 4)""")
+
+        summary = ticker_lookup_summary(conn, "ACIA")
+
+        self.assertFalse(bool(summary.iloc[0]["manually_suppressed"]))
+        self.assertTrue(bool(summary.iloc[0]["operationally_suppressed"]))
+        conn.close()
+
+    def test_ticker_lookup_page_source_includes_operational_suppression_controls(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("**Operational suppression**", content)
+        self.assertIn("set_manual_ticker_suppression(conn, lookup_ticker, suppression_reason)", content)
+        self.assertIn("clear_manual_ticker_suppression(conn, lookup_ticker)", content)
+        self.assertIn('"Suppressed"', content)
+        self.assertIn("prepare_post_mutation_refresh(", content)
+
+    def test_themes_page_source_explains_selected_history_provenance_and_current_metric_semantics(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("Bottom chart shows ticker-level composite history for the current top 5 visible governed tickers in this theme", content)
+        self.assertIn("Selected-theme history table below still shows preferred-source captured/reconstructed theme history", content)
+        self.assertIn("movement tables above may prefer recent ticker-history-derived boundary rows", content)
+        self.assertIn("def _render_summary_metric(label: str, value: object) -> None:", content)
+        self.assertIn('_render_summary_metric("Composite", _metric_value(current_row.get("composite_score")))', content)
+        self.assertIn('_render_summary_metric("Momentum", _metric_value(current_row.get("current_momentum_score")))', content)
+        self.assertIn('_render_summary_metric("Rank", current_rank)', content)
+        self.assertIn('_render_summary_metric("1W hist rank Δ", window_rank_change)', content)
+        self.assertIn('_render_summary_metric(', content)
+        self.assertIn('"Contributors"', content)
+        self.assertIn('_render_summary_metric("Avg 1W", _metric_value(current_row.get("avg_1w"), suffix="%"))', content)
+        self.assertIn('_render_summary_metric("Avg 1M", _metric_value(current_row.get("avg_1m"), suffix="%"))', content)
+        self.assertIn('_render_summary_metric("Avg 3M", _metric_value(current_row.get("avg_3m"), suffix="%"))', content)
+        self.assertIn("This theme currently has no governed members, so there are no current member rows to display.", content)
+        self.assertIn("no current governed-member rows are visible in the detail table", content)
+        self.assertIn("Current enriched coverage is partial for this theme", content)
+        self.assertIn("none currently have preferred-source enriched snapshot fields populated", content)
+        self.assertIn("turn on `Include suppressed tickers` to inspect them", content)
+        self.assertIn("No preferred-source theme history rows are available yet for this selected theme.", content)
+        self.assertIn('render_feedback_message(st.session_state, "themes_refresh_feedback")', content)
+        self.assertIn('freshness_c1.metric("Current tables snapshot"', content)
+        self.assertIn('freshness_c2.metric("1W movement end"', content)
+        self.assertIn("DAILY_HISTORICAL_APPEND_STALE_MINUTES = 45", content)
+        self.assertIn('show_leadership_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_leadership")', content)
+        self.assertIn('show_current_1w_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_current_1w")', content)
+        self.assertIn('show_current_1m_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_current_1m")', content)
+        self.assertIn('show_movement_deltas = st.toggle("Show window deltas", value=False, key="themes_show_daily_deltas_movement")', content)
+        self.assertIn("def _resolve_prior_daily_endpoint(history: pd.DataFrame)", content)
+        self.assertIn("Current Market Leadership deltas compare against the prior daily movement endpoint", content)
+        self.assertIn("Current 1W deltas compare against the prior daily movement endpoint", content)
+        self.assertIn("Current 1M deltas compare against the prior daily movement endpoint", content)
+        self.assertIn("Theme Movement Snapshot deltas compare the resolved window start against the resolved window end for that table.", content)
+        self.assertIn('def _apply_window_delta_display(', content)
+        self.assertIn('"avg_1w": "delta_avg_1w"', content)
+        self.assertIn('"avg_1m": "delta_avg_1m"', content)
+        self.assertIn('"avg_3m": "delta_avg_3m"', content)
+        self.assertIn("def _historical_table_column_config(columns: list[str], *, text_columns: set[str] | None = None) -> dict[str, object]:", content)
+        self.assertIn('current_rankings = current_snapshot.get("standardized_rankings", current_snapshot["rankings"]).copy()', content)
+        self.assertIn('current_theme_metrics["composite_score"] = current_theme_metrics["standardized_composite_score"]', content)
+        self.assertIn('current_rankings["composite_score"] = current_rankings["standardized_composite_score"]', content)
+        self.assertIn('"composite_score": "prior_standardized_composite_score"', content)
+        self.assertIn("Current Market Leadership deltas need two distinct daily endpoints; missing prior-day comparisons are left blank.", content)
+        self.assertIn('"current_momentum_score"', content)
+        self.assertIn('"This table keeps baseline strength, current momentum, and short-window performance adjacent', content)
+        self.assertIn('"The table is still ranked by the selected window return using capped constituent aggregation', content)
+        self.assertIn("def _current_table_column_config(columns: list[str], *, text_columns: set[str] | None = None) -> dict[str, object]:", content)
+        self.assertIn('st.column_config.NumberColumn(column, format="%.2f", width="small")', content)
+        self.assertIn('st.column_config.TextColumn(column, width="small")', content)
+        self.assertIn('"current_momentum_score": "momentum"', content)
+        self.assertIn('"composite_score": "composite"', content)
+        self.assertIn('"eligible_breadth_pct": "eligible %"', content)
+        self.assertIn('"leadership_quality": "quality"', content)
+        self.assertIn('visible_cols = [\n        "rank",\n        "theme",\n        "category",\n        "current_momentum_score",', content)
+        self.assertIn('"avg_3m",', content)
+        self.assertIn('visible_cols = [', content)
+        self.assertIn('"category",', content)
+        self.assertIn('"avg_1w",', content)
+        self.assertIn('"avg_1m",', content)
+        self.assertIn('text_columns={"rank"} if show_daily_deltas else None', content)
+        self.assertIn('text_columns={"rank"} if show_advanced else None', content)
+        self.assertIn('"theme": st.column_config.TextColumn("theme", width="small")', content)
+        self.assertIn('"category": st.column_config.TextColumn("category", width="small")', content)
+        self.assertIn('"quality": st.column_config.TextColumn("quality", width="small")', content)
+        self.assertIn('avoid Streamlit applying fractional-percent scaling again', content)
+        self.assertIn('"prior_avg_3m"', content)
+        self.assertIn('"prior_rank_composite"', content)
+        self.assertIn("def _format_rank_with_change(rank_value, prior_rank_value) -> str:", content)
+        self.assertIn('"prior_rank_1w"', content)
+        self.assertIn('"prior_rank_1m"', content)
+        self.assertIn('lambda row: _format_rank_with_change(row.get("rank"), row.get("prior_rank_composite"))', content)
+        self.assertIn('"momentum_score": "momentum"', content)
+        self.assertIn('"rank_change": "Δ rank"', content)
+        self.assertIn('"composite_score": "composite"', content)
+        self.assertIn('"eligible_breadth_pct": "eligible %"', content)
+        self.assertIn('"leadership_quality": "quality"', content)
+        self.assertIn('"contributing_themes": "themes"', content)
+        self.assertIn('"avg_3m"', content)
+        self.assertIn('visible_cols.extend(["rank_change"])', content)
+        self.assertIn("def _apply_ticker_model_scores(ticker_df: pd.DataFrame) -> pd.DataFrame:", content)
+        self.assertIn("def _build_ticker_composite_history_chart_df(", content)
+        self.assertIn("TICKER_COMPOSITE_CHART_TARGET_DAILY_POINTS = 20", content)
+        self.assertIn("TICKER_COMPOSITE_CHART_TRADING_DAY_LOOKBACK = 140", content)
+        self.assertIn("TICKER_COMPOSITE_CHART_RAW_SNAPSHOT_LIMIT = 160", content)
+        self.assertIn("trading_day_lookback: int = TICKER_COMPOSITE_CHART_TRADING_DAY_LOOKBACK", content)
+        self.assertIn("ticker_history_last_n_trading_days(conn, ticker, trading_day_limit=trading_day_lookback)", content)
+        self.assertIn("if hist.empty:", content)
+        self.assertIn("ticker_history_last_n_snapshots(conn, ticker, snapshot_limit=TICKER_COMPOSITE_CHART_RAW_SNAPSHOT_LIMIT)", content)
+        self.assertIn("def _render_ticker_composite_history_chart(chart_df: pd.DataFrame) -> None:", content)
+        self.assertIn('hist["snapshot_date"] = hist["snapshot_time"].dt.date', content)
+        self.assertIn('.groupby("snapshot_date", as_index=False)', content)
+        self.assertIn('dt.dayofweek < 5', content)
+        self.assertIn('hist = hist.tail(TICKER_COMPOSITE_CHART_TARGET_DAILY_POINTS)', content)
+        self.assertIn('chart_df[["date", "ticker", "composite"]]', content)
+        self.assertIn('"yearmonthdate(date):O"', content)
+        self.assertIn('st.altair_chart(chart, width="stretch")', content)
+        self.assertIn('"ticker_composite_score": "composite"', content)
+        self.assertIn('"ticker_momentum_score": "momentum"', content)
+        self.assertIn("Bottom chart shows ticker-level composite history for the current top 5 visible governed tickers in this theme", content)
+        self.assertIn("theme_ticker_metrics(conn, theme_id, include_suppressed=True)", content)
+        self.assertIn('include_suppressed_tickers = st.checkbox(', content)
+        self.assertIn('"Include suppressed tickers"', content)
+        self.assertIn('"eligible"', content)
+        self.assertIn('"suppressed": "suppressed"', content)
+        self.assertIn("current_ticker_is_eligible(", content)
+        self.assertIn("current_ticker_coverage_status(", content)
+        self.assertIn("visible_ticker_suppressed(", content)
+        self.assertIn('"current_status": "current status"', content)
+        self.assertIn("needs refresh check", content)
+        self.assertIn('st.caption("Current theme")', content)
+        self.assertIn('st.markdown("### Search and select a theme to view detail.")', content)
+        self.assertNotIn('st.info("Search and select a theme to view detail.")', content)
+        self.assertIn('theme_search_widget_key = f"theme_detail_view_search__{int(st.session_state.get(\'theme_detail_view_search__widget_version\', 0))}"', content)
+        self.assertIn('selected_search = st.selectbox(', content)
+        self.assertIn('index=None,', content)
+        self.assertIn('placeholder="Type to search and select a different theme"', content)
+        self.assertIn('_set_theme_selection(int(options[selection]), selection, "manual_dropdown")', content)
+        self.assertIn('rotate_replaceable_selectbox_widget(st.session_state, "theme_detail_view_search")', content)
+        self.assertIn('with st.container(border=True):', content)
+        self.assertIn("unsafe_allow_html=True", content)
+        self.assertIn("color:var(--text-color)", content)
+        self.assertIn('st.markdown("<div style=\'height:0.25rem;\'></div>", unsafe_allow_html=True)', content)
+        self.assertIn('explore_tab, manage_tab = st.tabs(["Explore Themes", "Manage & Ops"])', content)
+        self.assertIn("Start here: review current leadership or current top themes, then click any theme row to open detail below.", content)
+        self.assertIn('with st.expander("Internal testing quick guide", expanded=False):', content)
+        self.assertIn("Most useful feedback: confusing labels/states, drilldown or selection bugs, trust/reconciliation issues", content)
+        self.assertIn('selected_theme_id = st.session_state.get(SELECTED_THEME_ID_KEY)', content)
+        self.assertIn('selected_theme_label = st.session_state.get(SELECTED_THEME_LABEL_KEY)', content)
+        self.assertIn('l6.metric("Current coverage", str(current_coverage_status))', content)
+        self.assertIn("Ticker Lookup shows stored state only and does not trigger a live refresh attempt from this view.", content)
+        self.assertIn('l5.metric("Suppressed", "yes" if visible_lookup_suppressed else "no")', content)
+        self.assertIn("Optional `rank_change` appears here only in delta view and uses prior daily 1W rank versus current 1W rank.", content)
+        self.assertIn("Optional `rank_change` appears here only in delta view and uses prior daily 1M rank versus current 1M rank.", content)
+        self.assertIn('display_df["rank"] = display_df.apply(', content)
+        self.assertIn('return f"{rendered} ({delta:+.{delta_decimals}f}{suffix})"', content)
+        self.assertIn('suffix = "%" if is_percent else ""', content)
+        self.assertIn("def _apply_daily_delta_display(", content)
+        self.assertIn("def _apply_plain_value_formatting(", content)
+        self.assertIn('return f"{float(value):.{decimals}f}{suffix}"', content)
+        self.assertIn('"avg_1w": "prior_avg_1w"', content)
+        self.assertIn('"avg_1m": "prior_avg_1m"', content)
+        self.assertIn('"current_momentum_score": "prior_current_momentum_score"', content)
+        self.assertIn('"composite_score": "prior_standardized_composite_score"', content)
+        self.assertIn("def _apply_prior_current_model_scores(display_df: pd.DataFrame) -> pd.DataFrame:", content)
+        self.assertNotIn('"breadth_1m": "prior_breadth_1m"', content)
+        self.assertNotIn('"eligible_breadth_pct": "prior_breadth_1m"', content)
+        self.assertNotIn('"delta_comp"', content)
+        self.assertNotIn('"delta_1w"', content)
+        self.assertNotIn('"delta_1m"', content)
+        self.assertNotIn("background-color: rgba(26, 127, 55, 0.16)", content)
+        self.assertNotIn("background-color: rgba(180, 35, 24, 0.16)", content)
+        self.assertIn('with st.expander("Standardized Composite Validation", expanded=False):', content)
+        self.assertIn('with st.expander("Current Momentum Validation", expanded=False):', content)
+        self.assertIn("Themes page above now uses the standardized composite as its default baseline", content)
+        self.assertIn('current_snapshot.get("standardized_rankings", pd.DataFrame())', content)
+        self.assertIn('current_snapshot.get("standardized_comparison", pd.DataFrame())', content)
+        self.assertIn('current_snapshot.get("current_momentum_rankings", pd.DataFrame())', content)
+        self.assertIn('current_snapshot.get("current_momentum_comparison", pd.DataFrame())', content)
+        self.assertIn('"standardized_recovery_factor"', content)
+        self.assertIn('"recovery_factor"', content)
+        self.assertIn('"current_momentum_quality_factor"', content)
+        self.assertIn('"quality_factor"', content)
+        self.assertIn('st.caption("Current theme")', content)
+        self.assertIn('theme_search_widget_key = f"theme_detail_view_search__{int(st.session_state.get(\'theme_detail_view_search__widget_version\', 0))}"', content)
+        self.assertIn('selected_search = st.selectbox(', content)
+        self.assertIn('index=None,', content)
+        self.assertIn('placeholder="Type to search and select a different theme"', content)
+        self.assertIn('rotate_replaceable_selectbox_widget(st.session_state, "theme_detail_view_search")', content)
+        self.assertIn('_set_theme_selection(int(options[selection]), selection, "manual_dropdown")', content)
+        self.assertIn('if col not in standardized_rankings.columns:', content)
+        self.assertIn('if col not in comparison.columns:', content)
+        self.assertIn('if st.button("Reload latest DB state", key="themes_force_refresh")', content)
+        self.assertIn('if st.button("Materialize latest historical day", key="themes_force_latest_day_refresh")', content)
+        self.assertIn('with st.expander("Advanced refresh controls", expanded=False):', content)
+        self.assertIn("Use these only when you intentionally want to refresh cached page analytics or advance historical movement history.", content)
+        self.assertIn("def _active_daily_historical_append_runs() -> pd.DataFrame:", content)
+        self.assertIn("AND run_kind = 'daily_historical_append'", content)
+        self.assertIn('active["likely_stale"] = age_minutes >= float(DAILY_HISTORICAL_APPEND_STALE_MINUTES)', content)
+        self.assertIn("Materialize latest historical day did not start because a daily historical append run is already active.", content)
+        self.assertIn("A daily historical append run appears likely stale/orphaned.", content)
+        self.assertIn("Materialize latest historical day did not start because a daily historical append run looks stale/orphaned.", content)
+        self.assertIn("The duplicate-run guard will block new Themes materialization attempts until this stale run is cleaned up manually.", content)
+        self.assertIn('status_container = st.status("Materialize latest historical day: started.", expanded=True)', content)
+        self.assertIn('status_container.write("Historical append step running against provider historical data for the latest trading day.")', content)
+        self.assertIn('status_container.write("Cache clear and rerun preparation running.")', content)
+        self.assertIn('label=f"Materialize latest historical day: {final_state}."', content)
+        self.assertIn('label="Materialize latest historical day: error."', content)
+        self.assertIn("from src.database import get_bootstrap_conn, get_conn, init_db", content)
+        self.assertIn("with get_bootstrap_conn() as conn:", content)
+        self.assertIn('run_scheduled_historical_append(conn, provider_name="live", force=True)', content)
+        self.assertNotIn('run_scheduled_eod_refresh(conn, provider_name="live", force=True)', content)
+        self.assertIn("Movement-history layers were likely advanced to the latest trading day when provider history was available.", content)
+        self.assertIn("Verify next: 1W and 1M movement end should now reflect the latest available historical day", content)
+        self.assertIn("Materialize latest historical day failed before completion.", content)
+        self.assertIn("This recomputes current ranking and movement tables in-memory from stored data only", content)
+        self.assertIn("It does not fetch market data, rerun refresh_runs, or rebuild historical snapshots.", content)
+        self.assertIn("it runs the existing one-day historical append path for the latest trading day", content)
+        self.assertIn("It does not rerun current/live snapshot refresh", content)
+        self.assertIn("This is a historical end-of-window table", content)
+        self.assertIn("top_themes` previews the strongest underlying themes in that category for the same window, with a minimal suffix only when duplicate names would otherwise look collapsed.", content)
+
+    def test_themes_page_source_guards_inactive_current_quality(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('quality_label = "n/a (inactive theme)" if not bool(current_row.get("is_active")) else current_leadership_quality_label(current_row)', content)
+        self.assertNotIn('build_current_leadership_table(theme_current_row, top_k=1).iloc[0]["leadership_quality"]', content)
+
+    def test_historical_backfill_source_updates_running_append_progress(self):
+        source = Path(__file__).resolve().parents[1] / "src" / "historical_backfill.py"
+        content = source.read_text(encoding="utf-8")
+
+        self.assertIn("def _suppressed_ticker_filter_sql(conn, ticker_expr: str) -> str:", content)
+        self.assertIn("COALESCE(s.status, 'active') = 'refresh_suppressed'", content)
+        self.assertIn("def _update_reconstruction_run_progress(conn, run_id: int, **fields) -> None:", content)
+        self.assertIn("AND status = 'running'", content)
+        self.assertIn("_update_reconstruction_run_progress(", content)
+        self.assertIn("ticker_history_rows_written=ticker_history_rows_written", content)
+        self.assertIn("ticker_history_rows_skipped=ticker_history_rows_skipped", content)
+        self.assertIn('failed_tickers=",".join(failed_tickers) if failed_tickers else None', content)
+        self.assertIn("snapshot_rows_written=rows_written", content)
+        self.assertIn("snapshot_rows_skipped=rows_skipped", content)
+
+    def test_historical_performance_page_source_uses_theme_id_identity_for_open_routing(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "2_Historical_Performance.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('st.session_state["historical_selected_theme_id"]', content)
+        self.assertIn("def _resolve_theme_id(", content)
+        self.assertIn("_open_theme_in_themes(picked_row.get(\"theme_id\"), picked_theme, theme_label_by_id, theme_ids_by_name, \"historical_table\")", content)
+        self.assertIn("_open_theme_in_themes(picked_row.get(\"theme_id\"), picked_theme, theme_label_by_id, theme_ids_by_name, \"historical_signal\")", content)
+        self.assertIn("trend = filtered_history[filtered_history[\"theme_id\"].isin(selected_chart_theme_ids)]", content)
+        self.assertIn('key="historical_top_momentum_table"', content)
+        self.assertIn('st.session_state["historical_selected_theme_id"] = _normalize_theme_identifier(picked_row.get("theme_id"))', content)
+        self.assertIn('key="open_historical_top_momentum_theme"', content)
+
+    def test_historical_performance_page_source_explains_precedence_and_resolved_boundaries(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "2_Historical_Performance.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("Movement windows resolve boundaries with precedence", content)
+        self.assertIn("ticker_history_derived > captured > reconstructed", content)
+        self.assertIn("Movement boundary precedence here is `ticker_history_derived > captured > reconstructed`", content)
+        self.assertIn("effective window=`{int(window_meta.get('effective_window_days') or 0)}`d", content)
+        self.assertIn("This is a change leaderboard built from start-to-end window deltas", content)
+        self.assertIn("this table is sorted by `momentum_score`, not end-of-window return level", content)
+        self.assertIn('rt1.metric("Entered top N"', content)
+        self.assertIn("Duplicate names get a minimal suffix only when needed so turnover stays visually attributable.", content)
+        self.assertIn("def _display_theme_name_from_row(", content)
+        self.assertIn('reasons = disambiguate_theme_labels(reasons)', content)
+        self.assertIn('weak_reasons = disambiguate_theme_labels(weak_reasons)', content)
+        self.assertIn('picked_theme = _display_theme_name_from_row(picked_row, theme_label_by_id, theme_ids_by_name)', content)
+        self.assertIn('render_feedback_message(st.session_state, "historical_refresh_feedback")', content)
+        self.assertIn('historical_fresh_c1.metric(', content)
+        self.assertIn('"Visible window end"', content)
+        self.assertIn('if st.button("Reload latest DB state", key="historical_force_refresh")', content)
+        self.assertIn("This recomputes historical movement, leaderboard, and inflection tables in-memory from stored data only", content)
+        self.assertIn("Secondary workflow: audit historical theme movement, leadership rotation, and provenance-aware change across resolved boundary windows.", content)
+        self.assertIn("Start in Themes for current leadership and live drilldown.", content)
+        self.assertIn("Historical Performance tables are driven by the resolved boundary window shown above", content)
+        self.assertIn('sel = st.selectbox(', content)
+        self.assertIn('index=default_index,', content)
+        self.assertIn('default_index = None', content)
+        self.assertIn('placeholder="Search and select a theme to inspect historical detail"', content)
+        self.assertIn('st.info("Search and select a theme to inspect historical detail.")', content)
+        self.assertIn("No historical snapshot rows are available yet for the selected theme. Use Themes for current/live detail.", content)
+        self.assertIn('with st.expander("Debug: Movement Row Audit", expanded=False):', content)
+        self.assertIn('movement_audit = historical_theme_movement_row_audit(conn, options[sel], int(lookback_days))', content)
+        self.assertIn("Constituent rows below show governed membership, eligibility, raw vs capped returns", content)
+        self.assertIn('leaders_tbl["concentration"] = leaders_tbl.apply(historical_concentration_label, axis=1)', content)
+        self.assertIn('top_momentum_display["concentration"] = top_momentum_display.apply(historical_concentration_label, axis=1)', content)
+        self.assertIn('leaders_cols.extend(["concentration", "delta_avg_1m", "delta_breadth"])', content)
+        self.assertIn('"eligible_contributor_count"', content)
+        self.assertIn('"covered_eligible_constituent_count"', content)
+
+    def test_theme_selection_source_labels_cover_current_and_historical_click_paths(self):
+        self.assertEqual(describe_selection_source("current_leadership"), "Current Market Leadership")
+        self.assertEqual(describe_selection_source("current_top_1w"), "Current Top Themes 1W")
+        self.assertEqual(describe_selection_source("current_top_1m"), "Current Top Themes 1M")
+        self.assertEqual(describe_selection_source("historical_top_momentum"), "Historical top momentum")
+        self.assertEqual(describe_selection_source("historical_detail"), "Historical detail")
+
+    def test_suggestions_page_source_uses_clickable_queue_and_scanner_selection(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "3_Suggestions.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('key="suggestions_queue_table"', content)
+        self.assertIn('st.session_state["queue_selected_suggestion_id"] = clicked_suggestion_id', content)
+        self.assertIn('key="queue_selected_suggestion_id"', content)
+        self.assertIn("Previously selected suggestion `#", content)
+        self.assertIn("Selection moved to the first visible row.", content)
+        self.assertIn('key="scanner_candidate_display_table"', content)
+        self.assertIn('st.session_state["scanner_audit_selected_ticker"] = str(display.reset_index(drop=True).iloc[int(scanner_row_idx)]["ticker"])', content)
+        self.assertIn('key="scanner_audit_selected_ticker"', content)
+        self.assertIn("Previously selected ticker `", content)
+        self.assertIn("View re-anchored to `", content)
+
+
+class TestDescriptionFirstResearchRefinements(unittest.TestCase):
+    @staticmethod
+    def _candidate(**overrides):
+        candidate = {
+            "ticker": "TEST",
+            "recommendation": "review for addition",
+            "recommendation_reason": "description-first audit",
+            "persistence_score": 3.2,
+            "observed_days": 7,
+            "observations_last_10d": 4,
+            "current_streak": 2,
+        }
+        candidate.update(overrides)
+        return candidate
+
+    @staticmethod
+    def _theme(theme_id: int, name: str, category: str, description: str, tickers: list[str] | None = None):
+        return {
+            "theme_id": theme_id,
+            "theme_name": name,
+            "category": category,
+            "theme_description": description,
+            "representative_tickers": tickers or [],
+        }
+
+    def test_description_first_prefers_direct_governed_theme_over_new_theme(self):
+        profile = {
+            "company_name": "Photon Fabric",
+            "description": "Designs optical interconnect systems and co-packaged optics for hyperscale data-center networking.",
+            "sic_description": "Networking equipment",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Optical Interconnects",
+                "Networking",
+                "Suppliers of optical interconnect components and systems used in data-center and AI networking.",
+                ["CIEN"],
+            ),
+            self._theme(
+                2,
+                "Digital Payments",
+                "Fintech",
+                "Platforms and networks that process digital payments and merchant transactions.",
+                ["SQ"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "add_to_existing_theme_review")
+        self.assertIsNone(draft["possible_new_theme"])
+        self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Optical Interconnects")
+        self.assertIn("Direct business-role fit", draft["suggested_existing_themes"][0]["why_it_might_fit"])
+        self.assertEqual(
+            draft["validation_debug"]["possible_new_theme_decision"]["status"],
+            "suppressed_by_direct_governed_match",
+        )
+        self.assertTrue(draft["validation_debug"]["evaluated_matches"][0]["actionable"])
+
+    def test_description_first_keeps_new_theme_tentative_when_existing_match_is_only_adjacent(self):
+        profile = {
+            "company_name": "Affirmed Credit",
+            "description": "Provides installment lending and buy-now-pay-later financing through a consumer finance platform.",
+            "sic_description": "Consumer lending",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Digital Payments",
+                "Fintech",
+                "Payment processing networks, merchant acceptance, and digital wallet infrastructure.",
+                ["PYPL"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Consumer Lending")
+        self.assertTrue(draft["suggested_existing_themes"])
+        self.assertEqual(draft["suggested_existing_themes"][0]["fit_label"], "adjacent_fit")
+        self.assertIn("adjacent rather than direct", " ".join(draft["caveats"]))
+        self.assertEqual(
+            draft["validation_debug"]["possible_new_theme_decision"]["status"],
+            "kept_tentative",
+        )
+
+    def test_description_first_filters_obviously_unrelated_governed_matches(self):
+        profile = {
+            "company_name": "Photon Fabric",
+            "description": "Designs optical interconnect systems and co-packaged optics for hyperscale data-center networking.",
+            "sic_description": "Networking equipment",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Digital Payments",
+                "Fintech",
+                "Payment processing networks, merchant acceptance, and digital wallet infrastructure.",
+                ["PYPL"],
+            ),
+            self._theme(
+                2,
+                "Consumer Lending",
+                "Fintech",
+                "Platforms focused on installment loans, personal lending, and credit underwriting.",
+                ["AFRM"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["suggested_existing_themes"], [])
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Optical Interconnects")
+        self.assertTrue(draft["validation_debug"]["evaluated_matches"])
+        self.assertFalse(any(item["actionable"] for item in draft["validation_debug"]["evaluated_matches"]))
+
+    def test_description_first_does_not_promote_generic_business_model_language_to_direct_fit(self):
+        profile = {
+            "company_name": "Workflow Grid",
+            "description": "Provides a mission-critical analytics platform and infrastructure software for enterprise workflow integration and observability.",
+            "sic_description": "Enterprise software",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Cloud Software",
+                "Software",
+                "Cloud software platforms, observability tooling, and enterprise workflow applications.",
+                ["DDOG"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertNotEqual(draft["recommended_action"], "add_to_existing_theme_review")
+        self.assertFalse(
+            any(item.get("fit_label") == "direct_fit" for item in draft.get("suggested_existing_themes") or [])
+        )
+        self.assertFalse(bool(draft["validation_debug"].get("strong_role_evidence")))
+
+    def test_description_first_generates_drone_phrase_ideas_even_when_anchors_are_weak(self):
+        profile = {
+            "company_name": "Aero Parts Co",
+            "description": "Engaged in serving the American drone industry by building and selling drone components.",
+            "sic_description": "Electronic components",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["domain_anchor"], "unclear")
+        self.assertEqual(draft["dominant_business_role"], "unclear")
+        self.assertIn("Drone Components", draft["candidate_theme_ideas"])
+        self.assertIn("Drones", draft["candidate_theme_ideas"])
+
+    def test_description_first_component_bucket_outranks_broader_product_bucket(self):
+        profile = {
+            "company_name": "Rotor Parts",
+            "description": "Builds UAV modules and drone components for unmanned aircraft systems manufacturers.",
+            "sic_description": "Electronic components",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Drones",
+                "Autonomous Systems",
+                "Drone manufacturers, UAV product platforms, and unmanned aircraft systems.",
+                ["AVAV"],
+            ),
+            self._theme(
+                2,
+                "Drone Components",
+                "Autonomous Systems",
+                "Suppliers of drone components, UAV modules, and unmanned aircraft parts.",
+                ["KTOS"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["candidate_theme_ideas"][0], "Drone Components")
+        self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Drone Components")
+
+    def test_description_first_sales_language_variant_collapses_to_canonical_component_label(self):
+        profile = {
+            "company_name": "Aero Parts Co",
+            "description": "Engaged in serving the American drone industry by building and selling drone components.",
+            "sic_description": "Electronic components",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertIn("Drone Components", draft["candidate_theme_ideas"])
+        self.assertNotIn("Selling Drone Components", draft["candidate_theme_ideas"])
+        self.assertEqual(draft["candidate_theme_ideas"][0], "Drone Components")
+
+    def test_description_first_plain_component_maker_suppresses_broad_ai_adjacency(self):
+        profile = {
+            "company_name": "Rotor Parts",
+            "description": "Builds UAV modules and drone components for unmanned aircraft systems manufacturers.",
+            "sic_description": "Electronic components",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "AI - Robotics",
+                "AI",
+                "Artificial intelligence robotics platforms, autonomous software, and factory robotics systems.",
+                ["SYM1"],
+            ),
+            self._theme(
+                2,
+                "AI - Edge Computing",
+                "AI",
+                "Edge AI infrastructure, distributed inference, and intelligent edge systems.",
+                ["SYM2"],
+            ),
+            self._theme(
+                3,
+                "AI - Semiconductors",
+                "AI",
+                "AI semiconductor platforms, accelerator chips, and compute silicon.",
+                ["SYM3"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertFalse(draft["suggested_existing_themes"])
+        self.assertEqual(draft["possible_new_theme"], "Drone Components")
+
+    def test_description_first_generic_adjacent_equipment_themes_do_not_survive_without_direct_support(self):
+        profile = {
+            "company_name": "Rotor Parts",
+            "description": "Builds UAV modules and drone components for unmanned aircraft systems manufacturers.",
+            "sic_description": "Electronic components",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Industrial Equipment",
+                "Industrial",
+                "Industrial equipment, machinery systems, and factory hardware.",
+                ["SYM4"],
+            ),
+            self._theme(
+                2,
+                "Robotics Equipment",
+                "Industrial",
+                "Robotics equipment, automation hardware, and industrial machines.",
+                ["SYM5"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertFalse(draft["suggested_existing_themes"])
+        self.assertEqual(draft["possible_new_theme"], "Drone Components")
+
+    def test_description_first_phrase_fallback_survives_weak_anchor_inference(self):
+        profile = {
+            "company_name": "UAS Fabrication",
+            "description": "Builds UAV components and unmanned systems equipment for domestic industrial customers.",
+            "sic_description": "Industrial components",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertTrue(draft["candidate_theme_ideas"])
+        self.assertTrue(
+            {"UAV Components", "Unmanned Systems", "Unmanned Systems Equipment"}
+            & set(draft["candidate_theme_ideas"])
+        )
+
+    def test_description_first_module_phrase_generates_component_style_idea(self):
+        profile = {
+            "company_name": "Airframe Modules",
+            "description": "Builds UAV modules for unmanned aircraft systems integrators.",
+            "sic_description": "Industrial modules",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertIn("UAV Components", draft["candidate_theme_ideas"])
+
+    def test_description_first_extracts_generic_product_phrases_when_anchors_are_weak(self):
+        profile = {
+            "company_name": "WaterWorks Fabrication",
+            "description": "Builds desalination modules and water treatment equipment for industrial plants.",
+            "sic_description": "Industrial equipment",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertTrue(
+            {"Desalination Components", "Water Treatment Equipment"}
+            & set(draft["candidate_theme_ideas"])
+        )
+
+    def test_description_first_ignores_generic_business_model_product_phrases(self):
+        profile = {
+            "company_name": "Workflow Core",
+            "description": "Provides mission critical systems and workflow platforms for enterprise operations.",
+            "sic_description": "Enterprise software",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertNotIn("Mission Critical Systems", draft["candidate_theme_ideas"])
+        self.assertNotIn("Workflow Systems", draft["candidate_theme_ideas"])
+
+    def test_description_first_does_not_treat_generic_fintech_platform_as_direct_fit(self):
+        profile = {
+            "company_name": "Broad Finance Platform",
+            "description": "Operates a fintech platform for consumers and merchants.",
+            "sic_description": "Financial technology platform",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Digital Payments",
+                "Fintech",
+                "Payment processing networks, merchant acceptance, and digital wallet infrastructure.",
+                ["PYPL"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertFalse(
+            any(item.get("fit_label") == "direct_fit" for item in draft.get("suggested_existing_themes") or [])
+        )
+        self.assertNotEqual(draft["recommended_action"], "add_to_existing_theme_review")
+
+    def test_description_first_optical_component_descriptors_beat_ai_and_5g_adjacency(self):
+        profile = {
+            "company_name": "Photon Link",
+            "description": "Designs optical modules, optical interconnect engines, and fiber-optic networking products for hyperscale networking.",
+            "sic_description": "Networking components",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "AI Infrastructure",
+                "Compute",
+                "Suppliers of AI data-center compute infrastructure, hyperscale servers, and GPU cluster systems.",
+                ["NVDA"],
+            ),
+            self._theme(
+                2,
+                "5G Infrastructure",
+                "Telecom",
+                "5G radios, carrier deployments, telecom infrastructure, and broadband networking rollouts.",
+                ["ERIC"],
+            ),
+            self._theme(
+                3,
+                "Optical Interconnects",
+                "Networking",
+                "Optical modules, interconnect engines, and fiber networking components for high-speed data links.",
+                ["CIEN"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Optical Interconnects")
+        self.assertEqual(draft["suggested_existing_themes"][0]["fit_label"], "direct_fit")
+        self.assertIn("Optical Interconnects", draft["validation_debug"]["business_descriptors"])
+
+    def test_description_first_optical_platform_with_process_language_does_not_imply_materials(self):
+        profile = {
+            "company_name": "Interposer Optics",
+            "description": "Develops optical interposers and photonics platforms using advanced semiconductor packaging and wafer-level manufacturing techniques.",
+            "sic_description": "Optical networking equipment",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Semiconductor Materials",
+                "Materials",
+                "Makers of semiconductor materials, wafers, substrates, compounds, coatings, and consumable inputs.",
+                ["ENTG"],
+            ),
+            self._theme(
+                2,
+                "Optical Interconnects",
+                "Networking",
+                "Optical interposers, photonic interconnect platforms, and fiber networking modules.",
+                ["COHR"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Optical Interconnects")
+        self.assertFalse(any(item["theme_name"] == "Semiconductor Materials" for item in draft["suggested_existing_themes"]))
+
+    def test_description_first_digital_asset_infrastructure_prefers_missing_category_over_cloud_or_cyber(self):
+        profile = {
+            "company_name": "Atlas Exchange Infra",
+            "description": "Provides digital asset exchange infrastructure, institutional crypto custody, and market infrastructure software for trading venues.",
+            "sic_description": "Financial software",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Cybersecurity",
+                "Software",
+                "Cybersecurity platforms, identity security, and enterprise threat management.",
+                ["PANW"],
+            ),
+            self._theme(
+                2,
+                "Cloud Software",
+                "Software",
+                "Cloud software platforms, workflow tooling, and enterprise observability applications.",
+                ["DDOG"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Digital Asset Market Infrastructure")
+        self.assertFalse(draft["suggested_existing_themes"])
+        self.assertIn("Digital Asset Market Infrastructure", draft["validation_debug"]["business_descriptors"])
+
+    def test_description_first_plain_language_business_descriptors_stay_intuitive_across_business_types(self):
+        cases = [
+            (
+                {
+                    "company_name": "Photon Link",
+                    "description": "Designs optical modules and fiber-optic networking products for high-speed data links.",
+                    "sic_description": "Networking components",
+                },
+                "Optical Interconnects",
+            ),
+            (
+                {
+                    "company_name": "Atlas Exchange Infra",
+                    "description": "Provides digital asset exchange infrastructure, institutional crypto custody, and market infrastructure software for trading venues.",
+                    "sic_description": "Financial software",
+                },
+                "Digital Asset Market Infrastructure",
+            ),
+            (
+                {
+                    "company_name": "Frontier Basin Energy",
+                    "description": "Acquires, explores, develops, and produces oil and natural gas assets with operated interests, reserves, wells, and acreage in onshore basins.",
+                    "sic_description": "Oil and gas exploration and production",
+                },
+                "Oil & Gas Exploration & Production",
+            ),
+        ]
+
+        for profile, expected_descriptor in cases:
+            draft = _description_theme_generation_draft(self._candidate(), [], profile)
+            descriptors = list(draft["validation_debug"]["business_descriptors"])
+            self.assertLessEqual(len(descriptors), 3)
+            self.assertIn(expected_descriptor, descriptors)
+
+    def test_description_first_stablecoin_infrastructure_beats_generic_payments_as_primary_descriptor(self):
+        profile = {
+            "company_name": "Ledger Dollar Network",
+            "description": "Builds stablecoin infrastructure and tokenized dollar settlement networks for enterprise treasury and cross-border payment flows.",
+            "sic_description": "Payments infrastructure",
+        }
+        catalog = [
+            self._theme(1, "Digital Payments", "Fintech", "Digital payment platforms, merchant checkout, and transaction processing.", ["PYPL"]),
+            self._theme(2, "Fintech Payments", "Fintech", "Fintech payment applications and merchant transaction software.", ["SQ"]),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Stablecoins / Digital Assets Infrastructure")
+        self.assertEqual(draft["candidate_theme_ideas"][0], "Stablecoins / Digital Assets Infrastructure")
+        self.assertNotIn("Digital Payments", draft["candidate_theme_ideas"][:2])
+
+    def test_description_first_blockchain_payment_rails_suppress_cloud_devops_drift(self):
+        profile = {
+            "company_name": "Chain Settlement Rail",
+            "description": "Provides blockchain payments rails and digital asset settlement infrastructure for enterprises moving funds across on-chain payment networks.",
+            "sic_description": "Blockchain payments infrastructure",
+        }
+        catalog = [
+            self._theme(1, "Cloud Software", "Software", "Cloud software platforms, workflow tooling, and enterprise observability applications.", ["DDOG"]),
+            self._theme(2, "Cloud DevOps", "Software", "Cloud-native DevOps, monitoring, and observability platforms.", ["DDOG"]),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertIn(draft["possible_new_theme"], {"Blockchain Payments", "Crypto Payments Infrastructure"})
+        self.assertFalse(draft["suggested_existing_themes"])
+        self.assertNotIn("Cloud Software", draft["candidate_theme_ideas"])
+
+    def test_description_first_stablecoin_infrastructure_beats_fintech_banking_adjacency(self):
+        profile = {
+            "company_name": "Reserve Rail",
+            "description": "Operates stablecoin infrastructure and tokenized dollar rails that connect exchanges, wallets, and enterprise settlement counterparties.",
+            "sic_description": "Digital asset infrastructure",
+        }
+        catalog = [
+            self._theme(1, "Digital Banking", "Fintech", "Digital banking apps, neobanks, and consumer account services.", ["SOFI"]),
+            self._theme(2, "Consumer Fintech", "Fintech", "Consumer financial services platforms, neobanks, and personal finance apps.", ["NU"]),
+            self._theme(3, "Fintech Payments", "Fintech", "Merchant payments, checkout software, and fintech transaction platforms.", ["SQ"]),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Stablecoins / Digital Assets Infrastructure")
+        self.assertFalse(draft["suggested_existing_themes"])
+
+    def test_description_first_digital_asset_infrastructure_beats_weak_generic_fintech_and_software_when_governed_coverage_is_weak(self):
+        profile = {
+            "company_name": "Token Rail Systems",
+            "description": "Provides digital asset financial infrastructure, blockchain payments connectivity, and settlement infrastructure for tokenized dollar transfers.",
+            "sic_description": "Financial infrastructure software",
+        }
+        catalog = [
+            self._theme(1, "Digital Payments", "Fintech", "Digital payment platforms and merchant transaction processing.", ["PYPL"]),
+            self._theme(2, "Cloud Software", "Software", "Cloud workflow software and observability tooling for enterprises.", ["DDOG"]),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertIn(draft["possible_new_theme"], {"Stablecoins / Digital Assets Infrastructure", "Blockchain Payments", "Crypto Payments Infrastructure"})
+        self.assertFalse(draft["suggested_existing_themes"])
+        self.assertTrue(
+            {"Stablecoins / Digital Assets Infrastructure", "Blockchain Payments", "Crypto Payments Infrastructure"}
+            & set(draft["validation_debug"]["business_descriptors"])
+        )
+
+    def test_description_first_connected_operations_platform_synthesizes_from_asset_and_fleet_software_language(self):
+        profile = {
+            "company_name": "FleetMesh",
+            "description": "Provides a software platform for connected assets, fleet vehicles, equipment monitoring, operations workflow data, and telematics integrations with third-party systems.",
+            "sic_description": "Industrial software platform",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["possible_new_theme"], "IoT / Connected Operations Platform")
+        self.assertIn("IoT / Connected Operations Platform", draft["validation_debug"]["business_descriptors"])
+
+    def test_description_first_connected_operations_platform_outranks_cloud_and_device_fragments(self):
+        profile = {
+            "company_name": "OpsGrid",
+            "description": "Builds a software platform for connected assets, vehicles, fleet operations, telematics, equipment monitoring, and workflow data across physical operations.",
+            "sic_description": "Connected operations software",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["candidate_theme_ideas"][0], "IoT / Connected Operations Platform")
+        self.assertNotIn("Enterprise Software Tooling", draft["candidate_theme_ideas"][:2])
+        self.assertNotIn("Connected Devices", draft["candidate_theme_ideas"][:2])
+
+    def test_description_first_connected_operations_platform_beats_cloud_software_as_primary_fit(self):
+        profile = {
+            "company_name": "OpsGrid",
+            "description": "Builds a software platform for connected assets, fleets, vehicle telematics, equipment monitoring, and workflow data across field operations.",
+            "sic_description": "Industrial IoT software",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Cloud Software",
+                "Software",
+                "Cloud software platforms, workflow tooling, and enterprise observability applications.",
+                ["DDOG"],
+            ),
+            self._theme(
+                2,
+                "Industrial IoT Platforms",
+                "Industrial Software",
+                "Industrial IoT software platforms for connected assets, telematics, fleet operations, and equipment monitoring.",
+                ["SAMS"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        if draft["suggested_existing_themes"]:
+            self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Industrial IoT Platforms")
+        else:
+            self.assertEqual(draft["possible_new_theme"], "IoT / Connected Operations Platform")
+        self.assertFalse(any(item["theme_name"] == "Cloud Software" and item["fit_label"] == "direct_fit" for item in draft["suggested_existing_themes"]))
+
+    def test_description_first_connected_operations_platform_suppresses_unrelated_geography_and_apparel_noise(self):
+        profile = {
+            "company_name": "OpsGrid",
+            "description": "Builds a software platform for connected assets, fleets, vehicle telematics, equipment monitoring, and workflow data across field operations.",
+            "sic_description": "Industrial IoT software",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "European Apparel",
+                "Consumer",
+                "European apparel brands, premium fashion labels, and luxury retail.",
+                ["N/A"],
+            ),
+            self._theme(
+                2,
+                "Asia Luxury",
+                "Consumer",
+                "Asian luxury demand, premium retail, apparel, and fashion houses.",
+                ["N/A"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertFalse(draft["suggested_existing_themes"])
+        self.assertEqual(draft["possible_new_theme"], "IoT / Connected Operations Platform")
+        self.assertTrue(all(not item["actionable"] for item in draft["validation_debug"]["evaluated_matches"]))
+
+    def test_description_first_upstream_ep_beats_lng_and_energy_transition_drift(self):
+        profile = {
+            "company_name": "Frontier Basin Energy",
+            "description": "Acquires, explores, develops, and produces oil and natural gas assets with operated interests, reserves, wells, and acreage in onshore basins.",
+            "sic_description": "Oil and gas exploration and production",
+        }
+        catalog = [
+            self._theme(1, "LNG", "Energy", "Liquefied natural gas export infrastructure and LNG terminals.", ["LNG"]),
+            self._theme(2, "Energy Transition", "Energy", "Energy transition platforms across decarbonization, renewables, and clean energy.", ["NEE"]),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Oil & Gas Exploration & Production")
+        self.assertFalse(draft["suggested_existing_themes"])
+
+    def test_description_first_acquisition_exploration_development_and_production_surfaces_upstream_missing_category(self):
+        profile = {
+            "company_name": "Onshore Resource Partners",
+            "description": "Focuses on the acquisition, exploration, development, and production of oil and gas properties, operated interests, and working interests across onshore assets.",
+            "sic_description": "Oil and gas properties",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Oil & Gas Exploration & Production")
+        self.assertEqual(draft["possible_new_theme_category"], "Oil & Gas / Upstream")
+
+    def test_description_first_unsupported_regional_buckets_do_not_survive_without_explicit_support(self):
+        profile = {
+            "company_name": "General Upstream Energy",
+            "description": "Explores, develops, and produces oil and natural gas reserves from onshore acreage, operated wells, and producing properties.",
+            "sic_description": "Upstream oil and gas",
+        }
+        catalog = [
+            self._theme(1, "Permian Basin", "Energy", "Permian Basin producers and acreage operators.", ["FANG"]),
+            self._theme(2, "Appalachia Gas", "Energy", "Appalachia basin natural gas producers and gathering assets.", ["EQT"]),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertFalse(draft["suggested_existing_themes"])
+        self.assertEqual(draft["possible_new_theme"], "Oil & Gas Exploration & Production")
+
+    def test_description_first_natural_gas_can_be_secondary_without_replacing_broader_upstream_ep(self):
+        profile = {
+            "company_name": "Heritage Upstream",
+            "description": "Acquires and develops oil and natural gas assets and produces from operated wells, reserves, and working interests across onshore properties.",
+            "sic_description": "Oil and gas production",
+        }
+        catalog = [
+            self._theme(1, "Natural Gas", "Energy", "Natural gas production and gas-focused upstream operators.", ["EQT"]),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["possible_new_theme"], "Oil & Gas Exploration & Production")
+        self.assertFalse(any(item.get("theme_name") == "Natural Gas" and item.get("fit_label") == "direct_fit" for item in draft["suggested_existing_themes"]))
+
+    def test_description_first_consumer_banking_app_surfaces_missing_fintech_category(self):
+        profile = {
+            "company_name": "PocketBank",
+            "description": "Offers a consumer banking app with overdraft protection, credit building, short-term liquidity, and financial management tools.",
+            "sic_description": "Consumer financial services",
+        }
+        catalog = []
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertIn(draft["possible_new_theme"], {"Consumer Fintech", "Digital Banking"})
+        self.assertTrue({"Consumer Fintech", "Digital Banking"} & set(draft["candidate_theme_ideas"]))
+
+    def test_description_first_memory_and_storage_suppresses_materials_and_robotics_adjacency(self):
+        profile = {
+            "company_name": "FlashCore",
+            "description": "Designs NAND flash memory semiconductors, storage controllers, and SSD storage devices for enterprise systems.",
+            "sic_description": "Memory and storage products",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Semiconductor Materials",
+                "Materials",
+                "Makers of semiconductor wafers, chemicals, substrates, and consumables.",
+                ["ENTG"],
+            ),
+            self._theme(
+                2,
+                "Industrial Robotics",
+                "Automation",
+                "Industrial robotics, factory automation, and autonomous manufacturing systems.",
+                ["ROK"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertIn(draft["possible_new_theme"], {"Memory & Storage", "Semiconductor Memory", "Data Storage"})
+        self.assertFalse(draft["suggested_existing_themes"])
+
+    def test_description_first_sdr_and_autonomous_systems_suppress_cloud_clusters(self):
+        profile = {
+            "company_name": "Spectrum Autonomous",
+            "description": "Builds software-defined radio systems and autonomous systems hardware for wireless communications infrastructure and unmanned platforms.",
+            "sic_description": "Wireless communications equipment",
+        }
+        catalog = [
+            self._theme(1, "Cloud Computing", "Software", "Cloud computing platforms and enterprise infrastructure software.", ["MSFT"]),
+            self._theme(2, "Cloud Infrastructure", "Software", "Cloud infrastructure, observability, and DevOps tooling.", ["AMZN"]),
+            self._theme(3, "Cloud Software", "Software", "Cloud software applications and workflow analytics.", ["DDOG"]),
+            self._theme(4, "Cloud DevOps", "Software", "Cloud-native DevOps, monitoring, and observability platforms.", ["DDOG"]),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertFalse(draft["suggested_existing_themes"])
+        self.assertTrue(
+            {"Software-Defined Radio", "Autonomous Robotics / Uncrewed Systems", "Wireless Communications Infrastructure"}
+            & set(draft["candidate_theme_ideas"])
+        )
+        self.assertIn("Software-Defined Radio", draft["validation_debug"]["business_descriptors"])
+        self.assertIn("Autonomous Robotics / Uncrewed Systems", draft["validation_debug"]["business_descriptors"])
+
+    def test_description_first_collapses_overlapping_autonomy_labels_into_one_primary_bucket(self):
+        profile = {
+            "company_name": "AeroMesh Robotics",
+            "description": "Builds autonomous robotics and uncrewed-systems hardware for defense and industrial operators.",
+            "sic_description": "Autonomous systems equipment",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+        descriptors = list(draft["validation_debug"]["business_descriptors"])
+
+        self.assertIn("Autonomous Robotics / Uncrewed Systems", descriptors)
+        self.assertEqual(descriptors[0], "Autonomous Robotics / Uncrewed Systems")
+        self.assertNotIn("Autonomous Systems", descriptors)
+        self.assertNotIn("Autonomous Vehicles", descriptors)
+        self.assertEqual(draft["possible_new_theme"], "Autonomous Robotics / Uncrewed Systems")
+
+    def test_description_first_demotes_autonomous_vehicles_when_description_is_really_uncrewed(self):
+        profile = {
+            "company_name": "SkyFleet",
+            "description": "Develops uncrewed-systems hardware and autonomous flight platforms for unmanned missions.",
+            "sic_description": "Autonomous vehicle systems",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["possible_new_theme"], "Autonomous Robotics / Uncrewed Systems")
+        self.assertNotIn("Autonomous Vehicles", draft["validation_debug"]["business_descriptors"])
+        self.assertNotIn("Autonomous Vehicles", draft["candidate_theme_ideas"][:3])
+
+    def test_description_first_preserves_sdr_as_distinct_secondary_pillar_beside_autonomy(self):
+        profile = {
+            "company_name": "Spectrum Autonomous",
+            "description": "Builds software-defined radio systems and autonomous robotics hardware for wireless communications equipment and unmanned platforms.",
+            "sic_description": "Wireless communications equipment",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+        descriptors = list(draft["validation_debug"]["business_descriptors"])
+
+        self.assertEqual(descriptors[0], "Autonomous Robotics / Uncrewed Systems")
+        self.assertIn("Software-Defined Radio", descriptors)
+        self.assertNotIn("Wireless Communications Infrastructure", descriptors[:1])
+
+    def test_description_first_reduces_autonomy_fragmentation_without_losing_second_pillar(self):
+        profile = {
+            "company_name": "MeshFlight",
+            "description": "Builds autonomous systems, drone platforms, robotics hardware, and software-defined radio equipment for wireless communications networks.",
+            "sic_description": "Communications equipment",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+        ideas = list(draft["candidate_theme_ideas"])
+
+        self.assertEqual(ideas[0], "Autonomous Robotics / Uncrewed Systems")
+        self.assertIn("Software-Defined Radio", ideas[:3])
+        self.assertFalse({"Autonomous Systems", "Autonomous Vehicles", "AI - Robotics"} & set(ideas[:3]))
+
+    def test_description_first_generic_manufacturing_language_alone_does_not_unlock_materials(self):
+        profile = {
+            "company_name": "Process Optics",
+            "description": "Uses proprietary semiconductor manufacturing processes, packaging techniques, and precision fabrication to build optical networking engines.",
+            "sic_description": "Optical engines",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Semiconductor Materials",
+                "Materials",
+                "Suppliers of semiconductor wafers, substrates, coatings, compounds, and process chemicals.",
+                ["ENTG"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertNotIn("Semiconductor Materials", draft["candidate_theme_ideas"])
+        self.assertFalse(draft["suggested_existing_themes"])
+
+    def test_description_first_damps_same_family_weak_umbrella_clusters(self):
+        profile = {
+            "company_name": "Spectrum Autonomous",
+            "description": "Builds software-defined radio systems and autonomous systems hardware for wireless communications infrastructure and unmanned platforms.",
+            "sic_description": "Wireless communications equipment",
+        }
+        catalog = [
+            self._theme(1, "Cloud Computing", "Software", "Cloud computing platforms and enterprise infrastructure software.", ["MSFT"]),
+            self._theme(2, "Cloud Infrastructure", "Software", "Cloud infrastructure, observability, and DevOps tooling.", ["AMZN"]),
+            self._theme(3, "Cloud Software", "Software", "Cloud software applications and workflow analytics.", ["DDOG"]),
+            self._theme(4, "Cybersecurity", "Software", "Cybersecurity platforms, threat analytics, and security tooling.", ["PANW"]),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+        evaluated = draft["validation_debug"]["evaluated_matches"]
+        cloud_actionable = [item for item in evaluated if item["actionable"] and "Cloud" in item["theme_name"]]
+
+        self.assertLessEqual(len(cloud_actionable), 1)
+
+    def test_description_first_clear_descriptor_surfaces_missing_category_instead_of_unclear(self):
+        profile = {
+            "company_name": "Retail Water Systems",
+            "description": "Builds water treatment equipment and desalination modules for municipal and industrial customers.",
+            "sic_description": "Water equipment",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertTrue(draft["possible_new_theme"])
+        self.assertTrue(draft["validation_debug"]["business_descriptors"])
+        self.assertEqual(draft["validation_debug"]["possible_new_theme_decision"]["status"], "selected_no_actionable_governed_match")
+
+    def test_description_first_does_not_award_direct_fit_for_broad_end_market_adjacency(self):
+        profile = {
+            "company_name": "Photon Link",
+            "description": "Designs optical modules and fiber-optic networking products for hyperscale data-center networking.",
+            "sic_description": "Networking components",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "AI Infrastructure",
+                "Compute",
+                "AI data-center servers, GPU systems, and hyperscale compute infrastructure.",
+                ["NVDA"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertFalse(any(item.get("fit_label") == "direct_fit" for item in draft.get("suggested_existing_themes") or []))
+        self.assertEqual(draft["possible_new_theme"], "Optical Interconnects")
+
+    def test_description_first_mining_processing_and_shipping_does_not_return_domain_unclear(self):
+        profile = {
+            "company_name": "Frontier Tungsten",
+            "description": "Advances mine assets, mineral processing, and shipping of tungsten concentrate from its tungsten project portfolio.",
+            "sic_description": "Mining projects",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertNotEqual(draft["domain_anchor"], "unclear")
+        self.assertEqual(draft["domain_anchor"], "mining/resources")
+        self.assertTrue(draft["possible_new_theme"])
+
+    def test_description_first_extracts_commodity_specific_mining_descriptor(self):
+        profile = {
+            "company_name": "Frontier Tungsten",
+            "description": "Develops tungsten mine projects and processes tungsten ore into concentrate for shipment.",
+            "sic_description": "Mining and processing",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertIn("Tungsten Mining", draft["candidate_theme_ideas"])
+        self.assertIn("Tungsten Mining", draft["validation_debug"]["business_descriptors"])
+
+    def test_description_first_mining_process_language_does_not_collapse_into_generic_materials(self):
+        profile = {
+            "company_name": "Frontier Tungsten",
+            "description": "Owns tungsten mine assets, mineral processing facilities, and ships tungsten concentrate from operating projects.",
+            "sic_description": "Mining operations",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "Semiconductor Materials",
+                "Materials",
+                "Makers of semiconductor wafers, substrates, coatings, compounds, and process chemicals.",
+                ["ENTG"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertNotIn("Semiconductor Materials", draft["candidate_theme_ideas"])
+        self.assertFalse(draft["suggested_existing_themes"])
+
+    def test_description_first_clear_mining_descriptor_beats_domain_unclear_when_governed_coverage_is_weak(self):
+        profile = {
+            "company_name": "Frontier Tungsten",
+            "description": "Operates mine projects, mineral processing, and concentrate shipping tied to tungsten ore production.",
+            "sic_description": "Metals mining",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertIn(draft["possible_new_theme"], {"Tungsten Mining", "Critical Minerals Mining", "Metals & Mining"})
+        self.assertEqual(draft["validation_debug"]["possible_new_theme_decision"]["status"], "selected_no_actionable_governed_match")
+
+    def test_description_first_emits_proposed_category_for_clear_missing_theme_case(self):
+        profile = {
+            "company_name": "PocketBank",
+            "description": "Offers a consumer banking app with overdraft protection, credit building, short-term liquidity, and financial management tools.",
+            "sic_description": "Consumer financial services",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme_category"], "Financial Technology")
+
+    def test_description_first_additive_manufacturing_surfaces_coherent_missing_category(self):
+        profile = {
+            "company_name": "LayerForge",
+            "description": "Builds additive manufacturing systems and industrial 3D printers for production-scale metal part fabrication.",
+            "sic_description": "Industrial printer systems",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Additive Manufacturing")
+        self.assertEqual(draft["possible_new_theme_category"], "Additive Manufacturing / Industrial 3D Printing")
+        self.assertIn("Industrial 3D Printing", draft["validation_debug"]["business_descriptors"])
+
+    def test_description_first_named_printer_system_does_not_stay_product_name_only(self):
+        profile = {
+            "company_name": "Forge Systems",
+            "description": "Markets the Falcon production system and Atlas printer systems for additive manufacturing and industrial 3D printing customers.",
+            "sic_description": "Manufacturing systems",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["possible_new_theme"], "Additive Manufacturing")
+        self.assertFalse(str(draft["possible_new_theme"]).startswith("Falcon"))
+        self.assertFalse(str(draft["possible_new_theme"]).startswith("Atlas"))
+        self.assertIn("Industrial Manufacturing Systems", draft["validation_debug"]["business_descriptors"])
+
+    def test_description_first_industrial_manufacturing_suppresses_geography_and_luxury_drift(self):
+        profile = {
+            "company_name": "PowderPrint",
+            "description": "Provides additive manufacturing software and industrial printer systems used in factory production workflows.",
+            "sic_description": "Industrial manufacturing software",
+        }
+        catalog = [
+            self._theme(
+                1,
+                "European Luxury",
+                "Geography",
+                "European luxury brands, premium fashion houses, and high-end consumer goods.",
+                ["LVMUY"],
+            ),
+            self._theme(
+                2,
+                "Asia Luxury",
+                "Geography",
+                "Asian luxury demand, premium retail, and upscale consumer brands.",
+                ["N/A"],
+            ),
+        ]
+
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+
+        self.assertFalse(draft["suggested_existing_themes"])
+        self.assertEqual(draft["possible_new_theme_category"], "Additive Manufacturing / Industrial 3D Printing")
+        self.assertTrue(all("Luxury" not in item["theme_name"] for item in draft["validation_debug"]["evaluated_matches"] if item["actionable"]))
+
+    def test_description_first_additive_manufacturing_descriptor_beats_domain_unclear_when_coverage_is_weak(self):
+        profile = {
+            "company_name": "PrintFlow",
+            "description": "Develops manufacturing software and printer control systems for industrial 3D printers and additive manufacturing factories.",
+            "sic_description": "Manufacturing software",
+        }
+
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+
+        self.assertEqual(draft["domain_anchor"], "industrial manufacturing/additive")
+        self.assertEqual(draft["possible_new_theme"], "Additive Manufacturing")
+        self.assertEqual(draft["validation_debug"]["possible_new_theme_decision"]["status"], "selected_no_actionable_governed_match")
+
+    def test_description_first_fluence_style_energy_storage_does_not_drift_into_memory_or_luxury(self):
+        profile = {
+            "company_name": "Fluence Energy",
+            "description": (
+                "Provides energy storage products and services, recurring maintenance services, and digital applications "
+                "for renewables and storage applications. Offers grid-scale battery-based energy storage products and a "
+                "software platform that optimizes and manages renewables and storage assets."
+            ),
+            "sic_description": "Electrical industrial apparatus",
+        }
+        catalog = [
+            self._theme(1, "Energy Storage", "Energy", "Grid-scale battery storage systems and energy storage software.", ["FLNC"]),
+            self._theme(2, "Grid Infrastructure", "Energy", "Grid modernization, electrical infrastructure, and grid equipment.", ["VRT"]),
+            self._theme(3, "Renewables Software", "Energy", "Software that optimizes renewable generation, storage assets, and grid operations.", ["NXT"]),
+            self._theme(4, "Japan", "Geography", "Japan macro and equities exposure across sectors.", ["EWJ"]),
+            self._theme(5, "Europe - Luxury", "Consumer", "European luxury brands and premium fashion houses.", ["LVMUY"]),
+            self._theme(6, "Luxury & Apparel", "Consumer", "Luxury apparel, fashion, and upscale retail brands.", ["CPRI"]),
+        ]
+
+        draft = _description_theme_generation_draft(
+            self._candidate(
+                ticker="FLNC",
+                recommendation_reason="Energy storage systems, grid-scale battery storage, renewables optimization software, storage services and infrastructure.",
+            ),
+            catalog,
+            profile,
+        )
+
+        self.assertEqual(draft["domain_anchor"], "energy/grid infrastructure")
+        self.assertNotIn("Memory & Storage", draft["candidate_theme_ideas"])
+        self.assertTrue(draft["suggested_existing_themes"])
+        self.assertEqual(draft["suggested_existing_themes"][0]["theme_name"], "Energy Storage")
+        self.assertFalse({"Japan", "Europe - Luxury", "Luxury & Apparel"} & {item["theme_name"] for item in draft["suggested_existing_themes"]})
+
+    def test_description_first_energy_storage_products_do_not_trigger_memory_storage_descriptor(self):
+        profile = {
+            "company_name": "Fluence Energy",
+            "description": (
+                "Provides energy storage products, grid-scale battery storage systems, grid services, and renewables "
+                "optimization software for utility-scale storage assets."
+            ),
+            "sic_description": "Electrical industrial apparatus",
+        }
+
+        draft = _description_theme_generation_draft(
+            self._candidate(
+                ticker="FLNC",
+                recommendation_reason="Energy storage products, battery storage, dispatch software, and grid services.",
+            ),
+            [],
+            profile,
+        )
+
+        self.assertNotIn("Memory & Storage", draft["validation_debug"]["business_descriptors"])
+        self.assertEqual(draft["domain_anchor"], "energy/grid infrastructure")
+        self.assertIn("Energy Storage Systems", draft["candidate_theme_ideas"])
+
+
+class TestScannerResearchReviewPersistence(unittest.TestCase):
+    def test_save_scanner_research_review_inserts_and_updates_same_draft_context(self):
+        conn = duckdb.connect(":memory:")
+        draft = {
+            "ticker": "NVDA",
+            "generated_at": "2026-03-17 12:00:00",
+            "theme_generation_strategy": "description_theme_generation",
+            "research_mode": "heuristic_fallback",
+            "recommended_action": "watch_only",
+            "confidence": "low",
+            "possible_new_theme": "Optical Interconnects",
+            "domain_anchor": "networking/communications",
+            "dominant_business_role": "component_supplier",
+            "candidate_theme_ideas": ["Optical Interconnects", "Optical Networking"],
+            "suggested_existing_themes": [
+                {"theme_id": 7, "theme_name": "Optical Networking", "fit_label": "adjacent_fit"}
+            ],
+        }
+
+        inserted = save_scanner_research_review(
+            conn,
+            "NVDA",
+            draft,
+            outcome_class="false_positive",
+            reviewer_notes="Too broad for this role.",
+        )
+        updated = save_scanner_research_review(
+            conn,
+            "NVDA",
+            draft,
+            outcome_class="should_have_been_tentative",
+            reviewer_notes="Existing theme should stay secondary.",
+        )
+
+        stored = get_scanner_research_review(conn, "NVDA", draft)
+        count = conn.execute("select count(*) from scanner_research_reviews").fetchone()[0]
+
+        self.assertEqual(count, 1)
+        self.assertEqual(inserted["review_id"], updated["review_id"])
+        self.assertEqual(stored["outcome_class"], "should_have_been_tentative")
+        self.assertEqual(stored["reviewer_notes"], "Existing theme should stay secondary.")
+
+    def test_scanner_research_review_summary_returns_counts_and_recent_rows(self):
+        conn = duckdb.connect(":memory:")
+        first_draft = {
+            "ticker": "NVDA",
+            "generated_at": "2026-03-17 12:00:00",
+            "theme_generation_strategy": "description_theme_generation",
+            "research_mode": "heuristic_fallback",
+            "recommended_action": "watch_only",
+            "confidence": "low",
+        }
+        second_draft = {
+            "ticker": "PLTR",
+            "generated_at": "2026-03-17 12:05:00",
+            "theme_generation_strategy": "description_theme_generation",
+            "research_mode": "openai",
+            "recommended_action": "add_to_existing_theme_review",
+            "confidence": "medium",
+        }
+
+        save_scanner_research_review(conn, "NVDA", first_draft, outcome_class="false_positive", reviewer_notes="Too generic.")
+        save_scanner_research_review(conn, "PLTR", second_draft, outcome_class="direct_fit_correct", reviewer_notes="")
+
+        summary = scanner_research_review_summary(conn, limit=5)
+
+        self.assertEqual(summary["counts_by_outcome"]["false_positive"], 1)
+        self.assertEqual(summary["counts_by_outcome"]["direct_fit_correct"], 1)
+        self.assertEqual(len(summary["recent_reviews"]), 2)
+        self.assertEqual(summary["recent_reviews"][0]["ticker"], "PLTR")
+
+    def test_streamlit_cached_connection_keeps_research_review_queries_usable_across_reruns(self):
+        db_path = Path(__file__).resolve().parent / f"_tmp_research_review_cache_{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}.duckdb"
+        get_db_connection.clear()
+        try:
+            with patch("src.database.DB_PATH", db_path), patch("src.config.DB_PATH", db_path), patch("src.database._has_streamlit_script_run_context", return_value=True):
+                from src.database import init_db
+
+                init_db()
+                draft = {
+                    "ticker": "NVDA",
+                    "generated_at": "2026-03-17 12:00:00",
+                    "theme_generation_strategy": "description_theme_generation",
+                    "research_mode": "heuristic_fallback",
+                    "recommended_action": "watch_only",
+                    "confidence": "low",
+                }
+                with get_conn() as conn:
+                    save_scanner_research_review(conn, "NVDA", draft, outcome_class="false_positive", reviewer_notes="First pass")
+                with get_conn() as conn:
+                    first = get_scanner_research_review(conn, "NVDA", draft)
+                with get_conn() as conn:
+                    second = get_scanner_research_review(conn, "NVDA", draft)
+
+                self.assertIsNotNone(first)
+                self.assertEqual(first["review_id"], second["review_id"])
+        finally:
+            get_db_connection.clear()
+
+
+class TestSuggestionsWorkflow(unittest.TestCase):
+    def test_review_suggestion_reports_change_and_noop(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table theme_suggestions(
+                suggestion_id bigint primary key,
+                suggestion_type varchar,
+                status varchar,
+                source varchar,
+                rationale varchar,
+                priority varchar,
+                proposed_theme_name varchar,
+                proposed_ticker varchar,
+                existing_theme_id bigint,
+                proposed_target_theme_id bigint,
+                reviewed_at timestamp,
+                reviewer_notes varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into theme_suggestions(
+                suggestion_id, suggestion_type, status, source, rationale, priority
+            ) values (1, 'review_theme', 'pending', 'manual', '', 'medium')
+            """
+        )
+
+        changed = review_suggestion(conn, 1, "approved", "looks good")
+        stored = conn.execute("select status, reviewer_notes from theme_suggestions where suggestion_id = 1").fetchone()
+        noop = review_suggestion(conn, 1, "approved", "looks good")
+
+        self.assertTrue(bool(changed["changed"]))
+        self.assertEqual(changed["old_status"], "pending")
+        self.assertEqual(changed["new_status"], "approved")
+        self.assertEqual(stored, ("approved", "looks good"))
+        self.assertFalse(bool(noop["changed"]))
+        self.assertIn("already approved", str(noop["message"]))
+        conn.close()
+
+    def test_list_suggestions_includes_ticker_membership_context(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table theme_suggestions(
+                suggestion_id bigint primary key,
+                suggestion_type varchar,
+                status varchar,
+                source varchar,
+                rationale varchar,
+                priority varchar,
+                proposed_theme_name varchar,
+                proposed_ticker varchar,
+                existing_theme_id bigint,
+                proposed_target_theme_id bigint,
+                reviewed_at timestamp,
+                reviewer_notes varchar,
+                created_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Edge Computing', 'Emerging Tech', true)")
+        conn.execute("insert into themes values (2, 'Cloud Security', 'Technology - Software', true)")
+        conn.execute("insert into theme_membership values (1, 'CRWD')")
+        conn.execute("insert into theme_membership values (2, 'CRWD')")
+        conn.execute(
+            """
+            insert into theme_suggestions(
+                suggestion_id, suggestion_type, status, source, rationale, priority, proposed_ticker, created_at
+            ) values (1, 'review_theme', 'pending', 'manual', '', 'medium', 'CRWD', '2026-03-12 12:00:00')
+            """
+        )
+
+        out = list_suggestions(conn, status="pending")
+
+        self.assertEqual(out.iloc[0]["current_theme_names"], "Cloud Security, Edge Computing")
+        self.assertIn("Cloud Security (Technology - Software)", str(out.iloc[0]["current_membership_context"]))
+        self.assertIn("Edge Computing (Emerging Tech)", str(out.iloc[0]["current_membership_context"]))
+        self.assertIn("Emerging Tech", str(out.iloc[0]["current_categories"]))
+        conn.close()
+
+    def test_queue_page_source_exposes_single_row_selection_and_obsolete_action(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "3_Suggestions.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("Selected suggestion", content)
+        self.assertIn("Mark obsolete", content)
+        self.assertIn("Apply approved", content)
+        self.assertIn("Send preserved proposed theme to Theme Review", content)
+        self.assertIn("there is nothing governed to apply to membership yet", content)
+        self.assertIn("Create governed theme and assign ticker", content)
+        self.assertIn("prepare_post_mutation_refresh(", content)
+        self.assertIn("research_status_metadata(", content)
+        self.assertIn("Use Draft Defaults", content)
+        self.assertIn("Clear Review Selections", content)
+        self.assertIn("Current Review Selection", content)
+        self.assertIn("Compared with draft defaults:", content)
+        self.assertIn("Review readiness:", content)
+        self.assertIn("If you apply now:", content)
+        self.assertIn("If you stage now:", content)
+        self.assertIn("Stage in Theme Review", content)
+        self.assertIn("Apply Existing Themes & Start Onboarding", content)
+
+    def test_suggestions_page_defines_all_theme_ids_before_draft_generation_uses_it(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "3_Suggestions.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        definition = 'all_theme_ids = {int(row["id"]) for row in theme_options}'
+        usage = "set(all_theme_ids)"
+
+        self.assertIn(definition, content)
+        self.assertIn(usage, content)
+        self.assertLess(content.index(definition), content.index(usage))
+
+    def test_theme_and_health_pages_clear_scanner_research_state_on_theme_mutations(self):
+        themes_source = (Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py").read_text(encoding="utf-8")
+        health_source = (Path(__file__).resolve().parents[1] / "pages" / "4_Health.py").read_text(encoding="utf-8")
+
+        self.assertIn("clear_research=True", themes_source)
+        self.assertIn("clear_research=True", health_source)
+
+    def test_pages_use_post_mutation_refresh_helper_for_live_write_feedback(self):
+        themes_source = (Path(__file__).resolve().parents[1] / "pages" / "1_Themes.py").read_text(encoding="utf-8")
+        suggestions_source = (Path(__file__).resolve().parents[1] / "pages" / "3_Suggestions.py").read_text(encoding="utf-8")
+        health_source = (Path(__file__).resolve().parents[1] / "pages" / "4_Health.py").read_text(encoding="utf-8")
+
+        self.assertIn("prepare_post_mutation_refresh(", themes_source)
+        self.assertIn("prepare_post_mutation_refresh(", suggestions_source)
+        self.assertIn("prepare_post_mutation_refresh(", health_source)
+
+    def test_health_page_source_adds_detail_queue_shortcuts_and_status(self):
+        health_source = (Path(__file__).resolve().parents[1] / "pages" / "4_Health.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _remove_theme_from_audit_queue(", health_source)
+        self.assertIn("def _focus_audit_queue_on_theme(", health_source)
+        self.assertIn("def _queue_status_summary(", health_source)
+        self.assertIn("Audit queue status: in_queue=", health_source)
+        self.assertIn('"Add to queue"', health_source)
+        self.assertIn('"Remove from queue"', health_source)
+        self.assertIn('"Queue only this theme"', health_source)
+        self.assertIn("Focused the audit queue on", health_source)
+
+    def test_health_page_source_clarifies_operational_action_feedback(self):
+        health_source = (Path(__file__).resolve().parents[1] / "pages" / "4_Health.py").read_text(encoding="utf-8")
+
+        self.assertIn("Hydration scope: selected=", health_source)
+        self.assertIn("Reconstruction scope: selected=", health_source)
+        self.assertIn("Ready now=`", health_source)
+        self.assertIn("Targeted current snapshot hydration:", health_source)
+        self.assertIn("Current market/scanner caches were cleared; the onboarding table below reruns against refreshed state.", health_source)
+        self.assertIn("Downstream refresh cleared for", health_source)
+        self.assertIn('THEME_HEALTH_FEEDBACK_KEY = "theme_health_feedback"', health_source)
+        self.assertIn("render_feedback_message(st.session_state, THEME_HEALTH_FEEDBACK_KEY)", health_source)
+        self.assertIn('prepare_post_mutation_refresh(\n                        st.session_state,\n                        THEME_HEALTH_FEEDBACK_KEY,', health_source)
+
+    def test_fetch_data_source_no_longer_uses_datetime_utcnow(self):
+        fetch_data_source = (Path(__file__).resolve().parents[1] / "src" / "fetch_data.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("datetime.utcnow()", fetch_data_source)
+        self.assertIn("datetime.now(timezone.utc)", fetch_data_source)
+
+    def test_update_suggestion_status_supports_obsolete_from_selected_row_path(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table theme_suggestions(
+                suggestion_id bigint primary key,
+                suggestion_type varchar,
+                status varchar,
+                source varchar,
+                rationale varchar,
+                priority varchar,
+                proposed_theme_name varchar,
+                proposed_ticker varchar,
+                existing_theme_id bigint,
+                proposed_target_theme_id bigint,
+                reviewed_at timestamp,
+                reviewer_notes varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into theme_suggestions(
+                suggestion_id, suggestion_type, status, source, rationale, priority
+            ) values (1, 'review_theme', 'rejected', 'manual', '', 'medium')
+            """
+        )
+
+        changed = update_suggestion_status(conn, 1, "obsolete", "superseded")
+        stored = conn.execute("select status, reviewer_notes from theme_suggestions where suggestion_id = 1").fetchone()
+
+        self.assertTrue(bool(changed["changed"]))
+        self.assertEqual(changed["new_status"], "obsolete")
+        self.assertEqual(stored, ("obsolete", "superseded"))
+        conn.close()
+
+    def test_follow_up_action_is_not_available_without_preserved_proposed_new_theme(self):
+        row_without_preserved_theme = {
+            "source": "scanner_audit",
+            "suggestion_type": "review_theme",
+            "status": "applied",
+            "custom_new_theme_names": "",
+            "proposed_theme_name": "",
+        }
+        row_with_preserved_theme = {
+            "source": "scanner_audit",
+            "suggestion_type": "review_theme",
+            "status": "applied",
+            "custom_new_theme_names": "Data Center Optics",
+        }
+
+        self.assertFalse(can_follow_up_applied_scanner_audit_review_row(row_without_preserved_theme))
+        self.assertTrue(can_follow_up_applied_scanner_audit_review_row(row_with_preserved_theme))
+
+    def test_can_apply_queue_suggestion_row_requires_existing_governed_themes_for_review_theme(self):
+        approved_governed_row = {
+            "status": "approved",
+            "suggestion_type": "review_theme",
+            "selected_existing_theme_names": "AI - Infrastructure",
+            "custom_new_theme_names": "Data Center Optics",
+        }
+        approved_new_theme_only_row = {
+            "status": "approved",
+            "suggestion_type": "review_theme",
+            "selected_existing_theme_names": "",
+            "custom_new_theme_names": "Data Center Optics",
+        }
+
+        self.assertTrue(can_apply_queue_suggestion_row(approved_governed_row))
+        self.assertFalse(can_apply_queue_suggestion_row(approved_new_theme_only_row))
+
+    def test_fast_path_action_requires_approved_review_theme_with_proposed_theme_and_ticker(self):
+        eligible_row = {
+            "status": "approved",
+            "suggestion_type": "review_theme",
+            "proposed_ticker": "AAOI",
+            "custom_new_theme_names": "Data Center Optics",
+        }
+        missing_ticker = {
+            "status": "approved",
+            "suggestion_type": "review_theme",
+            "custom_new_theme_names": "Data Center Optics",
+        }
+        pending_row = {
+            "status": "pending",
+            "suggestion_type": "review_theme",
+            "proposed_ticker": "AAOI",
+            "custom_new_theme_names": "Data Center Optics",
+        }
+
+        self.assertTrue(can_fast_path_create_governed_theme_row(eligible_row))
+        self.assertFalse(can_fast_path_create_governed_theme_row(missing_ticker))
+        self.assertFalse(can_fast_path_create_governed_theme_row(pending_row))
+
+
+class TestScannerAuditProposedNewThemePersistence(unittest.TestCase):
+    @staticmethod
+    def _candidate_summary_df(ticker: str = "AAOI") -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "ticker": ticker,
+                    "source_labels": "scanner_audit",
+                    "recommendation": "review for addition",
+                    "recommendation_reason": "description-first audit",
+                    "persistence_score": 3,
+                    "observed_days": 7,
+                    "observations_last_5d": 3,
+                    "observations_last_10d": 4,
+                    "current_streak": 2,
+                    "distinct_scanner_count": 1,
+                    "first_seen": "2026-03-10",
+                    "last_seen": "2026-03-17",
+                    "scanners": "Growth",
+                    "metadata_basis": "test",
+                }
+            ]
+        )
+
+    @staticmethod
+    def _setup_scanner_audit_tables(conn):
+        conn.execute("create sequence if not exists suggestion_id_seq")
+        conn.execute("create sequence if not exists themes_id_seq")
+        conn.execute("create table themes(id bigint primary key, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+        conn.execute(
+            """
+            create table scanner_hit_history(
+                normalized_ticker varchar,
+                observed_date date,
+                scanner_name varchar,
+                source_label varchar,
+                scanner_name_inferred boolean,
+                scanner_name_basis varchar,
+                observed_date_inferred boolean,
+                observed_date_basis varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table scanner_candidate_review_state(
+                normalized_ticker varchar primary key,
+                review_state varchar,
+                review_note varchar,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table theme_suggestions(
+                suggestion_id bigint primary key default nextval('suggestion_id_seq'),
+                suggestion_type varchar not null,
+                status varchar not null default 'pending',
+                created_at timestamp not null default current_timestamp,
+                reviewed_at timestamp,
+                source varchar not null,
+                rationale varchar,
+                proposed_theme_name varchar,
+                proposed_theme_category varchar,
+                proposed_ticker varchar,
+                existing_theme_id bigint,
+                proposed_target_theme_id bigint,
+                reviewer_notes varchar,
+                priority varchar not null default 'medium',
+                source_context_json varchar,
+                source_updated_at timestamp
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table governed_ticker_onboarding(
+                ticker varchar primary key,
+                added_at timestamp not null default current_timestamp,
+                onboarding_source varchar not null,
+                history_readiness_status varchar not null default 'unknown',
+                backfill_status varchar not null default 'not_needed',
+                last_backfill_attempt_at timestamp,
+                last_backfill_error varchar,
+                downstream_refresh_needed boolean not null default false,
+                history_row_count bigint not null default 0,
+                history_target_days bigint not null default 30,
+                history_market_data_source varchar,
+                history_latest_trading_date date,
+                updated_at timestamp not null default current_timestamp
+            )
+            """
+        )
+
+    @staticmethod
+    def _insert_scanner_hit_history(conn, ticker: str = "AAOI") -> None:
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                normalized_ticker, observed_date, scanner_name, source_label,
+                scanner_name_inferred, scanner_name_basis, observed_date_inferred, observed_date_basis
+            ) values
+                (?, '2026-03-15', 'Growth', 'scanner_audit', false, 'file_column', false, 'file_column'),
+                (?, '2026-03-16', 'Growth', 'scanner_audit', false, 'file_column', false, 'file_column'),
+                (?, '2026-03-17', 'Growth', 'scanner_audit', false, 'file_column', false, 'file_column')
+            """,
+            [ticker, ticker, ticker],
+        )
+
+    def test_manual_proposed_new_theme_persists_through_send_to_theme_review(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        row = conn.execute(
+            "select proposed_theme_name, proposed_theme_category, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+        queue = list_suggestions(conn, status="pending")
+
+        self.assertEqual(row[0], "Data Center Optics")
+        self.assertEqual(row[1], "Optical Networking")
+        self.assertIn("Data Center Optics", str(row[2]))
+        self.assertEqual(str(queue.iloc[0]["custom_new_theme_names"]), "Data Center Optics")
+        self.assertEqual(str(queue.iloc[0]["proposed_new_theme_category"]), "Optical Networking")
+        conn.close()
+
+    def test_promotion_succeeds_with_only_a_proposed_new_theme(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics"},
+                custom_new_themes=["Data Center Optics"],
+            )
+
+        row = conn.execute(
+            "select proposed_theme_name, proposed_theme_category from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+
+        self.assertEqual(row, ("Data Center Optics", None))
+        conn.close()
+
+    def test_promotion_succeeds_with_proposed_new_theme_and_category_without_existing_theme(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        queue = list_suggestions(conn, status="pending")
+
+        self.assertEqual(str(queue.iloc[0]["custom_new_theme_names"]), "Data Center Optics")
+        self.assertEqual(str(queue.iloc[0]["proposed_new_theme_category"]), "Optical Networking")
+        self.assertFalse(str(queue.iloc[0]["selected_existing_theme_names"] or "").strip())
+        conn.close()
+
+    def test_send_to_theme_review_with_proposed_additions_surfaces_same_saved_values_in_pending_and_approved_views(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        saved_row = conn.execute(
+            "select proposed_theme_name, proposed_theme_category from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+        pending = list_suggestions(conn, status="pending")
+
+        review_suggestion(conn, int(result["suggestion_id"]), "approved", "approve staged review")
+        approved = list_suggestions(conn, status="approved")
+
+        self.assertEqual(saved_row, ("Data Center Optics", "Optical Networking"))
+        self.assertEqual(str(pending.iloc[0]["selected_existing_theme_names"]), "AI - Infrastructure")
+        self.assertEqual(str(pending.iloc[0]["custom_new_theme_names"]), "Data Center Optics")
+        self.assertEqual(str(pending.iloc[0]["proposed_new_theme_category"]), "Optical Networking")
+        self.assertEqual(str(approved.iloc[0]["selected_existing_theme_names"]), "AI - Infrastructure")
+        self.assertEqual(str(approved.iloc[0]["custom_new_theme_names"]), "Data Center Optics")
+        self.assertEqual(str(approved.iloc[0]["proposed_new_theme_category"]), "Optical Networking")
+        conn.close()
+
+    def test_selected_queue_row_details_surface_saved_proposed_theme_fields(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        queue = list_suggestions(conn, status="pending", suggestion_type="review_theme", source="scanner_audit")
+        selected_row = queue.iloc[0]
+
+        self.assertEqual(str(selected_row["proposed_ticker"]), "AAOI")
+        self.assertEqual(str(selected_row["source"]), "scanner_audit")
+        self.assertEqual(str(selected_row["suggestion_type"]), "review_theme")
+        self.assertEqual(str(selected_row["selected_existing_theme_names"]), "AI - Infrastructure")
+        self.assertEqual(str(selected_row["custom_new_theme_names"]), "Data Center Optics")
+        self.assertEqual(str(selected_row["proposed_new_theme_category"]), "Optical Networking")
+        conn.close()
+
+    def test_approved_new_theme_only_row_does_not_allow_apply_approved(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+        review_suggestion(conn, int(result["suggestion_id"]), "approved", "approve new theme only")
+        approved_queue = list_suggestions(conn, status="approved", suggestion_type="review_theme", source="scanner_audit")
+        approved_row = approved_queue.iloc[0]
+
+        self.assertFalse(can_apply_queue_suggestion_row(approved_row))
+        self.assertFalse(str(approved_row["selected_existing_theme_names"] or "").strip())
+        self.assertEqual(str(approved_row["custom_new_theme_names"]), "Data Center Optics")
+        conn.close()
+
+    def test_approved_governed_review_row_still_allows_apply_approved(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+            )
+        review_suggestion(conn, int(result["suggestion_id"]), "approved", "approve governed review")
+        approved_queue = list_suggestions(conn, status="approved", suggestion_type="review_theme", source="scanner_audit")
+        approved_row = approved_queue.iloc[0]
+
+        self.assertTrue(can_apply_queue_suggestion_row(approved_row))
+        self.assertEqual(str(approved_row["selected_existing_theme_names"]), "AI - Infrastructure")
+        conn.close()
+
+    def test_fast_path_can_create_governed_theme_and_assign_ticker_in_one_action(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+        review_suggestion(conn, int(result["suggestion_id"]), "approved", "reviewed and approved")
+        fast_path = fast_path_create_governed_theme_and_assign_ticker(conn, int(result["suggestion_id"]), "fast path")
+
+        themes = conn.execute("select name, category from themes").fetchall()
+        membership = conn.execute("select ticker from theme_membership where theme_id = ?", [int(fast_path["theme_id"])]).fetchall()
+        suggestion_row = conn.execute(
+            "select status, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+
+        self.assertIn(("Data Center Optics", "Optical Networking"), themes)
+        self.assertEqual(membership, [("AAOI",)])
+        self.assertEqual(suggestion_row[0], "applied")
+        self.assertIn('"applied_via_fast_path": true', str(suggestion_row[1]).lower())
+        self.assertIn('"created_governed_theme_name": "Data Center Optics"', str(suggestion_row[1]))
+        conn.close()
+
+    def test_fast_path_applied_ticker_no_longer_appears_uncovered_in_scanner_audit_coverage_logic(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        self._insert_scanner_hit_history(conn, "AXTI")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AXTI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AXTI",
+                research_draft={"ticker": "AXTI", "possible_new_theme": "Compound Semiconductor Materials", "possible_new_theme_category": "Semiconductor Materials"},
+                custom_new_themes=["Compound Semiconductor Materials"],
+                proposed_new_theme_category="Semiconductor Materials",
+            )
+        review_suggestion(conn, int(result["suggestion_id"]), "approved", "reviewed and approved")
+        fast_path_create_governed_theme_and_assign_ticker(conn, int(result["suggestion_id"]), "fast path")
+
+        summary = scanner_candidate_summary(conn)
+        row = summary[summary["ticker"] == "AXTI"].iloc[0]
+        uncovered = summary[summary["governed_status"] == "uncovered"]
+
+        self.assertEqual(str(row["governed_status"]), "already governed")
+        self.assertEqual(int(row["active_theme_count"]), 1)
+        self.assertEqual(str(row["current_theme_names"]), "Compound Semiconductor Materials")
+        self.assertNotIn("AXTI", uncovered["ticker"].tolist())
+        conn.close()
+
+    def test_direct_apply_coverage_refresh_source_of_truth_does_not_regress(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        self._insert_scanner_hit_history(conn, "AAOI")
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")), patch(
+            "src.fetch_data.run_targeted_current_snapshot_hydration",
+            return_value={"refreshed": ["AAOI"]},
+        ):
+            result = apply_scanner_candidate_selected_themes(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        summary = scanner_candidate_summary(conn)
+        row = summary[summary["ticker"] == "AAOI"].iloc[0]
+
+        self.assertEqual(int(result["suggestion_id"]) > 0, True)
+        self.assertEqual(str(row["governed_status"]), "already governed")
+        self.assertEqual(int(row["active_theme_count"]), 1)
+        self.assertEqual(str(row["current_theme_names"]), "AI - Infrastructure")
+        conn.close()
+
+    def test_fast_path_reuses_existing_governed_theme_instead_of_creating_duplicate(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'Data Center Optics', 'Optical Networking', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+        review_suggestion(conn, int(result["suggestion_id"]), "approved", "reviewed and approved")
+        fast_path = fast_path_create_governed_theme_and_assign_ticker(conn, int(result["suggestion_id"]), "fast path")
+
+        theme_rows = conn.execute("select id, name from themes where lower(name) = lower('Data Center Optics')").fetchall()
+        membership = conn.execute("select theme_id, ticker from theme_membership where ticker = 'AAOI'").fetchall()
+
+        self.assertEqual(len(theme_rows), 1)
+        self.assertFalse(bool(fast_path["created_theme"]))
+        self.assertEqual(membership, [(1, "AAOI")])
+        conn.close()
+
+    def test_fast_path_ticker_assignment_is_idempotent_and_not_duplicated(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+        review_suggestion(conn, int(result["suggestion_id"]), "approved", "reviewed and approved")
+        first = fast_path_create_governed_theme_and_assign_ticker(conn, int(result["suggestion_id"]), "fast path")
+
+        conn.execute("update theme_suggestions set status = 'approved' where suggestion_id = ?", [int(result["suggestion_id"])])
+        second = fast_path_create_governed_theme_and_assign_ticker(conn, int(result["suggestion_id"]), "fast path again")
+        membership_count = conn.execute("select count(*) from theme_membership where ticker = 'AAOI'").fetchone()[0]
+
+        self.assertTrue(bool(first["ticker_added_to_theme"]))
+        self.assertFalse(bool(second["ticker_added_to_theme"]))
+        self.assertEqual(int(membership_count), 1)
+        conn.close()
+
+    def test_fast_path_not_available_when_required_fields_are_missing(self):
+        row_missing_theme = {
+            "status": "approved",
+            "suggestion_type": "review_theme",
+            "proposed_ticker": "AAOI",
+            "custom_new_theme_names": "",
+            "proposed_theme_name": "",
+        }
+        row_missing_ticker = {
+            "status": "approved",
+            "suggestion_type": "review_theme",
+            "custom_new_theme_names": "Data Center Optics",
+            "proposed_ticker": "",
+        }
+
+        self.assertFalse(can_fast_path_create_governed_theme_row(row_missing_theme))
+        self.assertFalse(can_fast_path_create_governed_theme_row(row_missing_ticker))
+
+    def test_manual_proposed_new_theme_persists_when_existing_themes_are_also_selected(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        row = conn.execute(
+            "select proposed_theme_name, proposed_theme_category, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+
+        self.assertEqual(row[0], "Data Center Optics")
+        self.assertEqual(row[1], "Optical Networking")
+        self.assertIn("AI - Infrastructure", str(row[2]))
+        self.assertIn("Data Center Optics", str(row[2]))
+        conn.close()
+
+    def test_promotion_succeeds_with_both_existing_theme_and_proposed_new_theme(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+            )
+
+        queue = list_suggestions(conn, status="pending")
+
+        self.assertEqual(int(result["suggestion_id"]), int(queue.iloc[0]["suggestion_id"]))
+        self.assertEqual(str(queue.iloc[0]["selected_existing_theme_names"]), "AI - Infrastructure")
+        self.assertEqual(str(queue.iloc[0]["custom_new_theme_names"]), "Data Center Optics")
+        conn.close()
+
+    def test_generated_checkbox_selected_proposed_new_theme_persists(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        updated_value, _ = apply_generated_theme_idea_checkbox_selection(
+            "",
+            ["Data Center Optics"],
+            ["Data Center Optics", "Optical Networking"],
+            {},
+        )
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=split_possible_new_theme_ideas(updated_value),
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        row = conn.execute(
+            "select proposed_theme_name, proposed_theme_category, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+
+        self.assertEqual(row[0], "Data Center Optics")
+        self.assertEqual(row[1], "Optical Networking")
+        self.assertIn("Data Center Optics", str(row[2]))
+        conn.close()
+
+    def test_generated_theme_menu_add_remove_persists_canonical_proposed_new_theme_value(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        added_value, added_state = reconcile_possible_new_theme_from_generated_checkbox_state(
+            "Custom Theme",
+            ["Data Center Optics", "Optical Networking"],
+            {"Data Center Optics": True, "Optical Networking": False},
+            {},
+        )
+        updated_value, _ = reconcile_possible_new_theme_from_generated_checkbox_state(
+            added_value,
+            ["Data Center Optics", "Optical Networking"],
+            {"Data Center Optics": False, "Optical Networking": True},
+            added_state,
+        )
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_new_themes=split_possible_new_theme_ideas(updated_value),
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        row = conn.execute(
+            "select proposed_theme_name, proposed_theme_category, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+        source_context = json.loads(str(row[2]))
+
+        self.assertEqual(row[0], "Optical Networking, Custom Theme")
+        self.assertEqual(row[1], "Optical Networking")
+        self.assertEqual(source_context.get("custom_new_themes"), ["Optical Networking", "Custom Theme"])
+        conn.close()
+
+    def test_direct_apply_still_requires_an_existing_governed_theme(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            with self.assertRaisesRegex(ValueError, "Select at least one existing theme to apply now"):
+                apply_scanner_candidate_selected_themes(
+                    conn,
+                    "AAOI",
+                    research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics"},
+                    custom_new_themes=["Data Center Optics"],
+                    proposed_new_theme_category="Optical Networking",
+                )
+        conn.close()
+
+    def test_canonical_proposed_new_theme_field_is_used_for_promotion_validation(self):
+        selected_value, _ = reconcile_possible_new_theme_from_generated_checkbox_state(
+            "Transient Theme",
+            ["Data Center Optics", "Optical Networking"],
+            {"Data Center Optics": True, "Optical Networking": False},
+            {},
+        )
+        self.assertTrue(has_meaningful_theme_review_selection([], selected_value))
+        self.assertFalse(has_meaningful_theme_review_selection([], ""))
+        self.assertFalse(has_meaningful_theme_review_selection([], None))
+
+    def test_direct_apply_preserves_proposed_new_theme_context_while_only_applying_existing_themes(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")), patch(
+            "src.fetch_data.run_targeted_current_snapshot_hydration",
+            return_value={"refreshed": ["AAOI"]},
+        ):
+            result = apply_scanner_candidate_selected_themes(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        membership = conn.execute("select theme_id, ticker from theme_membership").fetchall()
+        applied_row = conn.execute(
+            "select status, proposed_theme_name, proposed_theme_category, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+        applied_queue = list_suggestions(conn, status="applied")
+        recent = recent_applied_suggestions(conn, limit=5)
+
+        self.assertEqual(membership, [(1, "AAOI")])
+        self.assertEqual(applied_row[0], "applied")
+        self.assertEqual(applied_row[1], "Data Center Optics")
+        self.assertEqual(applied_row[2], "Optical Networking")
+        self.assertIn("Data Center Optics", str(applied_row[3]))
+        self.assertEqual(result["proposed_new_theme_names"], ["Data Center Optics"])
+        self.assertEqual(result["proposed_new_theme_category"], "Optical Networking")
+        self.assertEqual(str(applied_queue.iloc[0]["selected_existing_theme_names"]), "AI - Infrastructure")
+        self.assertEqual(str(applied_queue.iloc[0]["custom_new_theme_names"]), "Data Center Optics")
+        self.assertEqual(str(applied_queue.iloc[0]["proposed_new_theme_category"]), "Optical Networking")
+        self.assertEqual(str(recent.iloc[0]["custom_new_theme_names"]), "Data Center Optics")
+        self.assertEqual(str(recent.iloc[0]["proposed_new_theme_category"]), "Optical Networking")
+        conn.close()
+
+    def test_applied_scanner_audit_row_with_preserved_theme_can_spawn_pending_theme_review_candidate(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")), patch(
+            "src.fetch_data.run_targeted_current_snapshot_hydration",
+            return_value={"refreshed": ["AAOI"]},
+        ):
+            applied = apply_scanner_candidate_selected_themes(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+            follow_up = send_preserved_applied_scanner_audit_theme_to_review(conn, int(applied["suggestion_id"]))
+
+        applied_row = conn.execute(
+            "select status from theme_suggestions where suggestion_id = ?",
+            [int(applied["suggestion_id"])],
+        ).fetchone()
+        pending_row = conn.execute(
+            "select status, proposed_theme_name, proposed_theme_category, source_context_json from theme_suggestions where suggestion_id = ?",
+            [int(follow_up["suggestion_id"])],
+        ).fetchone()
+
+        self.assertEqual(applied_row[0], "applied")
+        self.assertEqual(pending_row[0], "pending")
+        self.assertEqual(pending_row[1], "Data Center Optics")
+        self.assertEqual(pending_row[2], "Optical Networking")
+        self.assertIn('"follow_up_source_suggestion_id": %d' % int(applied["suggestion_id"]), str(pending_row[3]))
+        conn.close()
+
+    def test_applied_scanner_audit_follow_up_preserves_category_and_refreshes_pending_candidate(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")), patch(
+            "src.fetch_data.run_targeted_current_snapshot_hydration",
+            return_value={"refreshed": ["AAOI"]},
+        ):
+            applied = apply_scanner_candidate_selected_themes(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+            first_follow_up = send_preserved_applied_scanner_audit_theme_to_review(conn, int(applied["suggestion_id"]))
+            second_follow_up = send_preserved_applied_scanner_audit_theme_to_review(conn, int(applied["suggestion_id"]))
+
+        pending_rows = conn.execute(
+            """
+            select suggestion_id, status, proposed_theme_name, proposed_theme_category
+            from theme_suggestions
+            where proposed_ticker = 'AAOI' and status = 'pending'
+            order by suggestion_id
+            """
+        ).fetchall()
+
+        self.assertEqual(int(first_follow_up["suggestion_id"]), int(second_follow_up["suggestion_id"]))
+        self.assertEqual(len(pending_rows), 1)
+        self.assertEqual(pending_rows[0][2], "Data Center Optics")
+        self.assertEqual(pending_rows[0][3], "Optical Networking")
+        conn.close()
+
+    def test_scanner_audit_review_theme_rows_can_be_acted_on_from_queue_status_path(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            result = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics"},
+                custom_new_themes=["Data Center Optics"],
+            )
+
+        approved = review_suggestion(conn, int(result["suggestion_id"]), "approved", "queue approve")
+        obsolete = update_suggestion_status(conn, int(result["suggestion_id"]), "obsolete", "queue obsolete")
+        stored = conn.execute(
+            "select status, reviewer_notes from theme_suggestions where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        ).fetchone()
+
+        self.assertEqual(approved["new_status"], "approved")
+        self.assertEqual(obsolete["new_status"], "obsolete")
+        self.assertEqual(stored, ("obsolete", "queue obsolete"))
+        conn.close()
+
+    def test_queue_interaction_path_does_not_regress_filtered_queue_or_bulk_actions(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")):
+            first = promote_scanner_candidate_to_theme_review(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics"},
+                custom_new_themes=["Data Center Optics"],
+            )
+        second_df = self._candidate_summary_df("LITE")
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=second_df):
+            second = promote_scanner_candidate_to_theme_review(
+                conn,
+                "LITE",
+                research_draft={"ticker": "LITE", "possible_new_theme": "Optical Interconnects"},
+                custom_new_themes=["Optical Interconnects"],
+            )
+
+        scanner_queue = list_suggestions(conn, status="pending", suggestion_type="review_theme", source="scanner_audit")
+        changed = bulk_update_filtered_status(
+            conn,
+            "rejected",
+            "bulk queue action",
+            "pending",
+            "review_theme",
+            "scanner_audit",
+            "",
+            ["pending", "approved"],
+        )
+        rejected_queue = list_suggestions(conn, status="rejected", suggestion_type="review_theme", source="scanner_audit")
+
+        self.assertEqual({int(value) for value in scanner_queue["suggestion_id"].tolist()}, {int(first["suggestion_id"]), int(second["suggestion_id"])})
+        self.assertEqual(changed, 2)
+        self.assertEqual(set(rejected_queue["proposed_ticker"].tolist()), {"AAOI", "LITE"})
+        conn.close()
+
+    def test_direct_apply_with_multiple_existing_themes_preserves_existing_governed_theme_persistence(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+        conn.execute("insert into themes values (2, 'Optical Components', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")), patch(
+            "src.fetch_data.run_targeted_current_snapshot_hydration",
+            return_value={"refreshed": ["AAOI"]},
+        ):
+            result = apply_scanner_candidate_selected_themes(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1, 2],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        membership = conn.execute(
+            "select theme_id, ticker from theme_membership where ticker = 'AAOI' order by theme_id"
+        ).fetchall()
+        applied_queue = list_suggestions(conn, status="applied")
+        row = applied_queue[applied_queue["suggestion_id"] == int(result["suggestion_id"])].iloc[0]
+
+        self.assertEqual(membership, [(1, "AAOI"), (2, "AAOI")])
+        self.assertEqual(
+            set(str(row["selected_existing_theme_names"]).split(", ")),
+            {"AI - Infrastructure", "Optical Components"},
+        )
+        self.assertEqual(str(row["custom_new_theme_names"]), "Data Center Optics")
+        self.assertEqual(str(row["proposed_new_theme_category"]), "Optical Networking")
+        conn.close()
+
+    def test_review_and_recent_views_fall_back_to_saved_row_values_when_structured_context_is_missing(self):
+        conn = duckdb.connect(":memory:")
+        self._setup_scanner_audit_tables(conn)
+        conn.execute("insert into themes values (1, 'AI - Infrastructure', 'Technology', true)")
+
+        with patch("src.scanner_audit.scanner_candidate_summary", return_value=self._candidate_summary_df("AAOI")), patch(
+            "src.fetch_data.run_targeted_current_snapshot_hydration",
+            return_value={"refreshed": ["AAOI"]},
+        ):
+            result = apply_scanner_candidate_selected_themes(
+                conn,
+                "AAOI",
+                research_draft={"ticker": "AAOI", "possible_new_theme": "Data Center Optics", "possible_new_theme_category": "Optical Networking"},
+                custom_existing_theme_ids=[1],
+                custom_new_themes=["Data Center Optics"],
+                proposed_new_theme_category="Optical Networking",
+            )
+
+        conn.execute(
+            "update theme_suggestions set source_context_json = null where suggestion_id = ?",
+            [int(result["suggestion_id"])],
+        )
+        applied_queue = list_suggestions(conn, status="applied")
+        recent = recent_applied_suggestions(conn, limit=5)
+
+        self.assertEqual(str(applied_queue.iloc[0]["custom_new_theme_names"]), "Data Center Optics")
+        self.assertEqual(str(applied_queue.iloc[0]["proposed_new_theme_category"]), "Optical Networking")
+        self.assertEqual(str(recent.iloc[0]["custom_new_theme_names"]), "Data Center Optics")
+        self.assertEqual(str(recent.iloc[0]["proposed_new_theme_category"]), "Optical Networking")
+        conn.close()
+
+
 class TestThemeSeedBackfill(unittest.TestCase):
     @patch("src.theme_service.load_seed_file")
     def test_seed_backfills_membership_when_themes_exist(self, mock_load_seed):
@@ -243,12 +6406,469 @@ class TestThemeSeedBackfill(unittest.TestCase):
         self.assertEqual(members_again, members)
         conn.close()
 
+    @patch("src.theme_service.load_seed_file")
+    def test_seed_does_not_readd_manually_removed_membership_for_existing_theme(self, mock_load_seed):
+        mock_load_seed.return_value = [
+            {"name": "Quantum Computing", "category": "Tech", "tickers": ["FORM", "IONQ"]},
+        ]
+
+        conn = duckdb.connect(":memory:")
+        conn.execute("create sequence if not exists themes_id_seq")
+        conn.execute("create table themes(id bigint primary key default nextval('themes_id_seq'), name varchar unique, category varchar, is_active boolean default true, created_at timestamp default current_timestamp, updated_at timestamp default current_timestamp)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+
+        conn.execute("insert into themes(name, category, is_active) values ('Quantum Computing','Tech', true)")
+        theme_id = int(conn.execute("select id from themes where name = 'Quantum Computing'").fetchone()[0])
+        conn.execute("insert into theme_membership(theme_id, ticker) values (?, 'FORM')", [theme_id])
+        conn.execute("insert into theme_membership(theme_id, ticker) values (?, 'IONQ')", [theme_id])
+
+        remove_result = remove_ticker(conn, theme_id, "FORM")
+        changed = seed_if_needed(conn)
+        members = conn.execute(
+            "select ticker from theme_membership where theme_id = ? order by ticker",
+            [theme_id],
+        ).fetchall()
+
+        self.assertTrue(bool(remove_result["removed"]))
+        self.assertFalse(changed)
+        self.assertEqual(members, [("IONQ",)])
+        conn.close()
+
+    @patch("src.theme_service.load_seed_file")
+    def test_seed_if_needed_recovers_with_bootstrap_connection_when_shared_connection_has_bad_result_state(self, mock_load_seed):
+        mock_load_seed.return_value = [
+            {"name": "AI", "category": "Tech", "tickers": ["NVDA"]},
+        ]
+
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create sequence if not exists themes_id_seq")
+        bootstrap_conn.execute("create table themes(id bigint primary key default nextval('themes_id_seq'), name varchar unique, category varchar, is_active boolean default true, created_at timestamp default current_timestamp, updated_at timestamp default current_timestamp)")
+        bootstrap_conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+
+        class BadResultConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InvalidInputException("Invalid Input Error: No open result set")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            changed = seed_if_needed(BadResultConn())
+
+        seeded = bootstrap_conn.execute("select name, category from themes").fetchall()
+        members = bootstrap_conn.execute("select ticker from theme_membership").fetchall()
+
+        self.assertTrue(changed)
+        self.assertEqual(seeded, [("AI", "Tech")])
+        self.assertEqual(members, [("NVDA",)])
+        bootstrap_conn.close()
+
+    @patch("src.theme_service.load_seed_file")
+    def test_seed_if_needed_uses_isolated_recovery_path_without_regressing_seed_semantics(self, mock_load_seed):
+        mock_load_seed.return_value = [
+            {"name": "Energy", "category": "Macro", "tickers": ["XOM"]},
+        ]
+
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create sequence if not exists themes_id_seq")
+        bootstrap_conn.execute("create table themes(id bigint primary key default nextval('themes_id_seq'), name varchar unique, category varchar, is_active boolean default true, created_at timestamp default current_timestamp, updated_at timestamp default current_timestamp)")
+        bootstrap_conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+
+        class FlakyResultConn:
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, sql, params=None):
+                self.calls += 1
+                raise duckdb.InvalidInputException("Invalid Input Error: No open result set")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        flaky = FlakyResultConn()
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            first = seed_if_needed(flaky)
+            second = seed_if_needed(flaky)
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(
+            bootstrap_conn.execute("select name, ticker from themes t join theme_membership m on t.id = m.theme_id").fetchall(),
+            [("Energy", "XOM")],
+        )
+        bootstrap_conn.close()
+
+    @patch("src.theme_service.load_seed_file")
+    def test_seed_if_needed_recovers_when_required_fetchone_returns_none(self, mock_load_seed):
+        mock_load_seed.return_value = [
+            {"name": "AI", "category": "Tech", "tickers": ["NVDA"]},
+        ]
+
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create sequence if not exists themes_id_seq")
+        bootstrap_conn.execute("create table themes(id bigint primary key default nextval('themes_id_seq'), name varchar unique, category varchar, is_active boolean default true, created_at timestamp default current_timestamp, updated_at timestamp default current_timestamp)")
+        bootstrap_conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+
+        class EmptyResult:
+            def fetchone(self):
+                return None
+
+        class NoneRowConn:
+            def execute(self, sql, params=None):
+                return EmptyResult()
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            changed = seed_if_needed(NoneRowConn())
+
+        seeded = bootstrap_conn.execute("select name, category from themes").fetchall()
+        members = bootstrap_conn.execute("select ticker from theme_membership").fetchall()
+
+        self.assertTrue(changed)
+        self.assertEqual(seeded, [("AI", "Tech")])
+        self.assertEqual(members, [("NVDA",)])
+        bootstrap_conn.close()
+
+
+class TestDuckDbReadRecovery(unittest.TestCase):
+    def test_table_exists_recovers_with_bootstrap_connection_when_shared_connection_has_bad_result_state(self):
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create table symbol_refresh_status(ticker varchar)")
+
+        class BadResultConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InvalidInputException("Invalid Input Error: No open result set")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            exists = table_exists(BadResultConn(), "symbol_refresh_status")
+
+        self.assertTrue(exists)
+        bootstrap_conn.close()
+
+    def test_table_has_column_recovers_with_bootstrap_connection_when_shared_connection_hits_internal_exception(self):
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create table refresh_runs(run_id bigint, provider varchar)")
+
+        class PoisonedConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InternalException("INTERNAL Error: Attempted to dereference unique_ptr that is NULL!")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            has_provider = table_has_column(PoisonedConn(), "refresh_runs", "provider")
+
+        self.assertTrue(has_provider)
+        bootstrap_conn.close()
+
+    def test_list_themes_recovers_with_bootstrap_connection_when_shared_connection_has_bad_result_state(self):
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create sequence if not exists themes_id_seq")
+        bootstrap_conn.execute("create table themes(id bigint primary key default nextval('themes_id_seq'), name varchar unique, category varchar, is_active boolean default true, created_at timestamp default current_timestamp, updated_at timestamp default current_timestamp)")
+        bootstrap_conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+        bootstrap_conn.execute("create table symbol_refresh_status(ticker varchar primary key, manual_suppressed boolean default false)")
+        bootstrap_conn.execute("insert into themes(name, category, is_active) values ('AI', 'Tech', true)")
+        theme_id = int(bootstrap_conn.execute("select id from themes where name = 'AI'").fetchone()[0])
+        bootstrap_conn.execute("insert into theme_membership(theme_id, ticker) values (?, 'NVDA')", [theme_id])
+
+        class FlakyListThemesConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InvalidInputException("Invalid Input Error: No open result set")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            themes = list_themes(FlakyListThemesConn(), active_only=False)
+
+        self.assertEqual(themes[["name", "category", "ticker_count"]].to_dict("records"), [{"name": "AI", "category": "Tech", "ticker_count": 1}])
+        bootstrap_conn.close()
+
+    def test_mark_stale_running_runs_recovers_when_shared_connection_fetchone_returns_none(self):
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint,
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar,
+                ticker_count bigint,
+                success_count bigint,
+                failure_count bigint,
+                scope_type varchar,
+                scope_theme_name varchar,
+                error_message varchar
+            )
+            """
+        )
+        bootstrap_conn.execute(
+            """
+            insert into refresh_runs(
+                run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count, scope_type, scope_theme_name, error_message
+            )
+            values (91, 'live', '2026-03-10 20:00:00', null, 'running', 1, 0, 0, 'active_themes', null, null)
+            """
+        )
+
+        class EmptyResult:
+            def fetchone(self):
+                return None
+
+        class NoneRowConn:
+            def execute(self, sql, params=None):
+                return EmptyResult()
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            stale_marked = mark_stale_running_runs(NoneRowConn(), stale_minutes=1)
+
+        row = bootstrap_conn.execute("select status, error_message from refresh_runs where run_id = 91").fetchone()
+        self.assertEqual(stale_marked, 1)
+        self.assertEqual(row[0], "failed")
+        self.assertIn("Run marked stale after exceeding 1 minutes.", row[1])
+        bootstrap_conn.close()
+
+    def test_source_audit_status_recovers_with_bootstrap_connection_when_shared_connection_has_bad_result_state(self):
+        bootstrap_conn = duckdb.connect(":memory:")
+        bootstrap_conn.execute("create table refresh_runs(run_id bigint, provider varchar, finished_at timestamp, status varchar)")
+        bootstrap_conn.execute("create table theme_snapshots(run_id bigint, snapshot_time timestamp, theme_id bigint, snapshot_source varchar)")
+        bootstrap_conn.execute("create table ticker_snapshots(run_id bigint, ticker varchar, snapshot_source varchar)")
+        bootstrap_conn.execute("insert into refresh_runs values (7, 'live', '2026-03-20 16:00:00', 'success')")
+        bootstrap_conn.execute("insert into theme_snapshots values (7, '2026-03-20 16:00:00', 101, 'live')")
+        bootstrap_conn.execute("insert into ticker_snapshots values (7, 'NVDA', 'live')")
+
+        class BadResultConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InvalidInputException("Invalid Input Error: No open result set")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn):
+            audit = source_audit_status(BadResultConn(), recent_limit=10)
+
+        self.assertEqual(audit.iloc[0]["preferred_theme_source"], "live")
+        self.assertEqual(audit.iloc[0]["preferred_ticker_source"], "live")
+        self.assertEqual(audit.iloc[0]["latest_theme_view_sources"], "live")
+        self.assertEqual(audit.iloc[0]["latest_ticker_view_sources"], "live")
+        self.assertTrue(bool(audit.iloc[0]["theme_current_live_only"]))
+        self.assertTrue(bool(audit.iloc[0]["ticker_current_live_only"]))
+        bootstrap_conn.close()
+
+    def test_snapshot_counts_defaults_to_zero_row_when_query_returns_empty_dataframe(self):
+        class EmptyDfResult:
+            def df(self):
+                return pd.DataFrame()
+
+        class EmptyDfConn:
+            def execute(self, sql, params=None):
+                return EmptyDfResult()
+
+        counts = snapshot_counts(EmptyDfConn())
+
+        self.assertEqual(
+            counts.iloc[0][["ticker_snapshot_rows", "theme_snapshot_rows", "runs_with_theme_snapshots"]].to_dict(),
+            {
+                "ticker_snapshot_rows": 0,
+                "theme_snapshot_rows": 0,
+                "runs_with_theme_snapshots": 0,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
 
 
 class TestBootstrapAndHistoryFramework(unittest.TestCase):
+    def test_init_db_uses_fresh_bootstrap_connection_instead_of_shared_cached_connection(self):
+        real_conn = duckdb.connect(":memory:")
+
+        class PoisonedSharedConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InvalidInputException("Invalid Input Error: Attempting to execute an unsuccessful or closed pending query result")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield real_conn
+            finally:
+                pass
+
+        with patch("src.database.get_conn", side_effect=AssertionError("shared connection should not be used for init_db")), patch(
+            "src.database.get_bootstrap_conn",
+            fake_bootstrap_conn,
+        ), patch("src.database.get_db_connection", return_value=PoisonedSharedConn()), patch(
+            "src.theme_service.seed_if_needed",
+            return_value=False,
+        ):
+            from src.database import init_db
+
+            init_db()
+
+        self.assertEqual(
+            real_conn.execute("select count(*) from duckdb_tables() where table_name = 'themes'").fetchone()[0],
+            1,
+        )
+        real_conn.close()
+
+    def test_get_conn_recovers_from_invalid_cached_connection(self):
+        healthy_conn = duckdb.connect(":memory:")
+
+        class PoisonedSharedConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InvalidInputException("Invalid Input Error: Attempting to execute an unsuccessful or closed pending query result")
+
+        poisoned_conn = PoisonedSharedConn()
+        cached_calls = []
+
+        def fake_cached_getter(_db_path):
+            cached_calls.append("call")
+            return poisoned_conn if len(cached_calls) == 1 else healthy_conn
+
+        fake_cached_getter.clear = unittest.mock.Mock()
+
+        with patch("src.database._has_streamlit_script_run_context", return_value=True), patch(
+            "src.database.get_db_connection",
+            fake_cached_getter,
+        ):
+            from src.database import get_conn
+
+            with get_conn() as conn:
+                self.assertIs(conn, healthy_conn)
+                self.assertEqual(conn.execute("select 1").fetchone()[0], 1)
+
+        self.assertEqual(len(cached_calls), 2)
+        fake_cached_getter.clear.assert_called_once()
+        healthy_conn.close()
+
+    def test_suggestions_style_init_flow_recovers_after_poisoned_cached_connection(self):
+        bootstrap_conn = duckdb.connect(":memory:")
+        healthy_shared_conn = duckdb.connect(":memory:")
+
+        class PoisonedSharedConn:
+            def execute(self, sql, params=None):
+                raise duckdb.InvalidInputException("Invalid Input Error: Attempting to execute an unsuccessful or closed pending query result")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield bootstrap_conn
+            finally:
+                pass
+
+        cached_calls = []
+
+        def fake_cached_getter(_db_path):
+            cached_calls.append("call")
+            return PoisonedSharedConn() if len(cached_calls) == 1 else healthy_shared_conn
+
+        fake_cached_getter.clear = unittest.mock.Mock()
+
+        with patch("src.database._has_streamlit_script_run_context", return_value=True), patch(
+            "src.database.get_bootstrap_conn",
+            fake_bootstrap_conn,
+        ), patch("src.database.get_db_connection", fake_cached_getter), patch(
+            "src.theme_service.seed_if_needed",
+            return_value=False,
+        ):
+            from src.database import get_conn, init_db
+
+            init_db()
+            with get_conn() as conn:
+                self.assertIs(conn, healthy_shared_conn)
+                self.assertEqual(conn.execute("select 1").fetchone()[0], 1)
+
+        fake_cached_getter.clear.assert_called_once()
+        bootstrap_conn.close()
+        healthy_shared_conn.close()
+
+    def test_init_db_bootstrap_still_runs_expected_schema_and_seed_flow(self):
+        real_conn = duckdb.connect(":memory:")
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield real_conn
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn), patch(
+            "src.theme_service.seed_if_needed",
+            return_value=False,
+        ) as mock_seed:
+            from src.database import init_db
+
+            init_db()
+
+        self.assertEqual(
+            real_conn.execute("select count(*) from duckdb_tables() where table_name = 'theme_suggestions'").fetchone()[0],
+            1,
+        )
+        mock_seed.assert_called_once()
+        real_conn.close()
+
+    def test_get_conn_surfaces_friendly_database_locked_error(self):
+        with patch(
+            "src.database.duckdb.connect",
+            side_effect=duckdb.IOException(
+                "IO Error: Cannot open file 'theme_dashboard.duckdb': The process cannot access the file because it is being used by another process."
+            ),
+        ) as mock_connect, patch("src.database.time.sleep"):
+            from src.database import DatabaseLockedError, get_conn
+
+            with self.assertRaises(DatabaseLockedError) as ctx:
+                with get_conn():
+                    pass
+
+        self.assertEqual(mock_connect.call_count, 3)
+        message = str(ctx.exception)
+        self.assertIn("locked by another process", message)
+        self.assertIn("another Streamlit dashboard instance", message)
+        self.assertIn("Database path:", message)
+
     def test_init_db_bootstrap_after_file_delete_and_seed_idempotent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test_theme_dashboard.duckdb"
@@ -268,6 +6888,42 @@ class TestBootstrapAndHistoryFramework(unittest.TestCase):
                 with get_conn() as conn:
                     themes_count = int(conn.execute("select count(*) from themes").fetchone()[0])
                     self.assertGreater(themes_count, 0)
+
+    def test_init_db_skips_noncritical_symbol_refresh_status_conflict(self):
+        real_conn = duckdb.connect(":memory:")
+        conflict_calls = {"count": 0}
+
+        class WrappedConn:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def execute(self, sql, params=None):
+                normalized_sql = " ".join(str(sql).split())
+                if normalized_sql.startswith("UPDATE symbol_refresh_status SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL"):
+                    conflict_calls["count"] += 1
+                    raise duckdb.TransactionException("TransactionContext Error: Conflict on update")
+                if params is None:
+                    return self.inner.execute(sql)
+                return self.inner.execute(sql, params)
+
+        @contextmanager
+        def fake_bootstrap_conn():
+            try:
+                yield WrappedConn(real_conn)
+            finally:
+                pass
+
+        with patch("src.database.get_bootstrap_conn", fake_bootstrap_conn), patch("src.theme_service.seed_if_needed", return_value=False):
+            from src.database import init_db
+
+            init_db()
+
+        self.assertEqual(conflict_calls["count"], 1)
+        self.assertEqual(
+            real_conn.execute("select count(*) from duckdb_tables() where table_name = 'symbol_refresh_status'").fetchone()[0],
+            1,
+        )
+        real_conn.close()
 
     def test_history_helpers_return_recent_snapshots_and_latest(self):
         conn = duckdb.connect(":memory:")
@@ -436,3 +7092,225 @@ class TestEODRefreshFramework(unittest.TestCase):
             self.assertEqual(run_id, 42)
             mock_run.assert_called_once()
         conn.close()
+
+
+class TestRefreshRunRecovery(unittest.TestCase):
+    def test_stale_running_run_can_be_marked_interrupted_and_future_refresh_unblocks(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create sequence if not exists refresh_run_id_seq start 66")
+        conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint default nextval('refresh_run_id_seq'),
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar,
+                ticker_count bigint,
+                success_count bigint,
+                failure_count bigint,
+                scope_type varchar,
+                scope_theme_name varchar,
+                error_message varchar,
+                api_call_count bigint,
+                api_endpoint_counts varchar,
+                skipped_tickers varchar,
+                failure_category_counts varchar,
+                flagged_symbol_count bigint,
+                suppressed_symbol_count bigint
+            )
+            """
+        )
+        conn.execute("create table refresh_run_tickers(run_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute("create table refresh_failures(run_id bigint, ticker varchar, error_message varchar, failure_category varchar, created_at timestamp)")
+        conn.execute(
+            """
+            insert into refresh_runs(
+                run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count,
+                scope_type, scope_theme_name, error_message, api_call_count, api_endpoint_counts,
+                skipped_tickers, failure_category_counts, flagged_symbol_count, suppressed_symbol_count
+            )
+            values (64, 'live', '2026-03-10 20:00:00', null, 'running', 1, 0, 0, 'active_themes', null, null, 0, '{}', null, '{}', 0, 0)
+            """
+        )
+
+        changed = mark_refresh_run_interrupted(conn, 64, note="Operator cleared stale run.")
+        row = conn.execute("select status, finished_at, error_message from refresh_runs where run_id = 64").fetchone()
+
+        class EmptySuccessProvider:
+            name = "mock"
+
+            def fetch_ticker_data(self, _tickers):
+                return pd.DataFrame(), []
+
+            def get_call_accounting(self):
+                return {"api_call_count": 0, "endpoint_counts": {}}
+
+        with patch("src.fetch_data.get_provider", return_value=EmptySuccessProvider()), patch(
+            "src.fetch_data.refresh_eligible_tickers",
+            return_value=(["ABC"], []),
+        ), patch("src.fetch_data.persist_theme_snapshot_for_run", return_value=None):
+            new_run_id = run_refresh(conn, provider_name="mock", tickers=["ABC"])
+
+        self.assertTrue(changed)
+        self.assertEqual(row[0], "interrupted")
+        self.assertIsNotNone(row[1])
+        self.assertEqual(row[2], "Operator cleared stale run.")
+        self.assertGreater(int(new_run_id), 64)
+        conn.close()
+
+    def test_genuinely_active_run_still_blocks_concurrent_refresh(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create sequence if not exists refresh_run_id_seq start 66")
+        conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint default nextval('refresh_run_id_seq'),
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar,
+                ticker_count bigint,
+                success_count bigint,
+                failure_count bigint,
+                scope_type varchar,
+                scope_theme_name varchar,
+                error_message varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into refresh_runs(
+                run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count, scope_type, scope_theme_name, error_message
+            )
+            values (65, 'live', CURRENT_TIMESTAMP, null, 'running', 1, 0, 0, 'active_themes', null, null)
+            """
+        )
+
+        with patch("src.fetch_data.mark_stale_running_runs", return_value=0), patch(
+            "src.fetch_data._current_running_run",
+            return_value=(65, "live", datetime(2026, 3, 19, 12, 0, 0), 1, 0, 0),
+        ):
+            with self.assertRaises(RefreshBlockedError) as ctx:
+                run_refresh(conn, provider_name="live", tickers=["ABC"])
+
+        blocked = conn.execute("select status, error_message from refresh_runs order by run_id desc limit 1").fetchone()
+        self.assertEqual(int(ctx.exception.running_run_id), 65)
+        self.assertEqual(blocked[0], "blocked")
+        self.assertIn("run 65 is already running", blocked[1])
+        conn.close()
+
+    def test_refresh_history_reflects_interrupted_recovery_status(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint,
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar,
+                ticker_count bigint,
+                success_count bigint,
+                failure_count bigint,
+                scope_type varchar,
+                scope_theme_name varchar,
+                error_message varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into refresh_runs(
+                run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count, scope_type, scope_theme_name, error_message
+            )
+            values (64, 'live', '2026-03-10 20:00:00', null, 'running', 1, 0, 0, 'active_themes', null, null)
+            """
+        )
+
+        changed = mark_refresh_run_interrupted(conn, 64, note="Manual recovery from history.")
+        history = refresh_history(conn, limit=5)
+
+        self.assertTrue(changed)
+        self.assertEqual(str(history.iloc[0]["status"]), "interrupted")
+        self.assertEqual(str(history.iloc[0]["error_message"]), "Manual recovery from history.")
+        self.assertIsNotNone(history.iloc[0]["finished_at"])
+        conn.close()
+
+    def test_running_refresh_runs_marks_old_running_rows_as_likely_stale(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint,
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar,
+                ticker_count bigint,
+                success_count bigint,
+                failure_count bigint,
+                scope_type varchar,
+                scope_theme_name varchar,
+                error_message varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into refresh_runs(
+                run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count, scope_type, scope_theme_name, error_message
+            )
+            values (64, 'live', '2026-03-10 20:00:00', null, 'running', 1, 0, 0, 'active_themes', null, null)
+            """
+        )
+
+        running = running_refresh_runs(conn, stale_minutes=30)
+
+        self.assertEqual(len(running), 1)
+        self.assertTrue(bool(running.iloc[0]["likely_stale"]))
+        self.assertGreater(float(running.iloc[0]["age_minutes"]), 30.0)
+        conn.close()
+
+    def test_health_page_exposes_selected_running_run_recovery_action(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "4_Health.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('selection_mode="single-row"', content)
+        self.assertIn("mark_selected_refresh_run_interrupted", content)
+        self.assertIn("mark_refresh_run_interrupted(", content)
+        self.assertIn("Refresh history", content)
+
+    def test_health_page_reconstruction_uses_canonical_session_state_and_safe_rerun_feedback(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "4_Health.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('key="governed_onboarding_reconstruction_tickers"', content)
+        self.assertIn('disabled=not bool(get_canonical_multiselect_values(st.session_state, "governed_onboarding_reconstruction_tickers"))', content)
+        self.assertIn('selected_reconstruction_tickers = get_canonical_multiselect_values(', content)
+        self.assertIn('"governed_onboarding_reconstruction_tickers",', content)
+        self.assertIn('queue_feedback_message(', content)
+        self.assertIn('"governed_onboarding_feedback"', content)
+        self.assertIn("clear_current_market_view_caches()", content)
+        self.assertIn("st.rerun()", content)
+        self.assertIn('message=f"Affected-theme reconstruction failed: {exc}"', content)
+
+    def test_health_page_backfill_uses_canonical_session_state_and_persists_feedback_before_rerun(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "4_Health.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('key="governed_onboarding_tickers"', content)
+        self.assertIn('disabled=not bool(get_canonical_multiselect_values(st.session_state, "governed_onboarding_tickers"))', content)
+        self.assertIn('selected_onboarding_tickers = get_canonical_multiselect_values(st.session_state, "governed_onboarding_tickers")', content)
+        self.assertIn('render_feedback_message(st.session_state, "governed_onboarding_feedback")', content)
+        self.assertIn('message=f"Onboarding history hydration failed: {exc}"', content)

@@ -2,17 +2,43 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import duckdb
 import pandas as pd
 
+from .config import (
+    CALCULATION_OUTLIER_MAX_DOLLAR_VOLUME,
+    CALCULATION_OUTLIER_MAX_PRICE,
+    CALCULATION_OUTLIER_MIN_ABS_PERF_1M,
+    CALCULATION_OUTLIER_MIN_ABS_PERF_1W,
+    CURRENT_RANKING_MIN_DOLLAR_VOLUME,
+    CURRENT_RANKING_MIN_PRICE,
+    CURRENT_RANKING_RETURN_CAP_PCT,
+)
+from .db_introspection import table_exists
 from .failure_classification import categorize_failure_message
+from .queries import preferred_ticker_snapshot_source
 
 ACTIVE = "active"
 WATCH = "watch"
 REFRESH_SUPPRESSED = "refresh_suppressed"
 INACTIVE_CANDIDATE = "inactive_candidate"
+CALCULATION_OUTLIER = "CALC_OUTLIER"
 
 NO_CANDLES_FLAG_THRESHOLD = 3
 NO_CANDLES_AUTO_SUPPRESS_THRESHOLD = 5
+STAGED_ACTIONS = {
+    "none": "No staged action",
+    "suppress": "Stage suppress",
+    "keep_active": "Stage keep active",
+    "watch": "Stage return to watch",
+    "reset": "Stage reset history",
+}
+OVERRIDE_ACTIONS = {
+    "none": "No override",
+    "keep_active": "Keep active",
+    "watch": "Return to watch",
+    "reset": "Reset history",
+}
 
 
 def _load_state(conn, ticker: str):
@@ -138,9 +164,117 @@ def apply_refresh_failure(conn, ticker: str, run_id: int, error_message: str) ->
     return {"flagged": flagged, "auto_suppressed": auto_suppressed, "category": category}
 
 
-def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
-    return conn.execute(
+def hygiene_decision_context(row) -> dict[str, str]:
+    status = str(row.get("status") or "")
+    suggested = str(row.get("suggested_status") or "")
+    category = str(row.get("last_failure_category") or "")
+    consecutive = int(row.get("consecutive_failure_count") or 0)
+
+    if status == REFRESH_SUPPRESSED:
+        return {
+            "recommended_action": "Keep suppressed",
+            "confidence": "high",
+            "explanation": "Refreshes are already suppressed. This preserves lineage/history while keeping the symbol out of refresh, current rankings, and historical movement calculations.",
+        }
+    if category == CALCULATION_OUTLIER and suggested == REFRESH_SUPPRESSED:
+        return {
+            "recommended_action": "Approve suppression",
+            "confidence": "high",
+            "explanation": "Current preferred-source data shows an extreme low-liquidity return pattern that can distort ranking and movement calculations. Suppression removes the ticker from calculations without deleting membership.",
+        }
+    if suggested == REFRESH_SUPPRESSED and category == "NO_CANDLES" and consecutive >= NO_CANDLES_AUTO_SUPPRESS_THRESHOLD:
+        return {
+            "recommended_action": "Approve suppression",
+            "confidence": "high",
+            "explanation": "Repeated NO_CANDLES failures have reached a strong threshold. Suppress from active refresh; review theme membership separately.",
+        }
+    if suggested == REFRESH_SUPPRESSED and category == "NO_CANDLES" and consecutive >= NO_CANDLES_FLAG_THRESHOLD:
+        return {
+            "recommended_action": "Approve suppression",
+            "confidence": "medium",
+            "explanation": "Repeated NO_CANDLES failures suggest this symbol may no longer provide usable data. Suppression is preferred to deletion.",
+        }
+    if status == WATCH:
+        return {
+            "recommended_action": "Keep active / watch",
+            "confidence": "medium",
+            "explanation": "Operational issue pattern exists, but evidence is not strong enough for suppression. Continue refresh with monitoring.",
+        }
+    return {
+        "recommended_action": "Review manually",
+        "confidence": "low",
+        "explanation": "Use failure streaks and data recency as context. Suppression controls refresh eligibility; it does not delete DB lineage or theme history.",
+    }
+
+
+def resolve_staged_symbol_hygiene_action(approve_recommended: bool, override_action: str | None) -> str:
+    normalized_override = str(override_action or "none").strip().lower()
+    if normalized_override in OVERRIDE_ACTIONS and normalized_override != "none":
+        return normalized_override
+    return "suppress" if approve_recommended else "none"
+
+
+def sync_symbol_hygiene_staged_action(session_state, ticker: str) -> str:
+    normalized_ticker = str(ticker).strip().upper()
+    staged = session_state.setdefault("symbol_hygiene_staged", {})
+    action = resolve_staged_symbol_hygiene_action(
+        bool(session_state.get(f"stage_approve_{normalized_ticker}", False)),
+        session_state.get(f"stage_override_{normalized_ticker}", "none"),
+    )
+    if action == "none":
+        staged.pop(normalized_ticker, None)
+    else:
+        staged[normalized_ticker] = action
+    session_state["symbol_hygiene_staged"] = staged
+    return action
+
+
+def clear_symbol_hygiene_staged_state(session_state, tickers: list[str]) -> None:
+    staged = session_state.setdefault("symbol_hygiene_staged", {})
+    all_tickers = sorted({str(t).strip().upper() for t in tickers if str(t).strip()} | {str(t).strip().upper() for t in staged.keys()})
+    for ticker in all_tickers:
+        session_state[f"stage_approve_{ticker}"] = False
+        session_state[f"stage_override_{ticker}"] = "none"
+    session_state["symbol_hygiene_staged"] = {}
+
+
+def _base_symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
+    membership_join = ""
+    membership_columns = "NULL AS current_theme_names, NULL AS current_categories,"
+    membership_cte = ""
+    if table_exists(conn, "theme_membership") and table_exists(conn, "themes"):
+        membership_cte = """
+        ,
+        membership_context AS (
+            SELECT
+                m.ticker,
+                STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                STRING_AGG(
+                    DISTINCT COALESCE(NULLIF(t.category, ''), 'Uncategorized'),
+                    ', '
+                    ORDER BY COALESCE(NULLIF(t.category, ''), 'Uncategorized')
+                ) AS current_categories
+            FROM theme_membership m
+            JOIN themes t ON t.id = m.theme_id
+            GROUP BY m.ticker
+        )
         """
+        membership_columns = "mc.current_theme_names, mc.current_categories,"
+        membership_join = "LEFT JOIN membership_context mc ON mc.ticker = s.ticker"
+
+    return _execute_df(
+        conn,
+        f"""
+        WITH latest_market_data AS (
+            SELECT
+                ts.ticker,
+                MAX(ts.last_updated) AS last_market_data_at
+            FROM ticker_snapshots ts
+            JOIN refresh_runs r ON r.run_id = ts.run_id
+            WHERE r.status IN ('success', 'partial')
+            GROUP BY ts.ticker
+        )
+        {membership_cte}
         SELECT
             s.ticker,
             s.status,
@@ -151,8 +285,16 @@ def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
             s.rolling_failure_count,
             s.last_success_at,
             s.last_failure_at,
-            s.last_run_id
+            s.last_run_id,
+            lmd.last_market_data_at,
+            {membership_columns}
+            CASE
+              WHEN lmd.last_market_data_at IS NULL THEN NULL
+              ELSE DATE_DIFF('day', CAST(lmd.last_market_data_at AS DATE), CURRENT_DATE)
+            END AS days_since_last_valid_data
         FROM symbol_refresh_status s
+        LEFT JOIN latest_market_data lmd ON lmd.ticker = s.ticker
+        {membership_join}
         WHERE s.suggested_status IS NOT NULL
            OR s.status IN ('inactive_candidate', 'refresh_suppressed', 'watch')
         ORDER BY
@@ -168,12 +310,312 @@ def symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
         LIMIT ?
         """,
         [limit],
-    ).df()
+    )
+
+
+def _allowlisted_calculation_outlier(state_row) -> bool:
+    if not state_row:
+        return False
+    last_failure_category = str(state_row[5] or "")
+    suggested_reason = str(state_row[3] or "")
+    return last_failure_category == CALCULATION_OUTLIER and "kept active by reviewer" in suggested_reason.lower()
+
+
+def _execute_df(conn, sql: str, params: list[object] | None = None) -> pd.DataFrame:
+    result = conn.execute(sql, params or [])
+    columns = [str(desc[0]) for desc in (result.description or [])]
+    rows = result.fetchall()
+    return pd.DataFrame.from_records(rows, columns=columns)
+
+
+def _calculation_outlier_candidates(conn) -> pd.DataFrame:
+    if not table_exists(conn, "theme_membership") or not table_exists(conn, "themes"):
+        return pd.DataFrame()
+
+    preferred_source = preferred_ticker_snapshot_source(conn)
+    if not preferred_source:
+        return pd.DataFrame()
+
+    latest = _execute_df(
+        conn,
+        """
+        SELECT
+            s.ticker,
+            s.price,
+            s.avg_volume,
+            s.perf_1w,
+            s.perf_1m,
+            s.perf_3m,
+            s.last_updated
+        FROM ticker_snapshots s
+        JOIN refresh_runs r ON r.run_id = s.run_id
+        WHERE r.status IN ('success', 'partial')
+          AND s.snapshot_source = ?
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) = 1
+        """,
+        [preferred_source],
+    )
+    if latest.empty:
+        return pd.DataFrame()
+
+    membership = _execute_df(
+        conn,
+        """
+        SELECT
+            m.ticker,
+            STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+            STRING_AGG(
+                DISTINCT COALESCE(NULLIF(t.category, ''), 'Uncategorized'),
+                ', '
+                ORDER BY COALESCE(NULLIF(t.category, ''), 'Uncategorized')
+            ) AS current_categories
+        FROM theme_membership m
+        JOIN themes t ON t.id = m.theme_id
+        GROUP BY m.ticker
+        """,
+    )
+    if membership.empty:
+        return pd.DataFrame()
+
+    candidates = latest.merge(membership, on="ticker", how="inner")
+    if candidates.empty:
+        return pd.DataFrame()
+
+    for col in ("price", "avg_volume", "perf_1w", "perf_1m", "perf_3m"):
+        candidates[col] = pd.to_numeric(candidates.get(col), errors="coerce")
+
+    candidates["dollar_volume"] = candidates["price"] * candidates["avg_volume"]
+    candidates["abs_perf_1w"] = candidates["perf_1w"].abs()
+    candidates["abs_perf_1m"] = candidates["perf_1m"].abs()
+
+    short_window_mask = (
+        candidates["abs_perf_1w"].ge(CALCULATION_OUTLIER_MIN_ABS_PERF_1W)
+        & candidates["dollar_volume"].lt(CALCULATION_OUTLIER_MAX_DOLLAR_VOLUME)
+    )
+    low_price_mask = (
+        candidates["price"].lt(CALCULATION_OUTLIER_MAX_PRICE)
+        & candidates["abs_perf_1w"].ge(CURRENT_RANKING_RETURN_CAP_PCT)
+    )
+    medium_window_mask = (
+        candidates["abs_perf_1m"].ge(CALCULATION_OUTLIER_MIN_ABS_PERF_1M)
+        & candidates["dollar_volume"].lt(max(CURRENT_RANKING_MIN_DOLLAR_VOLUME, CALCULATION_OUTLIER_MAX_DOLLAR_VOLUME))
+    )
+    candidates = candidates[short_window_mask | low_price_mask | medium_window_mask].copy()
+    if candidates.empty:
+        return pd.DataFrame()
+
+    def _reason(row) -> str:
+        if pd.notna(row.get("abs_perf_1w")) and float(row["abs_perf_1w"]) >= CALCULATION_OUTLIER_MIN_ABS_PERF_1W:
+            return (
+                f"Extreme 1W move ({float(row['perf_1w']):+.1f}%) on low dollar volume "
+                f"({float(row['dollar_volume']):,.0f}). Review suppression from calculations."
+            )
+        if pd.notna(row.get("abs_perf_1m")) and float(row["abs_perf_1m"]) >= CALCULATION_OUTLIER_MIN_ABS_PERF_1M:
+            return (
+                f"Extreme 1M move ({float(row['perf_1m']):+.1f}%) on low dollar volume "
+                f"({float(row['dollar_volume']):,.0f}). Review suppression from calculations."
+            )
+        return (
+            f"Low-price contributor ({float(row['price']):.2f}) showing large return "
+            f"({float(row['perf_1w']):+.1f}% 1W) with weak liquidity ({float(row['dollar_volume']):,.0f} dollar volume)."
+        )
+
+    candidates["suggested_reason"] = candidates.apply(_reason, axis=1)
+    candidates["affected_calculation_surfaces"] = "current rankings, historical movement"
+    return candidates[
+        [
+            "ticker",
+            "price",
+            "avg_volume",
+            "dollar_volume",
+            "perf_1w",
+            "perf_1m",
+            "perf_3m",
+            "last_updated",
+            "current_theme_names",
+            "current_categories",
+            "suggested_reason",
+            "affected_calculation_surfaces",
+        ]
+    ].reset_index(drop=True)
+
+
+def _load_calculation_outlier_candidates(
+    conn,
+    *,
+    read_conn_factory=None,
+) -> tuple[pd.DataFrame, list[str]]:
+    warnings: list[str] = []
+    if read_conn_factory is not None:
+        try:
+            with read_conn_factory() as read_conn:
+                return _calculation_outlier_candidates(read_conn), warnings
+        except Exception as exc:
+            warnings.append(
+                "Calculation outlier check could not use the isolated read path; "
+                f"falling back to the shared connection. Details: {exc}"
+            )
+    try:
+        return _calculation_outlier_candidates(conn), warnings
+    except (duckdb.Error, Exception) as exc:
+        warnings.append(
+            "Calculation outlier check is temporarily unavailable, so the rest of the symbol hygiene queue "
+            f"will continue without that advisory context. Details: {exc}"
+        )
+        return pd.DataFrame(), warnings
+
+
+def sync_calculation_outlier_flags(conn, *, read_conn_factory=None) -> dict[str, object]:
+    candidates, warnings = _load_calculation_outlier_candidates(conn, read_conn_factory=read_conn_factory)
+    candidate_map = {str(row["ticker"]).strip().upper(): row for _, row in candidates.iterrows()}
+    candidate_tickers = set(candidate_map.keys())
+    flagged = 0
+    cleared = 0
+
+    existing_calc_rows = conn.execute(
+        """
+        SELECT ticker
+        FROM symbol_refresh_status
+        WHERE last_failure_category = ?
+        """,
+        [CALCULATION_OUTLIER],
+    ).fetchall()
+    existing_calc_tickers = {str(row[0]).strip().upper() for row in existing_calc_rows}
+
+    for ticker, row in candidate_map.items():
+        ensure_symbol_row(conn, ticker)
+        state = _load_state(conn, ticker)
+        if _allowlisted_calculation_outlier(state):
+            continue
+
+        current_status = str(state[1] or ACTIVE) if state else ACTIVE
+        current_suggested = str(state[2] or "") if state and state[2] else ""
+        current_category = str(state[4] or "") if state and state[4] else ""
+        if current_status == REFRESH_SUPPRESSED:
+            continue
+        if current_suggested and current_category != CALCULATION_OUTLIER:
+            continue
+
+        conn.execute(
+            """
+            UPDATE symbol_refresh_status
+            SET suggested_status = ?,
+                suggested_reason = ?,
+                last_failure_category = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ticker = ?
+            """,
+            [REFRESH_SUPPRESSED, str(row["suggested_reason"]), CALCULATION_OUTLIER, ticker],
+        )
+        flagged += 1
+
+    stale_tickers = sorted(existing_calc_tickers - candidate_tickers)
+    for ticker in stale_tickers:
+        state = _load_state(conn, ticker)
+        if not state:
+            continue
+        if str(state[1] or "") == REFRESH_SUPPRESSED:
+            continue
+        if _allowlisted_calculation_outlier(state):
+            continue
+        conn.execute(
+            """
+            UPDATE symbol_refresh_status
+            SET suggested_status = NULL,
+                suggested_reason = CASE
+                    WHEN suggested_status IS NOT NULL THEN 'Calculation outlier no longer triggered.'
+                    ELSE suggested_reason
+                END,
+                last_failure_category = CASE
+                    WHEN last_failure_category = ? THEN NULL
+                    ELSE last_failure_category
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ticker = ?
+            """,
+            [CALCULATION_OUTLIER, ticker],
+        )
+        cleared += 1
+
+    return {"flagged": flagged, "cleared": cleared, "warnings": warnings}
+
+
+def symbol_hygiene_queue(conn, limit: int = 200, *, outlier_read_conn_factory=None) -> pd.DataFrame:
+    # Authoritative Health-page runtime path:
+    # keep the main queue on the shared app connection, but isolate the heavier outlier read path when a
+    # fresh-read factory is provided so reruns cannot fall back to an older ambiguous helper path.
+    sync_result = sync_calculation_outlier_flags(conn, read_conn_factory=outlier_read_conn_factory)
+    warnings = list(sync_result.get("warnings") or [])
+    queue = _base_symbol_hygiene_queue(conn, limit=limit)
+    queue.attrs["warnings"] = warnings
+    if queue.empty:
+        return queue
+
+    outlier_context, outlier_warnings = _load_calculation_outlier_candidates(
+        conn,
+        read_conn_factory=outlier_read_conn_factory,
+    )
+    warnings.extend(outlier_warnings)
+    queue.attrs["warnings"] = warnings
+    if outlier_context.empty:
+        return queue
+
+    outlier_context = outlier_context.rename(
+        columns={
+            "last_updated": "outlier_market_data_at",
+            "suggested_reason": "outlier_reason",
+        }
+    )
+    queue = queue.merge(
+        outlier_context,
+        on=["ticker", "current_theme_names", "current_categories"],
+        how="left",
+    )
+    queue.attrs["warnings"] = warnings
+    return queue
+
+
+def filter_symbol_hygiene_queue(queue: pd.DataFrame, queue_view: str) -> pd.DataFrame:
+    if queue.empty:
+        return queue
+
+    out = queue.copy()
+    if queue_view == "Pending review":
+        mask = out["suggested_status"].notna() | out["status"].isin([INACTIVE_CANDIDATE, WATCH])
+        out = out[mask & (out["status"] != REFRESH_SUPPRESSED)]
+    elif queue_view == "Suppressed / resolved":
+        out = out[out["status"] == REFRESH_SUPPRESSED]
+    return out.reset_index(drop=True)
+
+
+def sort_symbol_hygiene_queue(queue: pd.DataFrame, sort_mode: str) -> pd.DataFrame:
+    if queue.empty:
+        return queue
+
+    out = queue.copy()
+    decision = out.apply(hygiene_decision_context, axis=1, result_type="expand")
+    out["recommended_action"] = decision["recommended_action"]
+    out["confidence"] = decision["confidence"]
+    out["recommendation_explanation"] = decision["explanation"]
+    out["_confidence_rank"] = out["confidence"].map({"high": 2, "medium": 1, "low": 0}).fillna(0)
+    out["_days_since_sort"] = out["days_since_last_valid_data"].fillna(10**9)
+
+    if sort_mode == "Longest invalid period":
+        sort_cols = ["_days_since_sort", "_confidence_rank", "consecutive_failure_count", "rolling_failure_count", "ticker"]
+    elif sort_mode == "Most consecutive failures":
+        sort_cols = ["consecutive_failure_count", "_confidence_rank", "_days_since_sort", "rolling_failure_count", "ticker"]
+    elif sort_mode == "Most rolling failures":
+        sort_cols = ["rolling_failure_count", "_confidence_rank", "_days_since_sort", "consecutive_failure_count", "ticker"]
+    else:
+        sort_cols = ["_confidence_rank", "_days_since_sort", "consecutive_failure_count", "rolling_failure_count", "ticker"]
+
+    ascending = [False, False, False, False, True]
+    return out.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
 
 
 def approve_suppression(conn, ticker: str, note: str | None = None) -> None:
     ensure_symbol_row(conn, ticker)
-    reason = note or "Suppression approved in Health review queue."
+    reason = note or "Suppression approved in Health review queue. Excluded from refresh, current rankings, and historical movement calculations."
     conn.execute(
         """
         UPDATE symbol_refresh_status
@@ -187,6 +629,48 @@ def approve_suppression(conn, ticker: str, note: str | None = None) -> None:
     )
 
 
+def apply_symbol_hygiene_action(conn, ticker: str, action: str) -> None:
+    normalized = (action or "").strip().lower()
+    if normalized == "suppress":
+        approve_suppression(conn, ticker)
+    elif normalized == "keep_active":
+        reject_keep_active(conn, ticker)
+    elif normalized == "watch":
+        reset_failure_history(conn, ticker, to_watch=True)
+    elif normalized == "reset":
+        reset_failure_history(conn, ticker, to_watch=False)
+    else:
+        raise ValueError(f"Unknown symbol hygiene action: {action}")
+
+
+def apply_staged_symbol_hygiene_actions(conn, staged_actions: dict[str, str]) -> dict[str, object]:
+    normalized_actions = {
+        str(ticker).strip().upper(): str(action).strip().lower()
+        for ticker, action in staged_actions.items()
+        if str(ticker).strip() and str(action).strip().lower() in STAGED_ACTIONS and str(action).strip().lower() != "none"
+    }
+    if not normalized_actions:
+        return {"applied_count": 0, "by_action": {}, "tickers": []}
+
+    by_action: dict[str, int] = {}
+    tickers = sorted(normalized_actions.keys())
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        for ticker, action in normalized_actions.items():
+            apply_symbol_hygiene_action(conn, ticker, action)
+            by_action[action] = by_action.get(action, 0) + 1
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    return {
+        "applied_count": len(normalized_actions),
+        "by_action": by_action,
+        "tickers": tickers,
+    }
+
+
 def reject_keep_active(conn, ticker: str) -> None:
     ensure_symbol_row(conn, ticker)
     conn.execute(
@@ -195,6 +679,7 @@ def reject_keep_active(conn, ticker: str) -> None:
         SET status='active',
             suggested_status=NULL,
             suggested_reason='Suppression rejected; kept active by reviewer.',
+            suppression_reason='Calculation outlier kept active by reviewer.',
             updated_at=CURRENT_TIMESTAMP
         WHERE ticker=?
         """,

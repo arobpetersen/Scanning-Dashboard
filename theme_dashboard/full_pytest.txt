@@ -1,0 +1,20 @@
+
+=================================== ERRORS ====================================
+_____________________ ERROR collecting tests/tmpe9_kwble ______________________
+.venv\Lib\site-packages\_pytest\runner.py:353: in from_call
+    result: TResult | None = func()
+                             ^^^^^^
+.venv\Lib\site-packages\_pytest\runner.py:398: in collect
+    return list(collector.collect())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv\Lib\site-packages\_pytest\main.py:557: in collect
+    for direntry in scandir(self.path):
+                    ^^^^^^^^^^^^^^^^^^
+.venv\Lib\site-packages\_pytest\pathlib.py:963: in scandir
+    scandir_iter = os.scandir(path)
+                   ^^^^^^^^^^^^^^^^
+E   PermissionError: [WinError 5] Access is denied: 'C:\\Users\\arobp\\OneDrive\\Documents\\Trade\\Scanning_Dash\\Scanning-Dashboard\\theme_dashboard\\tests\\tmpe9_kwble'
+=========================== short test summary info ===========================
+ERROR tests/tmpe9_kwble - PermissionError: [WinError 5] Access is denied: 'C:...
+!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 1.46s

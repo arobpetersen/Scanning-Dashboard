@@ -1,16 +1,135 @@
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import duckdb
+import streamlit as st
+
+try:
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+except Exception:
+    def get_script_run_ctx():
+        return None
 
 from .config import DB_PATH
+
+
+DB_CONNECT_RETRY_ATTEMPTS = 3
+DB_CONNECT_RETRY_SLEEP_SECONDS = 0.15
+
+
+class DatabaseLockedError(RuntimeError):
+    """Raised when the local DuckDB file cannot be opened due to concurrent access."""
+
+
+def database_path_str() -> str:
+    return str(Path(DB_PATH))
+
+
+def _is_lock_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return any(
+        token in message
+        for token in [
+            "being used by another process",
+            "cannot access the file because it is being used by another process",
+            "used by another process",
+            "file is locked",
+            "database is locked",
+        ]
+    )
+
+
+def _database_locked_message(db_path: str) -> str:
+    return (
+        "The local DuckDB file is locked by another process and could not be opened. "
+        "Likely causes: another Streamlit dashboard instance is running, a test run still has the DB open, "
+        "or another Python session is connected to the file. "
+        f"Database path: {db_path}"
+    )
+
+
+def _is_transaction_conflict_error(exc: Exception) -> bool:
+    return "conflict on update" in str(exc or "").lower()
+
+
+def _best_effort_init_update(conn, sql: str, params: list[object] | None = None) -> bool:
+    try:
+        conn.execute(sql, params or [])
+        return True
+    except duckdb.TransactionException as exc:
+        if _is_transaction_conflict_error(exc):
+            return False
+        raise
+
+
+def _connect_with_retry(db_path: str):
+    conn = None
+    last_exc: Exception | None = None
+    for attempt in range(DB_CONNECT_RETRY_ATTEMPTS):
+        try:
+            conn = duckdb.connect(db_path)
+            break
+        except duckdb.IOException as exc:
+            if not _is_lock_error(exc):
+                raise
+            last_exc = exc
+            if attempt + 1 < DB_CONNECT_RETRY_ATTEMPTS:
+                time.sleep(DB_CONNECT_RETRY_SLEEP_SECONDS)
+                continue
+            raise DatabaseLockedError(_database_locked_message(db_path)) from exc
+    if conn is None:
+        raise DatabaseLockedError(_database_locked_message(db_path)) from last_exc
+    return conn
+
+
+def _connection_is_usable(conn) -> bool:
+    try:
+        conn.execute("SELECT 1")
+        return True
+    except duckdb.Error:
+        return False
+
+
+def _has_streamlit_script_run_context() -> bool:
+    return get_script_run_ctx() is not None
+
+
+@st.cache_resource(show_spinner=False)
+def get_db_connection(db_path: str):
+    return _connect_with_retry(db_path)
+
+
+@contextmanager
+def get_fresh_read_conn():
+    conn = _connect_with_retry(database_path_str())
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
+def get_bootstrap_conn():
+    # Schema/bootstrap DDL should not reuse the long-lived shared Streamlit connection.
+    # A short-lived connection avoids carrying forward any poisoned pending-result state.
+    conn = _connect_with_retry(database_path_str())
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 SCHEMA_SQL = """
 CREATE SEQUENCE IF NOT EXISTS themes_id_seq;
 CREATE SEQUENCE IF NOT EXISTS snapshots_id_seq;
 CREATE SEQUENCE IF NOT EXISTS refresh_run_id_seq;
 CREATE SEQUENCE IF NOT EXISTS suggestion_id_seq;
+CREATE SEQUENCE IF NOT EXISTS historical_reconstruction_run_id_seq;
+CREATE SEQUENCE IF NOT EXISTS scanner_import_run_id_seq;
+CREATE SEQUENCE IF NOT EXISTS scanner_hit_id_seq;
+CREATE SEQUENCE IF NOT EXISTS scanner_research_review_id_seq;
 
 CREATE TABLE IF NOT EXISTS themes (
     id BIGINT PRIMARY KEY DEFAULT nextval('themes_id_seq'),
@@ -26,6 +145,23 @@ CREATE TABLE IF NOT EXISTS theme_membership (
     ticker VARCHAR NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(theme_id, ticker),
+    CHECK (length(trim(ticker)) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS governed_ticker_onboarding (
+    ticker VARCHAR PRIMARY KEY,
+    added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    onboarding_source VARCHAR NOT NULL,
+    history_readiness_status VARCHAR NOT NULL DEFAULT 'unknown',
+    backfill_status VARCHAR NOT NULL DEFAULT 'not_needed',
+    last_backfill_attempt_at TIMESTAMP,
+    last_backfill_error VARCHAR,
+    downstream_refresh_needed BOOLEAN NOT NULL DEFAULT FALSE,
+    history_row_count BIGINT NOT NULL DEFAULT 0,
+    history_target_days BIGINT NOT NULL DEFAULT 30,
+    history_market_data_source VARCHAR,
+    history_latest_trading_date DATE,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK (length(trim(ticker)) > 0)
 );
 
@@ -90,6 +226,69 @@ CREATE TABLE IF NOT EXISTS theme_snapshots (
     PRIMARY KEY (run_id, theme_id)
 );
 
+CREATE TABLE IF NOT EXISTS historical_reconstruction_runs (
+    run_id BIGINT PRIMARY KEY DEFAULT nextval('historical_reconstruction_run_id_seq'),
+    run_kind VARCHAR NOT NULL,
+    provenance_class VARCHAR NOT NULL DEFAULT 'reconstructed',
+    provenance_source_label VARCHAR NOT NULL,
+    market_data_source VARCHAR NOT NULL,
+    started_at TIMESTAMP NOT NULL,
+    finished_at TIMESTAMP,
+    status VARCHAR NOT NULL,
+    start_date DATE,
+    end_date DATE,
+    target_tickers VARCHAR,
+    target_theme_ids VARCHAR,
+    ticker_count BIGINT NOT NULL DEFAULT 0,
+    theme_count BIGINT NOT NULL DEFAULT 0,
+    ticker_history_rows_written BIGINT NOT NULL DEFAULT 0,
+    ticker_history_rows_skipped BIGINT NOT NULL DEFAULT 0,
+    snapshot_rows_written BIGINT NOT NULL DEFAULT 0,
+    snapshot_rows_skipped BIGINT NOT NULL DEFAULT 0,
+    failed_tickers VARCHAR,
+    error_message VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS ticker_daily_history (
+    run_id BIGINT,
+    ticker VARCHAR NOT NULL,
+    trading_date DATE NOT NULL,
+    open DOUBLE,
+    high DOUBLE,
+    low DOUBLE,
+    close DOUBLE,
+    volume DOUBLE,
+    vwap DOUBLE,
+    trade_count BIGINT,
+    provenance_class VARCHAR NOT NULL DEFAULT 'reconstructed',
+    provenance_source_label VARCHAR NOT NULL,
+    market_data_source VARCHAR NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (ticker, trading_date, market_data_source, provenance_source_label),
+    CHECK (length(trim(ticker)) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS reconstructed_theme_snapshots (
+    run_id BIGINT NOT NULL,
+    snapshot_date DATE NOT NULL,
+    snapshot_time TIMESTAMP NOT NULL,
+    theme_id BIGINT NOT NULL,
+    ticker_count BIGINT NOT NULL,
+    avg_1w DOUBLE,
+    avg_1m DOUBLE,
+    avg_3m DOUBLE,
+    positive_1w_breadth_pct DOUBLE,
+    positive_1m_breadth_pct DOUBLE,
+    positive_3m_breadth_pct DOUBLE,
+    composite_score DOUBLE,
+    provenance_class VARCHAR NOT NULL DEFAULT 'reconstructed',
+    provenance_source_label VARCHAR NOT NULL,
+    market_data_source VARCHAR NOT NULL,
+    membership_basis VARCHAR NOT NULL DEFAULT 'current_governed_membership',
+    PRIMARY KEY (snapshot_date, theme_id, provenance_source_label)
+);
+
 CREATE TABLE IF NOT EXISTS theme_suggestions (
     suggestion_id BIGINT PRIMARY KEY DEFAULT nextval('suggestion_id_seq'),
     suggestion_type VARCHAR NOT NULL,
@@ -99,11 +298,14 @@ CREATE TABLE IF NOT EXISTS theme_suggestions (
     source VARCHAR NOT NULL,
     rationale VARCHAR,
     proposed_theme_name VARCHAR,
+    proposed_theme_category VARCHAR,
     proposed_ticker VARCHAR,
     existing_theme_id BIGINT,
     proposed_target_theme_id BIGINT,
     reviewer_notes VARCHAR,
     priority VARCHAR NOT NULL DEFAULT 'medium',
+    source_context_json VARCHAR,
+    source_updated_at TIMESTAMP,
     CHECK (status IN ('pending','approved','rejected','applied','obsolete')),
     CHECK (suggestion_type IN (
         'add_ticker_to_theme',
@@ -113,7 +315,104 @@ CREATE TABLE IF NOT EXISTS theme_suggestions (
         'move_ticker_between_themes',
         'review_theme'
     )),
-    CHECK (source IN ('manual','rules_engine','ai_proposal','imported'))
+    CHECK (source IN ('manual','rules_engine','ai_proposal','imported','scanner_audit'))
+);
+
+CREATE TABLE IF NOT EXISTS scanner_import_runs (
+    import_run_id BIGINT PRIMARY KEY DEFAULT nextval('scanner_import_run_id_seq'),
+    import_source VARCHAR NOT NULL,
+    folder_path VARCHAR NOT NULL,
+    file_pattern VARCHAR NOT NULL,
+    started_at TIMESTAMP NOT NULL,
+    finished_at TIMESTAMP,
+    status VARCHAR NOT NULL,
+    files_seen BIGINT NOT NULL DEFAULT 0,
+    files_processed BIGINT NOT NULL DEFAULT 0,
+    files_skipped BIGINT NOT NULL DEFAULT 0,
+    files_failed BIGINT NOT NULL DEFAULT 0,
+    rows_read BIGINT NOT NULL DEFAULT 0,
+    rows_imported BIGINT NOT NULL DEFAULT 0,
+    rows_skipped BIGINT NOT NULL DEFAULT 0,
+    unique_tickers_observed BIGINT NOT NULL DEFAULT 0,
+    notes VARCHAR,
+    error_message VARCHAR,
+    CHECK (status IN ('running','success','partial','no_files','failed'))
+);
+
+CREATE TABLE IF NOT EXISTS scanner_hit_history (
+    hit_id BIGINT PRIMARY KEY DEFAULT nextval('scanner_hit_id_seq'),
+    import_run_id BIGINT,
+    import_source VARCHAR NOT NULL,
+    normalized_ticker VARCHAR NOT NULL,
+    raw_ticker VARCHAR,
+    observed_date DATE NOT NULL,
+    observed_at TIMESTAMP NOT NULL,
+    source_file VARCHAR NOT NULL,
+    source_label VARCHAR NOT NULL,
+    scanner_name VARCHAR NOT NULL,
+    file_modified_at TIMESTAMP,
+    scanner_name_inferred BOOLEAN NOT NULL DEFAULT FALSE,
+    scanner_name_basis VARCHAR NOT NULL DEFAULT 'file_column',
+    observed_date_inferred BOOLEAN NOT NULL DEFAULT FALSE,
+    observed_date_basis VARCHAR NOT NULL DEFAULT 'file_column',
+    row_hash VARCHAR NOT NULL UNIQUE,
+    supporting_fields_json VARCHAR,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (length(trim(normalized_ticker)) > 0),
+    CHECK (length(trim(source_file)) > 0),
+    CHECK (length(trim(scanner_name)) > 0),
+    CHECK (scanner_name_basis IN ('file_column','filename_parse','default_source_label_fallback')),
+    CHECK (observed_date_basis IN ('file_column','filename_parse','modified_timestamp_fallback'))
+);
+
+CREATE TABLE IF NOT EXISTS scanner_imported_files (
+    file_fingerprint VARCHAR PRIMARY KEY,
+    source_file VARCHAR NOT NULL,
+    file_name VARCHAR NOT NULL,
+    file_size BIGINT,
+    modified_at TIMESTAMP,
+    first_import_run_id BIGINT,
+    last_seen_run_id BIGINT,
+    import_status VARCHAR NOT NULL DEFAULT 'success',
+    processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (length(trim(file_fingerprint)) > 0),
+    CHECK (length(trim(source_file)) > 0),
+    CHECK (length(trim(file_name)) > 0),
+    CHECK (import_status IN ('success','failed'))
+);
+
+CREATE TABLE IF NOT EXISTS scanner_candidate_review_state (
+    normalized_ticker VARCHAR PRIMARY KEY,
+    review_state VARCHAR NOT NULL DEFAULT 'active',
+    review_note VARCHAR,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (length(trim(normalized_ticker)) > 0),
+    CHECK (review_state IN ('active','ignored','reviewed'))
+);
+
+CREATE TABLE IF NOT EXISTS scanner_research_reviews (
+    review_id BIGINT PRIMARY KEY DEFAULT nextval('scanner_research_review_id_seq'),
+    ticker VARCHAR NOT NULL,
+    generated_at TIMESTAMP NOT NULL,
+    theme_generation_strategy VARCHAR NOT NULL,
+    research_mode VARCHAR,
+    outcome_class VARCHAR NOT NULL,
+    reviewer_notes VARCHAR,
+    recommended_action VARCHAR,
+    confidence VARCHAR,
+    possible_new_theme VARCHAR,
+    draft_context_json VARCHAR,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (ticker, generated_at, theme_generation_strategy),
+    CHECK (length(trim(ticker)) > 0),
+    CHECK (outcome_class IN (
+        'direct_fit_correct',
+        'adjacent_fit_acceptable',
+        'should_have_been_tentative',
+        'false_positive',
+        'missed_obvious_theme'
+    ))
 );
 
 CREATE TABLE IF NOT EXISTS symbol_refresh_status (
@@ -122,6 +421,9 @@ CREATE TABLE IF NOT EXISTS symbol_refresh_status (
     suggested_status VARCHAR,
     suggested_reason VARCHAR,
     suppression_reason VARCHAR,
+    manual_suppressed BOOLEAN NOT NULL DEFAULT FALSE,
+    manual_suppression_reason VARCHAR,
+    manual_suppressed_at TIMESTAMP,
     last_failure_category VARCHAR,
     consecutive_failure_count BIGINT NOT NULL DEFAULT 0,
     rolling_failure_count BIGINT NOT NULL DEFAULT 0,
@@ -142,22 +444,44 @@ CREATE TABLE IF NOT EXISTS refresh_failures (
 
 CREATE INDEX IF NOT EXISTS idx_theme_membership_theme_id ON theme_membership(theme_id);
 CREATE INDEX IF NOT EXISTS idx_theme_membership_ticker ON theme_membership(ticker);
+CREATE INDEX IF NOT EXISTS idx_governed_ticker_onboarding_status ON governed_ticker_onboarding(history_readiness_status, backfill_status);
 CREATE INDEX IF NOT EXISTS idx_snapshots_run_id ON ticker_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_ticker ON ticker_snapshots(ticker);
 CREATE INDEX IF NOT EXISTS idx_theme_snapshots_run_id ON theme_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_theme_snapshots_theme_id ON theme_snapshots(theme_id);
+CREATE INDEX IF NOT EXISTS idx_reconstructed_theme_snapshots_theme_id ON reconstructed_theme_snapshots(theme_id);
+CREATE INDEX IF NOT EXISTS idx_reconstructed_theme_snapshots_date ON reconstructed_theme_snapshots(snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_historical_reconstruction_runs_status ON historical_reconstruction_runs(status);
+CREATE INDEX IF NOT EXISTS idx_ticker_daily_history_ticker ON ticker_daily_history(ticker);
+CREATE INDEX IF NOT EXISTS idx_ticker_daily_history_date ON ticker_daily_history(trading_date);
 CREATE INDEX IF NOT EXISTS idx_refresh_failures_run_id ON refresh_failures(run_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_failures_category ON refresh_failures(failure_category);
 CREATE INDEX IF NOT EXISTS idx_refresh_run_tickers_run_id ON refresh_run_tickers(run_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_refresh_status_status ON symbol_refresh_status(status);
 CREATE INDEX IF NOT EXISTS idx_theme_suggestions_status ON theme_suggestions(status);
 CREATE INDEX IF NOT EXISTS idx_theme_suggestions_type ON theme_suggestions(suggestion_type);
+CREATE INDEX IF NOT EXISTS idx_scanner_import_runs_status ON scanner_import_runs(status);
+CREATE INDEX IF NOT EXISTS idx_scanner_imported_files_status ON scanner_imported_files(import_status);
+CREATE INDEX IF NOT EXISTS idx_scanner_hit_history_ticker ON scanner_hit_history(normalized_ticker);
+CREATE INDEX IF NOT EXISTS idx_scanner_hit_history_observed_date ON scanner_hit_history(observed_date);
+CREATE INDEX IF NOT EXISTS idx_scanner_hit_history_scanner_name ON scanner_hit_history(scanner_name);
+CREATE INDEX IF NOT EXISTS idx_scanner_candidate_review_state_state ON scanner_candidate_review_state(review_state);
+CREATE INDEX IF NOT EXISTS idx_scanner_research_reviews_outcome ON scanner_research_reviews(outcome_class);
+CREATE INDEX IF NOT EXISTS idx_scanner_research_reviews_generated_at ON scanner_research_reviews(generated_at);
 """
 
 
 @contextmanager
 def get_conn():
-    conn = duckdb.connect(str(DB_PATH))
+    db_path = database_path_str()
+    if _has_streamlit_script_run_context():
+        conn = get_db_connection(db_path)
+        if not _connection_is_usable(conn):
+            get_db_connection.clear()
+            conn = get_db_connection(db_path)
+        yield conn
+        return
+    conn = _connect_with_retry(db_path)
     try:
         yield conn
     finally:
@@ -176,11 +500,14 @@ def _rebuild_theme_suggestions(conn) -> None:
             source VARCHAR NOT NULL,
             rationale VARCHAR,
             proposed_theme_name VARCHAR,
+            proposed_theme_category VARCHAR,
             proposed_ticker VARCHAR,
             existing_theme_id BIGINT,
             proposed_target_theme_id BIGINT,
             reviewer_notes VARCHAR,
             priority VARCHAR NOT NULL DEFAULT 'medium',
+            source_context_json VARCHAR,
+            source_updated_at TIMESTAMP,
             CHECK (status IN ('pending','approved','rejected','applied','obsolete')),
             CHECK (suggestion_type IN (
                 'add_ticker_to_theme',
@@ -190,7 +517,7 @@ def _rebuild_theme_suggestions(conn) -> None:
                 'move_ticker_between_themes',
                 'review_theme'
             )),
-            CHECK (source IN ('manual','rules_engine','ai_proposal','imported'))
+            CHECK (source IN ('manual','rules_engine','ai_proposal','imported','scanner_audit'))
         )
         """
     )
@@ -198,12 +525,13 @@ def _rebuild_theme_suggestions(conn) -> None:
         """
         INSERT INTO theme_suggestions_migrated(
             suggestion_id, suggestion_type, status, created_at, reviewed_at, source,
-            rationale, proposed_theme_name, proposed_ticker, existing_theme_id,
-            proposed_target_theme_id, reviewer_notes, priority
+            rationale, proposed_theme_name, proposed_theme_category, proposed_ticker, existing_theme_id,
+            proposed_target_theme_id, reviewer_notes, priority, source_context_json, source_updated_at
         )
         SELECT suggestion_id, suggestion_type, status, created_at, reviewed_at, source,
-               rationale, proposed_theme_name, proposed_ticker, existing_theme_id,
-               proposed_target_theme_id, reviewer_notes, COALESCE(priority, 'medium')
+               rationale, proposed_theme_name, NULL, proposed_ticker, existing_theme_id,
+               proposed_target_theme_id, reviewer_notes, COALESCE(priority, 'medium'),
+               NULL, NULL
         FROM theme_suggestions
         """
     )
@@ -214,7 +542,7 @@ def _rebuild_theme_suggestions(conn) -> None:
 
 
 def init_db() -> None:
-    with get_conn() as conn:
+    with get_bootstrap_conn() as conn:
         conn.execute(SCHEMA_SQL)
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_type VARCHAR")
         conn.execute("ALTER TABLE refresh_runs ADD COLUMN IF NOT EXISTS scope_theme_name VARCHAR")
@@ -228,6 +556,9 @@ def init_db() -> None:
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS suggested_status VARCHAR")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS suggested_reason VARCHAR")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS suppression_reason VARCHAR")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS manual_suppressed BOOLEAN DEFAULT FALSE")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS manual_suppression_reason VARCHAR")
+        conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS manual_suppressed_at TIMESTAMP")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS last_failure_category VARCHAR")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS consecutive_failure_count BIGINT DEFAULT 0")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS rolling_failure_count BIGINT DEFAULT 0")
@@ -235,17 +566,122 @@ def init_db() -> None:
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMP")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS last_run_id BIGINT")
         conn.execute("ALTER TABLE symbol_refresh_status ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
-        conn.execute("UPDATE symbol_refresh_status SET updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)")
+        _best_effort_init_update(
+            conn,
+            "UPDATE symbol_refresh_status SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE symbol_refresh_status SET manual_suppressed = COALESCE(manual_suppressed, FALSE) WHERE manual_suppressed IS NULL",
+        )
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
+        conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS source_context_json VARCHAR")
+        conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS source_updated_at TIMESTAMP")
+        conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS proposed_theme_category VARCHAR")
         conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
         conn.execute("ALTER TABLE theme_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
-        conn.execute("UPDATE ticker_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''")
-        conn.execute("UPDATE theme_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''")
-        conn.execute("UPDATE theme_suggestions SET priority='medium' WHERE priority IS NULL OR trim(priority)=''")
+        conn.execute("ALTER TABLE historical_reconstruction_runs ADD COLUMN IF NOT EXISTS ticker_history_rows_written BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE historical_reconstruction_runs ADD COLUMN IF NOT EXISTS ticker_history_rows_skipped BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE scanner_import_runs ADD COLUMN IF NOT EXISTS files_failed BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS scanner_name_inferred BOOLEAN DEFAULT FALSE")
+        conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS scanner_name_basis VARCHAR DEFAULT 'file_column'")
+        conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS observed_date_inferred BOOLEAN DEFAULT FALSE")
+        conn.execute("ALTER TABLE scanner_hit_history ADD COLUMN IF NOT EXISTS observed_date_basis VARCHAR DEFAULT 'file_column'")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scanner_research_reviews (
+                review_id BIGINT PRIMARY KEY DEFAULT nextval('scanner_research_review_id_seq'),
+                ticker VARCHAR NOT NULL,
+                generated_at TIMESTAMP NOT NULL,
+                theme_generation_strategy VARCHAR NOT NULL,
+                research_mode VARCHAR,
+                outcome_class VARCHAR NOT NULL,
+                reviewer_notes VARCHAR,
+                recommended_action VARCHAR,
+                confidence VARCHAR,
+                possible_new_theme VARCHAR,
+                draft_context_json VARCHAR,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (ticker, generated_at, theme_generation_strategy),
+                CHECK (length(trim(ticker)) > 0),
+                CHECK (outcome_class IN (
+                    'direct_fit_correct',
+                    'adjacent_fit_acceptable',
+                    'should_have_been_tentative',
+                    'false_positive',
+                    'missed_obvious_theme'
+                ))
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_scanner_research_reviews_outcome ON scanner_research_reviews(outcome_class)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_scanner_research_reviews_generated_at ON scanner_research_reviews(generated_at)")
+        conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS history_row_count BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS history_target_days BIGINT DEFAULT 30")
+        conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS history_market_data_source VARCHAR")
+        conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS history_latest_trading_date DATE")
+        conn.execute("ALTER TABLE governed_ticker_onboarding ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
+        _best_effort_init_update(
+            conn,
+            "UPDATE governed_ticker_onboarding SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL",
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scanner_imported_files (
+                file_fingerprint VARCHAR PRIMARY KEY,
+                source_file VARCHAR NOT NULL,
+                file_name VARCHAR NOT NULL,
+                file_size BIGINT,
+                modified_at TIMESTAMP,
+                first_import_run_id BIGINT,
+                last_seen_run_id BIGINT,
+                import_status VARCHAR NOT NULL DEFAULT 'success',
+                processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK (length(trim(file_fingerprint)) > 0),
+                CHECK (length(trim(source_file)) > 0),
+                CHECK (length(trim(file_name)) > 0),
+                CHECK (import_status IN ('success','failed'))
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_scanner_imported_files_status ON scanner_imported_files(import_status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_governed_ticker_onboarding_status ON governed_ticker_onboarding(history_readiness_status, backfill_status)")
+        _best_effort_init_update(
+            conn,
+            "UPDATE ticker_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE theme_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE theme_suggestions SET priority='medium' WHERE priority IS NULL OR trim(priority)=''",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE scanner_hit_history SET scanner_name_inferred = COALESCE(scanner_name_inferred, FALSE)",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE scanner_hit_history SET scanner_name_basis = COALESCE(NULLIF(trim(scanner_name_basis), ''), CASE WHEN COALESCE(scanner_name_inferred, FALSE) THEN 'filename_parse' ELSE 'file_column' END)",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE scanner_hit_history SET observed_date_inferred = COALESCE(observed_date_inferred, FALSE)",
+        )
+        _best_effort_init_update(
+            conn,
+            "UPDATE scanner_hit_history SET observed_date_basis = COALESCE(NULLIF(trim(observed_date_basis), ''), CASE WHEN COALESCE(observed_date_inferred, FALSE) THEN 'modified_timestamp_fallback' ELSE 'file_column' END)",
+        )
 
         ddl = conn.execute("SELECT sql FROM duckdb_tables() WHERE table_name='theme_suggestions' LIMIT 1").fetchone()
         ddl_text = ddl[0].lower() if ddl and ddl[0] else ""
-        needs_rebuild = any(token not in ddl_text for token in ["review_theme", "obsolete", "priority"])
+        needs_rebuild = any(
+            token not in ddl_text
+            for token in ["review_theme", "obsolete", "priority", "scanner_audit", "source_context_json", "source_updated_at"]
+        )
         if needs_rebuild:
             _rebuild_theme_suggestions(conn)
 

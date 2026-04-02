@@ -4,7 +4,7 @@ from pathlib import Path
 
 from src.config import DB_PATH
 from src.database import get_conn
-from src.queries import baseline_status, core_table_status
+from src.queries import baseline_status, core_table_status, source_audit_status
 
 
 def collect_baseline_check() -> tuple[dict, int]:
@@ -32,6 +32,9 @@ def collect_baseline_check() -> tuple[dict, int]:
         overview = baseline_status(conn)
         row = overview.iloc[0].to_dict() if not overview.empty else {}
         report.update(row)
+        audit = source_audit_status(conn)
+        audit_row = audit.iloc[0].to_dict() if not audit.empty else {}
+        report.update(audit_row)
 
     if int(report.get("themes_count") or 0) <= 0:
         report["warnings"].append("No themes present in DuckDB. Bootstrap/seed may not have run yet.")
@@ -47,13 +50,17 @@ def collect_baseline_check() -> tuple[dict, int]:
             f"Only {int(report.get('ticker_snapshot_sets') or 0)} ticker snapshot set(s) available. "
             "History views become more useful after another refresh."
         )
+    if bool(report.get("active_contamination")):
+        report["warnings"].append("Active source contamination detected in current views. Latest live-facing views are not source-pure.")
+    elif bool(report.get("historical_residue_only")):
+        report["warnings"].append("Mixed source history exists, but current live-facing views are using live-preferred selection.")
 
     return report, exit_code
 
 
 def format_baseline_check(report: dict) -> str:
     lines = [
-        "Scanning Dashboard 2.0 baseline check",
+        "Scanning Dashboard baseline/source check",
         f"DB path: {report['db_path']}",
         f"DB exists: {'yes' if report.get('db_exists') else 'no'}",
         f"DB connection: {'ok' if report.get('db_connection_ok') else 'failed'}",
@@ -75,8 +82,11 @@ def format_baseline_check(report: dict) -> str:
                 f"Runs with theme snapshots: {int(report.get('runs_with_theme_snapshots') or 0)}",
                 f"Latest theme snapshot time: {report.get('latest_theme_snapshot_time') or 'none'}",
                 f"Latest ticker snapshot time: {report.get('latest_ticker_snapshot_time') or 'none'}",
+                f"Preferred current sources: theme={report.get('preferred_theme_source') or 'none'} ticker={report.get('preferred_ticker_source') or 'none'}",
+                f"Latest current-view sources: theme={report.get('latest_theme_view_sources') or 'none'} ticker={report.get('latest_ticker_view_sources') or 'none'}",
                 f"Recent theme snapshot sources: {report.get('recent_theme_sources') or 'none'}",
                 f"Recent ticker snapshot sources: {report.get('recent_ticker_sources') or 'none'}",
+                f"Current views source-pure: {'yes' if not report.get('active_contamination') else 'no'}",
             ]
         )
     if report.get("warnings"):

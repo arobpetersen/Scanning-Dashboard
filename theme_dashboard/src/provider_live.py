@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
+import logging
+import os
 from typing import Iterable
 
 import pandas as pd
@@ -9,6 +11,9 @@ import requests
 
 from .config import LIVE_HISTORICAL_SOURCE, LIVE_QUOTE_PROFILE_SOURCE, massive_api_key
 from .provider_base import ProviderBase
+
+logger = logging.getLogger(__name__)
+TRACE_REFRESH_TICKER = str(os.getenv("REFRESH_TRACE_TICKER", "") or "").strip().upper()
 
 
 class LiveProvider(ProviderBase):
@@ -100,9 +105,7 @@ class LiveProvider(ProviderBase):
             return None
         return float(sum(sample) / len(sample))
 
-    def _fetch_history(self, ticker: str) -> tuple[list[float], list[float], datetime]:
-        end_date = date.today()
-        start_date = end_date - timedelta(days=365)
+    def fetch_ticker_history_range(self, ticker: str, start_date: date, end_date: date) -> pd.DataFrame:
         payload = self._get(
             f"/v2/aggs/ticker/{ticker}/range/1/day/{start_date.isoformat()}/{end_date.isoformat()}",
             adjusted="true",
@@ -114,16 +117,37 @@ class LiveProvider(ProviderBase):
         if not results:
             raise RuntimeError("NO_CANDLES: Massive returned no daily aggregates")
 
-        closes = [float(r["c"]) for r in results if r.get("c") is not None]
-        volumes = [float(r["v"]) for r in results if r.get("v") is not None]
-        if not closes:
+        rows = []
+        for result in results:
+            if result.get("c") is None or result.get("t") is None:
+                continue
+            snapshot_date = datetime.fromtimestamp(float(result["t"]) / 1000.0, tz=timezone.utc).date()
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "snapshot_date": snapshot_date,
+                    "open": float(result["o"]) if result.get("o") is not None else None,
+                    "high": float(result["h"]) if result.get("h") is not None else None,
+                    "low": float(result["l"]) if result.get("l") is not None else None,
+                    "close": float(result["c"]),
+                    "volume": float(result["v"]) if result.get("v") is not None else None,
+                    "vwap": float(result["vw"]) if result.get("vw") is not None else None,
+                    "trade_count": int(result["n"]) if result.get("n") is not None else None,
+                }
+            )
+        history = pd.DataFrame(rows)
+        if history.empty:
             raise RuntimeError("NO_CANDLES: Massive aggregate closes missing")
+        return history
 
-        ts_ms = results[-1].get("t")
-        if ts_ms is None:
-            last_updated = datetime.now(timezone.utc)
-        else:
-            last_updated = datetime.fromtimestamp(float(ts_ms) / 1000.0, tz=timezone.utc)
+    def _fetch_history(self, ticker: str) -> tuple[list[float], list[float], datetime]:
+        end_date = date.today()
+        start_date = end_date - timedelta(days=365)
+        history = self.fetch_ticker_history_range(ticker, start_date, end_date)
+        closes = history["close"].astype(float).tolist()
+        volumes = history["volume"].dropna().astype(float).tolist()
+
+        last_updated = datetime.combine(history["snapshot_date"].max(), datetime.min.time(), tzinfo=timezone.utc)
 
         return closes, volumes, last_updated
 
@@ -155,6 +179,8 @@ class LiveProvider(ProviderBase):
 
         for ticker in normalized:
             try:
+                if TRACE_REFRESH_TICKER and ticker == TRACE_REFRESH_TICKER:
+                    logger.warning("Refresh trace %s: LiveProvider fetch start", ticker)
                 closes, volumes, last_updated = self._fetch_history(ticker)
                 perf_1w = self._calc_return(closes, 5)
                 perf_1m = self._calc_return(closes, 21)
@@ -185,6 +211,14 @@ class LiveProvider(ProviderBase):
                         "last_updated": last_updated,
                     }
                 )
+                if TRACE_REFRESH_TICKER and ticker == TRACE_REFRESH_TICKER:
+                    logger.warning(
+                        "Refresh trace %s: LiveProvider success closes=%s avg_volume_present=%s last_updated=%s",
+                        ticker,
+                        len(closes),
+                        self._avg_volume(volumes, 21) is not None,
+                        last_updated,
+                    )
             except Exception as exc:
                 msg = str(exc)
                 if "RATE_LIMIT" in msg or "429" in msg:
@@ -195,6 +229,8 @@ class LiveProvider(ProviderBase):
                     msg = f"NO_CANDLES: {msg}"
                 else:
                     msg = f"REQUEST_ERROR: {msg}"
+                if TRACE_REFRESH_TICKER and ticker == TRACE_REFRESH_TICKER:
+                    logger.warning("Refresh trace %s: LiveProvider failure message=%s", ticker, msg)
                 failures.append({"ticker": ticker, "error_message": f"Massive fetch failed: {msg}"})
 
         return pd.DataFrame(rows), failures

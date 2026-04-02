@@ -1,0 +1,1249 @@
+...........F............................................................ [ 21%]
+............................F..F............................FF.......... [ 43%]
+..F............................................F.....F..........F....... [ 65%]
+.....FF....................F..F....F..F.............................FFF. [ 86%]
+.F....F.F...................................                             [100%]
+================================== FAILURES ===================================
+_ TestBaselineCheckCommand.test_collect_baseline_check_warns_when_history_is_shallow _
+
+self = <test_baseline_check.TestBaselineCheckCommand testMethod=test_collect_baseline_check_warns_when_history_is_shallow>
+
+    def test_collect_baseline_check_warns_when_history_is_shallow(self):
+        db_path = Path(__file__).resolve().parent / "test_baseline_check.duckdb"
+        if db_path.exists():
+            db_path.unlink()
+        try:
+            with patch("src.database.DB_PATH", db_path), patch("src.config.DB_PATH", db_path), patch("run_baseline_check.DB_PATH", db_path):
+                from src.database import get_conn, init_db
+    
+                init_db()
+                with get_conn() as conn:
+                    run_id = conn.execute(
+                        """
+                        insert into refresh_runs(provider, started_at, finished_at, status, ticker_count, success_count, failure_count)
+                        values ('mock', '2026-03-10 20:00:00', '2026-03-10 22:00:00', 'success', 1, 1, 0)
+                        returning run_id
+                        """
+                    ).fetchone()[0]
+                    conn.execute(
+                        """
+                        insert into ticker_snapshots(
+                            run_id, ticker, price, perf_1w, perf_1m, perf_3m, market_cap, avg_volume,
+                            short_interest_pct, float_shares, adr_pct, last_updated, snapshot_source
+                        )
+                        values (?, 'ABC', 10, 1, 2, 3, 1000, 2000, null, null, null, '2026-03-10 21:00:00', 'mock')
+                        """,
+                        [run_id],
+                    )
+                    conn.execute(
+                        """
+                        insert into theme_snapshots(
+                            run_id, snapshot_time, theme_id, ticker_count, avg_1w, avg_1m, avg_3m,
+                            positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                            composite_score, snapshot_source
+                        )
+                        select ?, '2026-03-10 22:00:00', id, 1, 1, 2, 3, 40, 50, 60, 10, 'mock'
+                        from themes
+                        limit 1
+                        """,
+                        [run_id],
+                    )
+    
+                report, exit_code = collect_baseline_check()
+                rendered = format_baseline_check(report)
+    
+                self.assertEqual(exit_code, 0)
+>               self.assertIn("Only 1 theme snapshot set(s) available", rendered)
+E               AssertionError: 'Only 1 theme snapshot set(s) available' not found in 'Scanning Dashboard baseline/source check\nDB path: C:\\Users\\arobp\\OneDrive\\Documents\\Trade\\Scanning_Dash\\Scanning-Dashboard\\theme_dashboard\\tests\\test_baseline_check.duckdb\nDB exists: yes\nDB connection: ok\nCore tables: ok\nThemes present: 332\nLatest refresh: run_id=1 provider=mock status=success finished_at=2026-03-10 22:00:00\nSnapshot rows: ticker=1 theme=1\nRuns with theme snapshots: 1\nLatest theme snapshot time: NaT\nLatest ticker snapshot time: NaT\nPreferred current sources: theme=none ticker=none\nLatest current-view sources: theme=none ticker=none\nRecent theme snapshot sources: mock\nRecent ticker snapshot sources: mock\nCurrent views source-pure: yes\nWarnings:\n- Only 0 theme snapshot set(s) available. At least 2 boundary snapshots are needed for comparisons.\n- Only 0 ticker snapshot set(s) available. History views become more useful after another refresh.'
+
+tests\test_baseline_check.py:190: AssertionError
+---------------------------- Captured stderr call -----------------------------
+2026-03-22 13:42:51.664 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-22 13:42:51.716 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+_ TestDescriptionFirstResearchRefinements.test_description_first_additive_manufacturing_surfaces_coherent_missing_category _
+
+self = <test_hardening.TestDescriptionFirstResearchRefinements testMethod=test_description_first_additive_manufacturing_surfaces_coherent_missing_category>
+
+    def test_description_first_additive_manufacturing_surfaces_coherent_missing_category(self):
+        profile = {
+            "company_name": "LayerForge",
+            "description": "Builds additive manufacturing systems and industrial 3D printers for production-scale metal part fabrication.",
+            "sic_description": "Industrial printer systems",
+        }
+    
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+    
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+        self.assertEqual(draft["possible_new_theme"], "Additive Manufacturing")
+        self.assertEqual(draft["possible_new_theme_category"], "Additive Manufacturing / Industrial 3D Printing")
+>       self.assertIn("Industrial 3D Printing", draft["validation_debug"]["business_descriptors"])
+E       AssertionError: 'Industrial 3D Printing' not found in ['Additive Manufacturing', 'Printer Systems', 'Additive Systems']
+
+tests\test_hardening.py:3103: AssertionError
+_ TestDescriptionFirstResearchRefinements.test_description_first_clear_mining_descriptor_beats_domain_unclear_when_governed_coverage_is_weak _
+
+self = <test_hardening.TestDescriptionFirstResearchRefinements testMethod=test_description_first_clear_mining_descriptor_beats_domain_unclear_when_governed_coverage_is_weak>
+
+    def test_description_first_clear_mining_descriptor_beats_domain_unclear_when_governed_coverage_is_weak(self):
+        profile = {
+            "company_name": "Frontier Tungsten",
+            "description": "Operates mine projects, mineral processing, and concentrate shipping tied to tungsten ore production.",
+            "sic_description": "Metals mining",
+        }
+    
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+    
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+>       self.assertIn(draft["possible_new_theme"], {"Tungsten Mining", "Critical Minerals Mining", "Metals & Mining"})
+E       AssertionError: 'Tungsten Mineral Processing' not found in {'Critical Minerals Mining', 'Metals & Mining', 'Tungsten Mining'}
+
+tests\test_hardening.py:3076: AssertionError
+_ TestDescriptionFirstResearchRefinements.test_description_first_named_printer_system_does_not_stay_product_name_only _
+
+self = <test_hardening.TestDescriptionFirstResearchRefinements testMethod=test_description_first_named_printer_system_does_not_stay_product_name_only>
+
+    def test_description_first_named_printer_system_does_not_stay_product_name_only(self):
+        profile = {
+            "company_name": "Forge Systems",
+            "description": "Markets the Falcon production system and Atlas printer systems for additive manufacturing and industrial 3D printing customers.",
+            "sic_description": "Manufacturing systems",
+        }
+    
+        draft = _description_theme_generation_draft(self._candidate(), [], profile)
+    
+        self.assertEqual(draft["possible_new_theme"], "Additive Manufacturing")
+        self.assertFalse(str(draft["possible_new_theme"]).startswith("Falcon"))
+        self.assertFalse(str(draft["possible_new_theme"]).startswith("Atlas"))
+>       self.assertIn("Industrial Manufacturing Systems", draft["validation_debug"]["business_descriptors"])
+E       AssertionError: 'Industrial Manufacturing Systems' not found in ['Additive Manufacturing', 'Atlas Printer Systems', 'Forge Systems']
+
+tests\test_hardening.py:3117: AssertionError
+_ TestDescriptionFirstResearchRefinements.test_description_first_natural_gas_can_be_secondary_without_replacing_broader_upstream_ep _
+
+self = <test_hardening.TestDescriptionFirstResearchRefinements testMethod=test_description_first_natural_gas_can_be_secondary_without_replacing_broader_upstream_ep>
+
+    def test_description_first_natural_gas_can_be_secondary_without_replacing_broader_upstream_ep(self):
+        profile = {
+            "company_name": "Heritage Upstream",
+            "description": "Acquires and develops oil and natural gas assets and produces from operated wells, reserves, and working interests across onshore properties.",
+            "sic_description": "Oil and gas production",
+        }
+        catalog = [
+            self._theme(1, "Natural Gas", "Energy", "Natural gas production and gas-focused upstream operators.", ["EQT"]),
+        ]
+    
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+    
+>       self.assertEqual(draft["possible_new_theme"], "Oil & Gas Exploration & Production")
+E       AssertionError: 'Upstream Oil & Gas' != 'Oil & Gas Exploration & Production'
+E       - Upstream Oil & Gas
+E       + Oil & Gas Exploration & Production
+
+tests\test_hardening.py:2818: AssertionError
+_ TestDescriptionFirstResearchRefinements.test_description_first_unsupported_regional_buckets_do_not_survive_without_explicit_support _
+
+self = <test_hardening.TestDescriptionFirstResearchRefinements testMethod=test_description_first_unsupported_regional_buckets_do_not_survive_without_explicit_support>
+
+    def test_description_first_unsupported_regional_buckets_do_not_survive_without_explicit_support(self):
+        profile = {
+            "company_name": "General Upstream Energy",
+            "description": "Explores, develops, and produces oil and natural gas reserves from onshore acreage, operated wells, and producing properties.",
+            "sic_description": "Upstream oil and gas",
+        }
+        catalog = [
+            self._theme(1, "Permian Basin", "Energy", "Permian Basin producers and acreage operators.", ["FANG"]),
+            self._theme(2, "Appalachia Gas", "Energy", "Appalachia basin natural gas producers and gathering assets.", ["EQT"]),
+        ]
+    
+        draft = _description_theme_generation_draft(self._candidate(), catalog, profile)
+    
+        self.assertFalse(draft["suggested_existing_themes"])
+>       self.assertEqual(draft["possible_new_theme"], "Oil & Gas Exploration & Production")
+E       AssertionError: 'Upstream Oil & Gas' != 'Oil & Gas Exploration & Production'
+E       - Upstream Oil & Gas
+E       + Oil & Gas Exploration & Production
+
+tests\test_hardening.py:2804: AssertionError
+_ TestBootstrapAndHistoryFramework.test_init_db_bootstrap_after_file_delete_and_seed_idempotent _
+
+self = <test_hardening.TestBootstrapAndHistoryFramework testMethod=test_init_db_bootstrap_after_file_delete_and_seed_idempotent>
+
+    def test_init_db_bootstrap_after_file_delete_and_seed_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test_theme_dashboard.duckdb"
+            with patch("src.database.DB_PATH", db_path), patch("src.config.DB_PATH", db_path):
+                from src.database import get_conn, init_db
+    
+>               init_db()
+
+tests\test_hardening.py:4542: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src\database.py:542: in init_db
+    with get_bootstrap_conn() as conn:
+         ^^^^^^^^^^^^^^^^^^^^
+C:\Python314\Lib\contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+src\database.py:118: in get_bootstrap_conn
+    conn = _connect_with_retry(database_path_str())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+db_path = 'C:\\Users\\arobp\\AppData\\Local\\Temp\\tmpgenc2c6o\\test_theme_dashboard.duckdb'
+
+    def _connect_with_retry(db_path: str):
+        conn = None
+        last_exc: Exception | None = None
+        for attempt in range(DB_CONNECT_RETRY_ATTEMPTS):
+            try:
+>               conn = duckdb.connect(db_path)
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+E               _duckdb.IOException: IO Error: Cannot open file "c:\users\arobp\appdata\local\temp\tmpgenc2c6o\test_theme_dashboard.duckdb": Access is denied.
+
+src\database.py:73: IOException
+
+During handling of the above exception, another exception occurred:
+
+top = 'C:\\Users\\arobp\\AppData\\Local\\Temp\\tmpgenc2c6o', topdown = False
+onerror = <function _rmtree_unsafe.<locals>.onerror at 0x000002775B13D430>
+followlinks = <object object at 0x0000027709B90210>
+
+>   ???
+E   PermissionError: [WinError 5] Access is denied: 'C:\\Users\\arobp\\AppData\\Local\\Temp\\tmpgenc2c6o'
+
+<frozen os>:377: PermissionError
+
+During handling of the above exception, another exception occurred:
+
+self = <test_hardening.TestBootstrapAndHistoryFramework testMethod=test_init_db_bootstrap_after_file_delete_and_seed_idempotent>
+
+    def test_init_db_bootstrap_after_file_delete_and_seed_idempotent(self):
+>       with tempfile.TemporaryDirectory() as tmpdir:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:4537: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+C:\Python314\Lib\tempfile.py:971: in __exit__
+    self.cleanup()
+C:\Python314\Lib\tempfile.py:975: in cleanup
+    self._rmtree(self.name, ignore_errors=self._ignore_cleanup_errors)
+C:\Python314\Lib\tempfile.py:955: in _rmtree
+    _shutil.rmtree(name, onexc=onexc)
+C:\Python314\Lib\shutil.py:852: in rmtree
+    _rmtree_impl(path, dir_fd, onexc)
+C:\Python314\Lib\shutil.py:689: in _rmtree_unsafe
+    for dirpath, dirnames, filenames in results:
+                                        ^^^^^^^
+<frozen os>:413: in walk
+    ???
+C:\Python314\Lib\shutil.py:687: in onerror
+    onexc(os.scandir, err.filename, err)
+C:\Python314\Lib\tempfile.py:927: in onexc
+    _resetperms(path)
+C:\Python314\Lib\tempfile.py:287: in _resetperms
+    _dont_follow_symlinks(_os.chmod, path, 0o700)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+func = <built-in function chmod>
+path = 'C:\\Users\\arobp\\AppData\\Local\\Temp\\tmpgenc2c6o', args = (448,)
+
+    def _dont_follow_symlinks(func, path, *args):
+        # Pass follow_symlinks=False, unless not supported on this platform.
+        if func in _os.supports_follow_symlinks:
+>           func(path, *args, follow_symlinks=False)
+E           PermissionError: [WinError 5] Access is denied: 'C:\\Users\\arobp\\AppData\\Local\\Temp\\tmpgenc2c6o'
+
+C:\Python314\Lib\tempfile.py:276: PermissionError
+_ TestBootstrapAndHistoryFramework.test_theme_ticker_metrics_uses_latest_available_snapshot_for_market_cap _
+
+self = Index(['ticker'], dtype='object'), key = 'market_cap'
+
+    def get_loc(self, key):
+        """
+        Get integer location, slice or boolean mask for requested label.
+    
+        Parameters
+        ----------
+        key : label
+    
+        Returns
+        -------
+        int if unique index, slice if monotonic index, else mask
+    
+        Examples
+        --------
+        >>> unique_index = pd.Index(list('abc'))
+        >>> unique_index.get_loc('b')
+        1
+    
+        >>> monotonic_index = pd.Index(list('abbc'))
+        >>> monotonic_index.get_loc('b')
+        slice(1, 3, None)
+    
+        >>> non_monotonic_index = pd.Index(list('abcb'))
+        >>> non_monotonic_index.get_loc('b')
+        array([False,  True, False,  True])
+        """
+        casted_key = self._maybe_cast_indexer(key)
+        try:
+>           return self._engine.get_loc(casted_key)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.venv\Lib\site-packages\pandas\core\indexes\base.py:3812: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+pandas/_libs/index.pyx:167: in pandas._libs.index.IndexEngine.get_loc
+    ???
+pandas/_libs/index.pyx:196: in pandas._libs.index.IndexEngine.get_loc
+    ???
+pandas/_libs/hashtable_class_helper.pxi:7088: in pandas._libs.hashtable.PyObjectHashTable.get_item
+    ???
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+>   ???
+E   KeyError: 'market_cap'
+
+pandas/_libs/hashtable_class_helper.pxi:7096: KeyError
+
+The above exception was the direct cause of the following exception:
+
+self = <test_hardening.TestBootstrapAndHistoryFramework testMethod=test_theme_ticker_metrics_uses_latest_available_snapshot_for_market_cap>
+
+    def test_theme_ticker_metrics_uses_latest_available_snapshot_for_market_cap(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp
+            )
+            """
+        )
+    
+        conn.execute("insert into theme_membership values (1, 'ABC')")
+        conn.execute("insert into refresh_runs values (1, 'success', '2026-03-10 22:00:00')")
+        conn.execute("insert into refresh_runs values (2, 'partial', '2026-03-11 22:00:00')")
+        conn.execute("insert into ticker_snapshots values (1, 'ABC', 10, 1, 2, 3, 125900000000, 50000000, null, null, null, '2026-03-10 21:00:00')")
+        conn.execute("insert into ticker_snapshots values (2, 'ABC', 11, 1.5, 2.5, 3.5, null, 51000000, null, null, null, '2026-03-11 21:00:00')")
+    
+        out = theme_ticker_metrics(conn, 1)
+>       self.assertEqual(float(out.iloc[0]["market_cap"]), 125900000000)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_hardening.py:4661: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\pandas\core\series.py:1133: in __getitem__
+    return self._get_value(key)
+           ^^^^^^^^^^^^^^^^^^^^
+.venv\Lib\site-packages\pandas\core\series.py:1249: in _get_value
+    loc = self.index.get_loc(label)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = Index(['ticker'], dtype='object'), key = 'market_cap'
+
+    def get_loc(self, key):
+        """
+        Get integer location, slice or boolean mask for requested label.
+    
+        Parameters
+        ----------
+        key : label
+    
+        Returns
+        -------
+        int if unique index, slice if monotonic index, else mask
+    
+        Examples
+        --------
+        >>> unique_index = pd.Index(list('abc'))
+        >>> unique_index.get_loc('b')
+        1
+    
+        >>> monotonic_index = pd.Index(list('abbc'))
+        >>> monotonic_index.get_loc('b')
+        slice(1, 3, None)
+    
+        >>> non_monotonic_index = pd.Index(list('abcb'))
+        >>> non_monotonic_index.get_loc('b')
+        array([False,  True, False,  True])
+        """
+        casted_key = self._maybe_cast_indexer(key)
+        try:
+            return self._engine.get_loc(casted_key)
+        except KeyError as err:
+            if isinstance(casted_key, slice) or (
+                isinstance(casted_key, abc.Iterable)
+                and any(isinstance(x, slice) for x in casted_key)
+            ):
+                raise InvalidIndexError(key)
+>           raise KeyError(key) from err
+E           KeyError: 'market_cap'
+
+.venv\Lib\site-packages\pandas\core\indexes\base.py:3819: KeyError
+_ TestHistoricalBackfill.test_newly_governed_ticker_creates_onboarding_state __
+
+self = Index(['ticker'], dtype='object'), key = 'price'
+
+    def get_loc(self, key):
+        """
+        Get integer location, slice or boolean mask for requested label.
+    
+        Parameters
+        ----------
+        key : label
+    
+        Returns
+        -------
+        int if unique index, slice if monotonic index, else mask
+    
+        Examples
+        --------
+        >>> unique_index = pd.Index(list('abc'))
+        >>> unique_index.get_loc('b')
+        1
+    
+        >>> monotonic_index = pd.Index(list('abbc'))
+        >>> monotonic_index.get_loc('b')
+        slice(1, 3, None)
+    
+        >>> non_monotonic_index = pd.Index(list('abcb'))
+        >>> non_monotonic_index.get_loc('b')
+        array([False,  True, False,  True])
+        """
+        casted_key = self._maybe_cast_indexer(key)
+        try:
+>           return self._engine.get_loc(casted_key)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.venv\Lib\site-packages\pandas\core\indexes\base.py:3812: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+pandas/_libs/index.pyx:167: in pandas._libs.index.IndexEngine.get_loc
+    ???
+pandas/_libs/index.pyx:196: in pandas._libs.index.IndexEngine.get_loc
+    ???
+pandas/_libs/hashtable_class_helper.pxi:7088: in pandas._libs.hashtable.PyObjectHashTable.get_item
+    ???
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+>   ???
+E   KeyError: 'price'
+
+pandas/_libs/hashtable_class_helper.pxi:7096: KeyError
+
+The above exception was the direct cause of the following exception:
+
+self = <test_historical_backfill.TestHistoricalBackfill testMethod=test_newly_governed_ticker_creates_onboarding_state>
+
+    def test_newly_governed_ticker_creates_onboarding_state(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+    
+        with patch("src.ticker_onboarding.DEFAULT_PROVIDER", "mock"):
+            result = add_ticker(conn, 1, "NEWT", onboarding_source="themes_page_manual_add")
+        onboarding = list_governed_ticker_onboarding(conn)
+        snapshot_count = int(conn.execute("select count(*) from ticker_snapshots where ticker = 'NEWT'").fetchone()[0])
+        ticker_view = theme_ticker_metrics(conn, 1)
+    
+        self.assertTrue(result["newly_governed"])
+        self.assertEqual(len(onboarding), 1)
+        self.assertEqual(str(onboarding.iloc[0]["ticker"]), "NEWT")
+        self.assertEqual(str(onboarding.iloc[0]["onboarding_source"]), "themes_page_manual_add")
+        self.assertEqual(str(result["onboarding_state"]["current_snapshot_result"]["status"]), "success")
+        self.assertGreater(snapshot_count, 0)
+        self.assertEqual(str(ticker_view.iloc[0]["ticker"]), "NEWT")
+>       self.assertIsNotNone(ticker_view.iloc[0]["price"])
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_historical_backfill.py:145: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\pandas\core\series.py:1133: in __getitem__
+    return self._get_value(key)
+           ^^^^^^^^^^^^^^^^^^^^
+.venv\Lib\site-packages\pandas\core\series.py:1249: in _get_value
+    loc = self.index.get_loc(label)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = Index(['ticker'], dtype='object'), key = 'price'
+
+    def get_loc(self, key):
+        """
+        Get integer location, slice or boolean mask for requested label.
+    
+        Parameters
+        ----------
+        key : label
+    
+        Returns
+        -------
+        int if unique index, slice if monotonic index, else mask
+    
+        Examples
+        --------
+        >>> unique_index = pd.Index(list('abc'))
+        >>> unique_index.get_loc('b')
+        1
+    
+        >>> monotonic_index = pd.Index(list('abbc'))
+        >>> monotonic_index.get_loc('b')
+        slice(1, 3, None)
+    
+        >>> non_monotonic_index = pd.Index(list('abcb'))
+        >>> non_monotonic_index.get_loc('b')
+        array([False,  True, False,  True])
+        """
+        casted_key = self._maybe_cast_indexer(key)
+        try:
+            return self._engine.get_loc(casted_key)
+        except KeyError as err:
+            if isinstance(casted_key, slice) or (
+                isinstance(casted_key, abc.Iterable)
+                and any(isinstance(x, slice) for x in casted_key)
+            ):
+                raise InvalidIndexError(key)
+>           raise KeyError(key) from err
+E           KeyError: 'price'
+
+.venv\Lib\site-packages\pandas\core\indexes\base.py:3819: KeyError
+_ TestHistoricalBackfill.test_targeted_current_snapshot_hydration_updates_ticker_snapshot_layer_without_full_refresh _
+
+self = <test_historical_backfill.TestHistoricalBackfill testMethod=test_targeted_current_snapshot_hydration_updates_ticker_snapshot_layer_without_full_refresh>
+
+    def test_targeted_current_snapshot_hydration_updates_ticker_snapshot_layer_without_full_refresh(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'BOOT')")
+    
+        result = run_targeted_current_snapshot_hydration(conn, ["BOOT"], provider_name="mock")
+        latest = latest_ticker_snapshots(conn)
+        ticker_view = theme_ticker_metrics(conn, 1)
+        theme_snapshot_count = int(conn.execute("select count(*) from theme_snapshots").fetchone()[0])
+        refresh_scope = conn.execute("select scope_type from refresh_runs where run_id = ?", [int(result["run_id"])]).fetchone()[0]
+    
+        self.assertEqual(str(result["status"]), "success")
+>       self.assertIn("BOOT", latest["ticker"].astype(str).tolist())
+                              ^^^^^^^^^^^^^^^^
+
+tests\test_historical_backfill.py:160: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\pandas\core\frame.py:4113: in __getitem__
+    indexer = self.columns.get_loc(key)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = RangeIndex(start=0, stop=0, step=1), key = 'ticker'
+
+    @doc(Index.get_loc)
+    def get_loc(self, key) -> int:
+        if is_integer(key) or (is_float(key) and key.is_integer()):
+            new_key = int(key)
+            try:
+                return self._range.index(new_key)
+            except ValueError as err:
+                raise KeyError(key) from err
+        if isinstance(key, Hashable):
+>           raise KeyError(key)
+E           KeyError: 'ticker'
+
+.venv\Lib\site-packages\pandas\core\indexes\range.py:417: KeyError
+_ TestHistoricalBackfill.test_targeted_onboarding_backfill_updates_onboarding_state _
+
+self = Index(['ticker'], dtype='object'), key = 'price'
+
+    def get_loc(self, key):
+        """
+        Get integer location, slice or boolean mask for requested label.
+    
+        Parameters
+        ----------
+        key : label
+    
+        Returns
+        -------
+        int if unique index, slice if monotonic index, else mask
+    
+        Examples
+        --------
+        >>> unique_index = pd.Index(list('abc'))
+        >>> unique_index.get_loc('b')
+        1
+    
+        >>> monotonic_index = pd.Index(list('abbc'))
+        >>> monotonic_index.get_loc('b')
+        slice(1, 3, None)
+    
+        >>> non_monotonic_index = pd.Index(list('abcb'))
+        >>> non_monotonic_index.get_loc('b')
+        array([False,  True, False,  True])
+        """
+        casted_key = self._maybe_cast_indexer(key)
+        try:
+>           return self._engine.get_loc(casted_key)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.venv\Lib\site-packages\pandas\core\indexes\base.py:3812: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+pandas/_libs/index.pyx:167: in pandas._libs.index.IndexEngine.get_loc
+    ???
+pandas/_libs/index.pyx:196: in pandas._libs.index.IndexEngine.get_loc
+    ???
+pandas/_libs/hashtable_class_helper.pxi:7088: in pandas._libs.hashtable.PyObjectHashTable.get_item
+    ???
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+>   ???
+E   KeyError: 'price'
+
+pandas/_libs/hashtable_class_helper.pxi:7096: KeyError
+
+The above exception was the direct cause of the following exception:
+
+self = <test_historical_backfill.TestHistoricalBackfill testMethod=test_targeted_onboarding_backfill_updates_onboarding_state>
+
+    def test_targeted_onboarding_backfill_updates_onboarding_state(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        add_ticker(conn, 1, "BOOT", onboarding_source="themes_page_manual_add")
+    
+        result = run_governed_ticker_onboarding_backfill(conn, ["BOOT"], provider_name="mock")
+        onboarding = list_governed_ticker_onboarding(conn)
+    
+        self.assertIn(result["status"], {"success", "partial"})
+        self.assertGreaterEqual(int(onboarding.iloc[0]["history_row_count"]), 30)
+        self.assertEqual(str(onboarding.iloc[0]["history_readiness_status"]), "ready")
+        self.assertEqual(str(onboarding.iloc[0]["backfill_status"]), "completed")
+        self.assertTrue(bool(onboarding.iloc[0]["downstream_refresh_needed"]))
+        self.assertIsNotNone(onboarding.iloc[0]["last_backfill_attempt_at"])
+        self.assertTrue(
+            int(result["backfill_result"]["ticker_history_rows_written"]) > 0
+            or int(result["backfill_result"]["ticker_history_rows_skipped"]) > 0
+        )
+        self.assertEqual(str(result["current_snapshot_result"]["status"]), "success")
+        ticker_view = theme_ticker_metrics(conn, 1)
+        self.assertEqual(str(ticker_view.iloc[0]["ticker"]), "BOOT")
+>       self.assertIsNotNone(ticker_view.iloc[0]["price"])
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_historical_backfill.py:237: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\pandas\core\series.py:1133: in __getitem__
+    return self._get_value(key)
+           ^^^^^^^^^^^^^^^^^^^^
+.venv\Lib\site-packages\pandas\core\series.py:1249: in _get_value
+    loc = self.index.get_loc(label)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = Index(['ticker'], dtype='object'), key = 'price'
+
+    def get_loc(self, key):
+        """
+        Get integer location, slice or boolean mask for requested label.
+    
+        Parameters
+        ----------
+        key : label
+    
+        Returns
+        -------
+        int if unique index, slice if monotonic index, else mask
+    
+        Examples
+        --------
+        >>> unique_index = pd.Index(list('abc'))
+        >>> unique_index.get_loc('b')
+        1
+    
+        >>> monotonic_index = pd.Index(list('abbc'))
+        >>> monotonic_index.get_loc('b')
+        slice(1, 3, None)
+    
+        >>> non_monotonic_index = pd.Index(list('abcb'))
+        >>> non_monotonic_index.get_loc('b')
+        array([False,  True, False,  True])
+        """
+        casted_key = self._maybe_cast_indexer(key)
+        try:
+            return self._engine.get_loc(casted_key)
+        except KeyError as err:
+            if isinstance(casted_key, slice) or (
+                isinstance(casted_key, abc.Iterable)
+                and any(isinstance(x, slice) for x in casted_key)
+            ):
+                raise InvalidIndexError(key)
+>           raise KeyError(key) from err
+E           KeyError: 'price'
+
+.venv\Lib\site-packages\pandas\core\indexes\base.py:3819: KeyError
+_ TestScannerAudit.test_description_first_strategy_prefers_payments_lending_over_cloud_devops _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_description_first_strategy_prefers_payments_lending_over_cloud_devops>
+_mock_profile = <MagicMock name='_load_company_profile' id='2711677529328'>
+_mock_key = <MagicMock name='openai_api_key' id='2711677528992'>
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "SEZLY",
+            "company_name": "Payments Example",
+            "description": "Provides installment payments, merchant checkout, and consumer lending services for digital commerce platforms.",
+            "sic_description": "Financial Services",
+        },
+    )
+    def test_description_first_strategy_prefers_payments_lending_over_cloud_devops(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Fintech - Payments", "Fintech", "AFRM"),
+            (2, "Fintech - Lending", "Fintech", "SOFI"),
+            (3, "Cloud DevOps", "Software", "DDOG"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'SEZLY', 'SEZLY', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'sezly-1')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "SEZLY", strategy="description_theme_generation")
+    
+>       self.assertIn(draft["candidate_theme_ideas"][0], {"Fintech Payments", "Digital Payments"})
+E       AssertionError: 'Consumer Lending' not found in {'Fintech Payments', 'Digital Payments'}
+
+tests\test_scanner_audit.py:3039: AssertionError
+_ TestScannerAudit.test_description_first_strategy_suppresses_healthcare_themes_for_storage_description _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_description_first_strategy_suppresses_healthcare_themes_for_storage_description>
+_mock_profile = <MagicMock name='_load_company_profile' id='2711677530000'>
+_mock_key = <MagicMock name='openai_api_key' id='2711677530336'>
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "SNDKX",
+            "company_name": "Sandisk Example",
+            "description": "Designs and supplies NAND flash, storage controllers, and semiconductor memory products for data storage devices and enterprise systems.",
+            "sic_description": "Semiconductor Memory",
+        },
+    )
+    def test_description_first_strategy_suppresses_healthcare_themes_for_storage_description(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Semiconductor Memory", "Semiconductors", "MU"),
+            (2, "Dental", "Healthcare", "XRAY"),
+            (3, "Animal Health", "Healthcare", "ZTS"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'SNDKX', 'SNDKX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'sndkx-2')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "SNDKX", strategy="description_theme_generation")
+        suggested_names = [item["theme_name"] for item in draft["suggested_existing_themes"]]
+    
+>       self.assertIn("Semiconductor Memory", suggested_names)
+E       AssertionError: 'Semiconductor Memory' not found in []
+
+tests\test_scanner_audit.py:2969: AssertionError
+_ TestScannerAudit.test_fallback_can_propose_optics_new_theme_even_with_indirect_existing_matches _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_fallback_can_propose_optics_new_theme_even_with_indirect_existing_matches>
+_mock_profile = <MagicMock name='_load_company_profile' id='2711677526976'>
+_mock_key = <MagicMock name='openai_api_key' id='2711677529664'>
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AAOI",
+            "company_name": "Applied Optoelectronics",
+            "description": "Designs optical transceivers, fiber interconnect modules, and related networking products for data-center and telecom deployments.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    def test_fallback_can_propose_optics_new_theme_even_with_indirect_existing_matches(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'Data Center Infrastructure', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'VRT')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOI', 'AAOI', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoi-4')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "AAOI")
+    
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'Data Center Optics', 'Optical Networking', 'Optical Interconnects'}
+
+tests\test_scanner_audit.py:2381: AssertionError
+_ TestScannerAudit.test_fallback_can_suggest_new_theme_for_narrow_uncovered_role _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_fallback_can_suggest_new_theme_for_narrow_uncovered_role>
+_mock_profile = <MagicMock name='_load_company_profile' id='2711677533696'>
+_mock_key = <MagicMock name='openai_api_key' id='2711677526640'>
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AAOI",
+            "company_name": "Applied Optoelectronics",
+            "description": "Designs optical transceivers and fiber-optic interconnect products for data-center and telecom networks.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    def test_fallback_can_suggest_new_theme_for_narrow_uncovered_role(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI Power', 'Energy', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'Cloud Software', 'Software', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'VRT')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'NOW')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOI', 'AAOI', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoi-2')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "AAOI")
+    
+>       self.assertEqual(draft["suggested_existing_themes"], [])
+E       AssertionError: Lists differ: [{'theme_id': 1, 'theme_name': 'AI Power',[156 chars]it'}] != []
+E       
+E       First list contains 1 additional elements.
+E       First extra element 0:
+E       {'theme_id': 1, 'theme_name': 'AI Power', 'category': 'Energy', 'why_it_might_fit': 'Compatible economic-role fit on component supplier', 'representative_tickers': ['VRT'], 'fit_label': 'adjacent_fit'}
+E       
+E       + []
+E       - [{'category': 'Energy',
+E       -   'fit_label': 'adjacent_fit',
+E       -   'representative_tickers': ['VRT'],
+E       -   'theme_id': 1,
+E       -   'theme_name': 'AI Power',
+E       -   'why_it_might_fit': 'Compatible economic-role fit on component supplier'}]
+
+tests\test_scanner_audit.py:2348: AssertionError
+_ TestScannerAudit.test_openai_adjacent_existing_themes_do_not_block_consider_new_theme_when_role_is_clear _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_openai_adjacent_existing_themes_do_not_block_consider_new_theme_when_role_is_clear>
+_mock_key = <MagicMock name='openai_api_key' id='2711677521264'>
+_mock_call = <MagicMock name='_call_openai_research' id='2711677520256'>
+_mock_profile = <MagicMock name='_load_company_profile' id='2711677520592'>
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "ROLEAA",
+            "company_name": "Role Actual",
+            "description": "Designs optical transceivers, fiber interconnect modules, and related networking products for data-center and telecom deployments.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Role Actual",
+            "short_company_description": "Communications hardware supplier.",
+            "possible_similar_tickers": ["LITE", "CIEN"],
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Broader data-center adjacency."},
+                {"theme_id": 2, "theme_name": "AI - Edge Computing", "why_it_might_fit": "Communications adjacency."},
+            ],
+            "possible_new_theme": "",
+            "confidence": "low",
+            "rationale": "The company provides optical networking and interconnect products into data-center and telecom markets. AI - Infrastructure and AI - Edge Computing are broader adjacency fits tied to end markets rather than what the company actually provides in the stack.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_adjacent_existing_themes_do_not_block_consider_new_theme_when_role_is_clear(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'AI - Edge Computing', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'SMCI')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'ROLEAA', 'ROLEAA', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'roleaa-openai-1')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "ROLEAA")
+    
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'Optical Interconnects', 'AI Fiber Optics', 'Data Center Optics', 'Optical Networking'}
+
+tests\test_scanner_audit.py:1333: AssertionError
+_ TestScannerAudit.test_openai_can_promote_narrow_new_theme_from_ai_role_context_even_when_profile_text_is_generic _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_openai_can_promote_narrow_new_theme_from_ai_role_context_even_when_profile_text_is_generic>
+_mock_key = <MagicMock name='openai_api_key' id='2711677519248'>
+_mock_call = <MagicMock name='_call_openai_research' id='2711677518912'>
+_mock_profile = <MagicMock name='_load_company_profile' id='2711677518576'>
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AAOIX",
+            "company_name": "Applied Optoelectronics",
+            "description": "Provides communication equipment products for network operators and data-center customers.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Applied Optoelectronics",
+            "short_company_description": "Supplier of optical networking transceivers and fiber interconnect products for data-center and telecom deployments.",
+            "possible_similar_tickers": ["LITE", "CIEN"],
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Broader data-center adjacency."},
+                {"theme_id": 2, "theme_name": "AI - Edge Computing", "why_it_might_fit": "Communications adjacency."},
+            ],
+            "possible_new_theme": "",
+            "confidence": "low",
+            "rationale": "The company provides optical networking and interconnect products into data-center and telecom markets. AI - Infrastructure and AI - Edge Computing are broader adjacency fits tied to end markets rather than what the company actually provides in the stack.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_can_promote_narrow_new_theme_from_ai_role_context_even_when_profile_text_is_generic(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'AI - Edge Computing', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'SMCI')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOIX', 'AAOIX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoix-openai-1')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "AAOIX")
+    
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'Optical Interconnects', 'AI Fiber Optics', 'Data Center Optics', 'Optical Networking'}
+
+tests\test_scanner_audit.py:1384: AssertionError
+_ TestScannerAudit.test_openai_decision_surface_keeps_proposed_new_theme_and_adjacent_existing_themes _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_openai_decision_surface_keeps_proposed_new_theme_and_adjacent_existing_themes>
+_mock_key = <MagicMock name='openai_api_key' id='2711677518240'>
+_mock_call = <MagicMock name='_call_openai_research' id='2711653340496'>
+_mock_profile = <MagicMock name='_load_company_profile' id='2711653335792'>
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AAOIZ",
+            "company_name": "Applied Optoelectronics",
+            "description": "Provides communication equipment products for network operators and data-center customers.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Applied Optoelectronics",
+            "short_company_description": "Supplier of optical networking transceivers and fiber interconnect products for data-center and telecom deployments.",
+            "possible_similar_tickers": ["LITE", "CIEN"],
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Broader data-center adjacency."},
+                {"theme_id": 2, "theme_name": "AI - Edge Computing", "why_it_might_fit": "Communications adjacency."},
+            ],
+            "possible_new_theme": "",
+            "confidence": "low",
+            "rationale": "The company provides optical networking and interconnect products into data-center and telecom markets. AI - Infrastructure and AI - Edge Computing are broader adjacency fits tied to end markets rather than what the company actually provides in the stack.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_decision_surface_keeps_proposed_new_theme_and_adjacent_existing_themes(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'AI - Edge Computing', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'SMCI')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOIZ', 'AAOIZ', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoiz-openai-1')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "AAOIZ")
+    
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'Optical Interconnects', 'AI Fiber Optics', 'Data Center Optics', 'Optical Networking'}
+
+tests\test_scanner_audit.py:1436: AssertionError
+_ TestScannerAudit.test_openai_merge_promotes_narrow_new_theme_when_rationale_identifies_precision_gap _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_openai_merge_promotes_narrow_new_theme_when_rationale_identifies_precision_gap>
+_mock_key = <MagicMock name='openai_api_key' id='2711653337472'>
+_mock_call = <MagicMock name='_call_openai_research' id='2711653336464'>
+_mock_profile = <MagicMock name='_load_company_profile' id='2711653339488'>
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "ROLELINK",
+            "company_name": "Role Link",
+            "description": "Supplies optical transceivers and interconnect modules for data-center communications infrastructure.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Role Link",
+            "short_company_description": "Communications hardware supplier.",
+            "possible_similar_tickers": ["NVDA"],
+            "suggested_existing_themes": [
+                {"theme_id": 4, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Data-center adjacency."}
+            ],
+            "possible_new_theme": "",
+            "confidence": "low",
+            "rationale": "The company provides optical networking and interconnect products. AI - Infrastructure is a weaker end-market adjacency fit, while the direct business role is more precise than the current governed taxonomy.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_merge_promotes_narrow_new_theme_when_rationale_identifies_precision_gap(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (4, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (4, 'NVDA')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'ROLELINK', 'ROLELINK', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'rolelink-openai-1')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "ROLELINK")
+    
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'Optical Interconnects', 'AI Fiber Optics', 'Data Center Optics', 'Optical Networking'}
+
+tests\test_scanner_audit.py:1714: AssertionError
+_ TestScannerAudit.test_openai_path_prefers_narrow_optics_new_theme_over_adjacent_ai_themes _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_openai_path_prefers_narrow_optics_new_theme_over_adjacent_ai_themes>
+_mock_key = <MagicMock name='openai_api_key' id='2711653344192'>
+_mock_call = <MagicMock name='_call_openai_research' id='2711653344528'>
+_mock_profile = <MagicMock name='_load_company_profile' id='2711653344864'>
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "ROLENET",
+            "company_name": "Role Network",
+            "description": "Designs optical transceivers and fiber interconnect products for data-center communications infrastructure.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Role Network",
+            "short_company_description": "Optical networking component supplier.",
+            "possible_similar_tickers": ["NVDA", "VRT"],
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "AI Infrastructure", "why_it_might_fit": "Data center adjacency."},
+                {"theme_id": 2, "theme_name": "Edge Computing", "why_it_might_fit": "Networking adjacency."},
+            ],
+            "possible_new_theme": "",
+            "confidence": "high",
+            "rationale": "The company serves AI and data-center infrastructure markets.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "add_to_existing_theme_review",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_path_prefers_narrow_optics_new_theme_over_adjacent_ai_themes(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'Edge Computing', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'VRT')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'ROLENET', 'ROLENET', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'rolenet-openai-1')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "ROLENET")
+    
+        self.assertEqual(draft["research_mode"], "openai")
+        self.assertEqual(draft["recommended_action"], "consider_new_theme")
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'Optical Interconnects', 'AI Fiber Optics', 'Data Center Optics', 'Optical Networking'}
+
+tests\test_scanner_audit.py:1613: AssertionError
+_ TestScannerAudit.test_openai_placeholder_none_suggested_does_not_block_narrow_new_theme_override _
+
+self = <test_scanner_audit.TestScannerAudit testMethod=test_openai_placeholder_none_suggested_does_not_block_narrow_new_theme_override>
+_mock_key = <MagicMock name='openai_api_key' id='2711653346208'>
+_mock_call = <MagicMock name='_call_openai_research' id='2711653346544'>
+_mock_profile = <MagicMock name='_load_company_profile' id='2711653346880'>
+
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AAOI",
+            "company_name": "Applied Optoelectronics",
+            "description": "Designs optical transceivers, fiber interconnect modules, and related networking products for data-center and telecom deployments.",
+            "sic_description": "Communications Equipment",
+        },
+    )
+    @patch(
+        "src.scanner_research._call_openai_research",
+        return_value={
+            "company_name": "Applied Optoelectronics",
+            "short_company_description": "Optical transceiver and fiber interconnect supplier for data-center and telecom networks.",
+            "possible_similar_tickers": ["LITE", "CIEN"],
+            "suggested_existing_themes": [
+                {"theme_id": 1, "theme_name": "AI - Infrastructure", "why_it_might_fit": "Adjacent data-center demand exposure."},
+                {"theme_id": 2, "theme_name": "AI - Edge Computing", "why_it_might_fit": "Broad communications infrastructure adjacency."},
+            ],
+            "possible_new_theme": "None suggested",
+            "confidence": "low",
+            "rationale": "The company appears to serve data-center and telecom end markets through optical networking and interconnect products. AI - Infrastructure and AI - Edge Computing are weaker adjacent fits because they describe end-market exposure rather than the company's actual role in the stack, and a narrower direct role would be more precise than the current governed taxonomy.",
+            "caveats": ["Advisory only."],
+            "recommended_action": "watch_only",
+        },
+    )
+    @patch("src.scanner_research.openai_api_key", return_value="test-key")
+    def test_openai_placeholder_none_suggested_does_not_block_narrow_new_theme_override(self, _mock_key, _mock_call, _mock_profile):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI - Infrastructure', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'AI - Edge Computing', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'SMCI')")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AAOI', 'AAOI', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aaoi-openai-none-suggested')
+            """
+        )
+    
+        draft = generate_scanner_research_draft(conn, "AAOI")
+    
+        self.assertEqual(draft["research_mode"], "openai")
+>       self.assertIn(draft["possible_new_theme"], {"Optical Networking", "Data Center Optics", "Optical Interconnects", "AI Fiber Optics"})
+E       AssertionError: 'Wireless Communications Infrastructure' not found in {'Optical Interconnects', 'AI Fiber Optics', 'Data Center Optics', 'Optical Networking'}
+
+tests\test_scanner_audit.py:1280: AssertionError
+============================== warnings summary ===============================
+tests/test_hardening.py: 2 warnings
+tests/test_historical_backfill.py: 8 warnings
+tests/test_scanner_audit.py: 3 warnings
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:39: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    stale_before = datetime.utcnow() - timedelta(minutes=stale_minutes)
+
+tests/test_hardening.py: 2 warnings
+tests/test_historical_backfill.py: 8 warnings
+tests/test_scanner_audit.py: 3 warnings
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:145: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    [provider.name, datetime.utcnow(), len(clean_tickers), scope_type, scope_theme_name],
+
+tests/test_hardening.py: 2 warnings
+tests/test_historical_backfill.py: 8 warnings
+tests/test_scanner_audit.py: 3 warnings
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:153: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started = datetime.utcnow()
+
+tests/test_hardening.py::TestBootstrapAndHistoryFramework::test_run_refresh_backfills_market_cap_from_latest_nonnull_snapshot
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:211: FutureWarning: The behavior of array concatenation with empty entries is deprecated. In a future version, this will no longer exclude empty items when determining the result dtype. To retain the old behavior, exclude the empty entries before the concat operation.
+    payload["market_cap"] = payload["market_cap"].combine_first(payload["market_cap_prev"])
+
+tests/test_hardening.py::TestRefreshRunRecovery::test_genuinely_active_run_still_blocks_concurrent_refresh
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\fetch_data.py:130: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    [provider_name, datetime.utcnow(), scope_type, scope_theme_name, f"Refresh blocked: run {run_id} is already running."],
+
+tests/test_historical_backfill.py::TestHistoricalBackfill::test_onboarding_theme_reconstruction_clears_downstream_refresh_flag
+  C:\Users\arobp\OneDrive\Documents\Trade\Scanning_Dash\Scanning-Dashboard\theme_dashboard\src\historical_backfill.py:253: FutureWarning: The behavior of array concatenation with empty entries is deprecated. In a future version, this will no longer exclude empty items when determining the result dtype. To retain the old behavior, exclude the empty entries before the concat operation.
+    membership_base["calculation_eligible"] = membership_base["calculation_eligible"].combine_first(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_baseline_check.py::TestBaselineCheckCommand::test_collect_baseline_check_warns_when_history_is_shallow
+FAILED tests/test_hardening.py::TestDescriptionFirstResearchRefinements::test_description_first_additive_manufacturing_surfaces_coherent_missing_category
+FAILED tests/test_hardening.py::TestDescriptionFirstResearchRefinements::test_description_first_clear_mining_descriptor_beats_domain_unclear_when_governed_coverage_is_weak
+FAILED tests/test_hardening.py::TestDescriptionFirstResearchRefinements::test_description_first_named_printer_system_does_not_stay_product_name_only
+FAILED tests/test_hardening.py::TestDescriptionFirstResearchRefinements::test_description_first_natural_gas_can_be_secondary_without_replacing_broader_upstream_ep
+FAILED tests/test_hardening.py::TestDescriptionFirstResearchRefinements::test_description_first_unsupported_regional_buckets_do_not_survive_without_explicit_support
+FAILED tests/test_hardening.py::TestBootstrapAndHistoryFramework::test_init_db_bootstrap_after_file_delete_and_seed_idempotent
+FAILED tests/test_hardening.py::TestBootstrapAndHistoryFramework::test_theme_ticker_metrics_uses_latest_available_snapshot_for_market_cap
+FAILED tests/test_historical_backfill.py::TestHistoricalBackfill::test_newly_governed_ticker_creates_onboarding_state
+FAILED tests/test_historical_backfill.py::TestHistoricalBackfill::test_targeted_current_snapshot_hydration_updates_ticker_snapshot_layer_without_full_refresh
+FAILED tests/test_historical_backfill.py::TestHistoricalBackfill::test_targeted_onboarding_backfill_updates_onboarding_state
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_description_first_strategy_prefers_payments_lending_over_cloud_devops
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_description_first_strategy_suppresses_healthcare_themes_for_storage_description
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_fallback_can_propose_optics_new_theme_even_with_indirect_existing_matches
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_fallback_can_suggest_new_theme_for_narrow_uncovered_role
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_openai_adjacent_existing_themes_do_not_block_consider_new_theme_when_role_is_clear
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_openai_can_promote_narrow_new_theme_from_ai_role_context_even_when_profile_text_is_generic
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_openai_decision_surface_keeps_proposed_new_theme_and_adjacent_existing_themes
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_openai_merge_promotes_narrow_new_theme_when_rationale_identifies_precision_gap
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_openai_path_prefers_narrow_optics_new_theme_over_adjacent_ai_themes
+FAILED tests/test_scanner_audit.py::TestScannerAudit::test_openai_placeholder_none_suggested_does_not_block_narrow_new_theme_override
+21 failed, 311 passed, 42 warnings in 77.61s (0:01:17)

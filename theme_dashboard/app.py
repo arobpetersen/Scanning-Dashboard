@@ -2,28 +2,35 @@ import json
 
 import streamlit as st
 
-from src.config import DEFAULT_PROVIDER, MASSIVE_API_KEY_ENV, massive_api_key
+from src.config import MASSIVE_API_KEY_ENV, massive_api_key
 from src.database import get_conn, init_db
-from src.fetch_data import RefreshBlockedError, run_refresh
+from src.fetch_data import LiveProviderNotConfiguredError, RefreshBlockedError, running_refresh_runs, run_refresh
 from src.queries import last_refresh_run, synthetic_data_active
-from src.rankings import compute_theme_rankings
+from src.streamlit_utils import db_cache_token, load_theme_rankings_cached, reset_perf_timings, render_dataframe, show_perf_summary, stop_for_database_error
+from src.symbol_hygiene import refresh_eligible_tickers
 from src.suggestions_service import suggestion_status_counts
-from src.theme_service import active_ticker_universe, get_theme_members, list_themes, seed_if_needed
+from src.theme_service import active_ticker_universe, get_theme_members, list_themes, refresh_active_ticker_universe, seed_if_needed
 
 st.set_page_config(page_title="Theme Ops Dashboard", layout="wide")
 st.title("Theme Operations Dashboard")
 st.caption("Control center for refresh, rankings, review queue, and health signals.")
+reset_perf_timings("app")
 
-init_db()
-with get_conn() as conn:
-    seeded = seed_if_needed(conn)
-    themes = list_themes(conn, active_only=False)
+try:
+    init_db()
+    with get_conn() as conn:
+        seeded = seed_if_needed(conn)
+        themes = list_themes(conn, active_only=False)
+except Exception as exc:
+    stop_for_database_error(exc)
+db_token = db_cache_token()
 
 if seeded:
     st.success("Theme registry imported from themes_seed_structured.json. DuckDB is source of truth.")
 
-provider_name = st.sidebar.selectbox("Provider", ["mock", "live"], index=0 if DEFAULT_PROVIDER == "mock" else 1)
-scope_mode = st.sidebar.radio("Refresh scope", ["Active themes", "Selected theme", "Custom ticker list"], index=1 if provider_name == "live" else 0)
+provider_name = "live"
+active_scope_label = "Live Active Themes"
+scope_mode = st.sidebar.radio("Refresh scope", [active_scope_label, "Selected theme", "Custom ticker list"], index=0)
 
 selected_theme_name: str | None = None
 selected_tickers: list[str] | None = None
@@ -40,15 +47,22 @@ elif scope_mode == "Custom ticker list":
     raw = st.sidebar.text_area("Tickers", value="AAPL, MSFT, NVDA")
     selected_tickers = sorted(set([p.strip().upper() for p in raw.replace("\n", " ").replace(",", " ").split(" ") if p.strip()]))
 
-with get_conn() as conn:
-    resolved_tickers = active_ticker_universe(conn) if scope_mode == "Active themes" else sorted(set(selected_tickers or []))
-    last_run = last_refresh_run(conn)
-    rankings = compute_theme_rankings(conn)
-    sugg_counts = suggestion_status_counts(conn)
-    synthetic_active = synthetic_data_active(conn)
+try:
+    with get_conn() as conn:
+        requested_tickers = active_ticker_universe(conn) if scope_mode == active_scope_label else sorted(set(selected_tickers or []))
+        resolved_tickers = refresh_active_ticker_universe(conn) if scope_mode == active_scope_label else sorted(set(selected_tickers or []))
+        eligible_tickers, suppressed_scope_tickers = refresh_eligible_tickers(conn, requested_tickers)
+        last_run = last_refresh_run(conn)
+        running_runs = running_refresh_runs(conn)
+        sugg_counts = suggestion_status_counts(conn)
+        synthetic_active = synthetic_data_active(conn)
+except Exception as exc:
+    stop_for_database_error(exc)
+rankings = load_theme_rankings_cached(db_token)
 
-if provider_name == "live" and not massive_api_key():
-    st.warning(f"Live selected but {MASSIVE_API_KEY_ENV} is missing. Refresh will fall back to mock provider behavior.")
+live_configured = bool(massive_api_key())
+if not live_configured:
+    st.error(f"Live refresh is unavailable until `{MASSIVE_API_KEY_ENV}` is configured.")
 
 if synthetic_active:
     st.info("Synthetic historical data active")
@@ -64,7 +78,7 @@ m1.metric("Themes", int(rankings.shape[0]) if not rankings.empty else 0)
 m2.metric("Active themes", int((rankings["is_active"] == True).sum()) if not rankings.empty else 0)
 m3.metric("Pending suggestions", pending)
 m4.metric("Obsolete suggestions", obsolete)
-m5.metric("Scope tickers", len(resolved_tickers))
+m5.metric("Refresh-eligible tickers", len(eligible_tickers))
 
 st.subheader("Refresh Control")
 rc1, rc2 = st.columns([2, 3])
@@ -73,8 +87,20 @@ with rc1:
     st.write(f"**Scope:** {scope_mode}")
     if selected_theme_name:
         st.write(f"**Theme:** {selected_theme_name}")
-    st.write(f"**Tickers in scope:** {len(resolved_tickers)}")
-    if st.button("Run refresh now", type="primary"):
+    st.write(f"**Requested scope tickers:** {len(requested_tickers)}")
+    st.write(f"**Refresh-eligible tickers:** {len(eligible_tickers)}")
+    if suppressed_scope_tickers:
+        st.caption(
+            f"{len(suppressed_scope_tickers)} ticker(s) are currently refresh-suppressed and excluded from active refresh scope."
+        )
+    if not running_runs.empty:
+        active_run = running_runs.iloc[0]
+        stale_note = " likely stale" if bool(active_run.get("likely_stale")) else ""
+        st.warning(
+            f"Refresh run #{int(active_run['run_id'])} is still marked `running`{stale_note}. "
+            "Concurrent refreshes stay blocked until it finishes or is manually marked interrupted from Health > Refresh history."
+        )
+    if st.button("Run refresh now", type="primary", disabled=not live_configured):
         pb = st.progress(0)
         status = st.empty()
 
@@ -91,7 +117,7 @@ with rc1:
                     provider_name,
                     tickers=resolved_tickers,
                     progress_callback=_progress,
-                    scope_type={"Active themes": "active_themes", "Selected theme": "selected_theme", "Custom ticker list": "custom_tickers"}[scope_mode],
+                    scope_type={active_scope_label: "active_themes", "Selected theme": "selected_theme", "Custom ticker list": "custom_tickers"}[scope_mode],
                     scope_theme_name=selected_theme_name,
                 )
             pb.progress(100)
@@ -99,6 +125,12 @@ with rc1:
             st.rerun()
         except RefreshBlockedError as exc:
             st.warning(f"Refresh blocked: {exc}")
+            st.caption(
+                f"If run #{int(exc.running_run_id)} is stale or interrupted, use Health > Refresh history and click "
+                "`Mark selected running run interrupted`."
+            )
+        except LiveProviderNotConfiguredError as exc:
+            st.error(str(exc))
         except Exception as exc:
             st.error(f"Refresh failed: {exc}")
 
@@ -125,7 +157,11 @@ with rc2:
     else:
         st.info("No runs yet.")
     with st.expander("Resolved ticker universe"):
+        st.write("Refresh-eligible tickers")
         st.code(", ".join(resolved_tickers) if resolved_tickers else "(none)")
+        if suppressed_scope_tickers:
+            st.write("Refresh-suppressed tickers excluded from this run")
+            st.code(", ".join(sorted(suppressed_scope_tickers)))
 
 st.subheader("Current Rankings")
 if rankings.empty:
@@ -133,10 +169,12 @@ if rankings.empty:
 
 top_n = st.slider("Top themes to display", min_value=5, max_value=50, value=20, step=5)
 view = rankings.head(top_n).copy()
-st.dataframe(
+render_dataframe(
+    "app_current_rankings",
     view[["theme", "category", "ticker_count", "avg_1m", "positive_1m_breadth_pct", "composite_score", "delta_composite_score"]],
     width="stretch",
 )
 st.line_chart(view[["theme", "composite_score"]].set_index("theme"))
 
 st.caption("Navigation: Themes, Historical Performance, Suggestions, and Health.")
+show_perf_summary()

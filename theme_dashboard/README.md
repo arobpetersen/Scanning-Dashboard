@@ -5,7 +5,7 @@ A local-first Streamlit app for **objective, formula-based theme ranking** and t
 ## What this app does
 - Imports themes from `themes_seed_structured.json` on first run only.
 - Stores and manages themes in local DuckDB afterward (DuckDB is source of truth).
-- Refreshes ticker snapshots from a provider (`mock` and `live` via Massive).
+- Refreshes ticker snapshots from the live Massive provider.
 - Calculates deterministic rankings from numeric ticker metrics only.
 - Stores historical ticker snapshots and historical theme snapshots on every successful/partial refresh.
 - Shows trend deltas between latest and prior theme snapshots.
@@ -99,9 +99,13 @@ If you want to run the existing tests, use the same environment after installing
 export MASSIVE_API_KEY="your_api_key_here"
 ```
 
-3. In app sidebar, choose `live` provider.
+3. Launch the app after setting `MASSIVE_API_KEY`.
 
-If `MASSIVE_API_KEY` is not set and you choose `live`, the app shows a warning and gracefully falls back to `mock` for refresh so the app remains usable.
+If `MASSIVE_API_KEY` is not set, live refresh is blocked. The app no longer falls back to `mock` during normal dashboard workflows.
+
+Operational default:
+- `live` is the only supported app/runtime data mode.
+- `mock` may still exist in code for isolated tests and development utilities, but it is no longer part of the operator workflow.
 
 > Keep secrets local: do **not** hardcode API keys in source files and do **not** commit `.env` or shell files containing secrets.
 
@@ -402,8 +406,27 @@ What the runner does:
   - runner handles weekday/time/duplicate protections idempotently
 
 ## Providers
-- `mock`: deterministic sample data for all tickers so the app is usable immediately.
-- `live`: Massive-backed provider in `src/provider_live.py`.
+- `live`: Massive-backed provider in `src/provider_live.py` and the default operational mode.
+- `mock`: deterministic sample data kept for explicit development/testing and recovery use.
+
+## Source purity / contamination audit
+- Current live-facing views now use live-preferred snapshot selection when live data exists.
+- This reduces user-facing contamination if older/newer `mock` or `synthetic_backfill` rows remain in DuckDB.
+- Use the baseline check to inspect source purity:
+
+```powershell
+.\.venv\Scripts\python.exe run_baseline_check.py
+```
+
+```bash
+.venv/bin/python run_baseline_check.py
+```
+
+The output now reports:
+- preferred current theme/ticker source
+- current latest-view sources
+- recent history sources
+- whether mixed sources are only historical residue or are actively affecting current views
 
 ## Ranking formulas (auditable)
 - `avg_1w = mean(perf_1w)`
@@ -412,7 +435,9 @@ What the runner does:
 - `positive_1w_breadth_pct = percent(perf_1w > 0)`
 - `positive_1m_breadth_pct = percent(perf_1m > 0)`
 - `positive_3m_breadth_pct = percent(perf_3m > 0)`
-- `composite_score = 0.25*avg_1w + 0.50*avg_1m + 0.25*avg_3m`
+- `base_composite_score = 0.25*avg_1w + 0.50*avg_1m + 0.25*avg_3m`
+- `confidence_factor = min(1, sqrt(ticker_count / 8))`
+- `composite_score = base_composite_score * confidence_factor`
 
 Weights are configured in `src/config.py`.
 
@@ -454,6 +479,10 @@ Scope observability: each run records scope metadata (`scope_type`, `scope_theme
 
 
 Live safeguard: the run stops early if repeated rate-limit errors are detected (configured by `LIVE_RATE_LIMIT_STOP_THRESHOLD` in `src/config.py`) and is finalized cleanly with a summary error message.
+
+Normal-use refresh scope default:
+- the app now defaults refresh scope to **Live Active Themes**
+- **Selected theme** and **Custom ticker list** remain available for narrower manual operation
 
 
 

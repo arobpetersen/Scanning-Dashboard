@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .config import THEME_CONFIDENCE_FULL_COUNT
 from .queries import theme_history_window, top_n_membership_changes
 
 METRIC_COLS = [
@@ -26,7 +27,22 @@ def _empty_result() -> dict:
         "weakening_themes": empty,
         "new_leaders": [],
         "dropped_leaders": [],
+        "source_preference": None,
+        "meta": {
+            "requested_lookback_days": None,
+            "window_start": None,
+            "window_end": None,
+            "boundary_snapshot_count": 0,
+            "effective_window_days": None,
+            "collapsed_to_available_history": False,
+        },
     }
+
+
+def _historical_theme_confidence_factor(ticker_count: int | float) -> float:
+    if pd.isna(ticker_count) or float(ticker_count) <= 0:
+        return 0.0
+    return min(1.0, (float(ticker_count) / float(THEME_CONFIDENCE_FULL_COUNT)) ** 0.5)
 
 
 def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
@@ -34,17 +50,53 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
     if history.empty:
         return _empty_result()
 
-    history = history.sort_values(["theme", "snapshot_time"]).copy()
+    history = history.copy()
+    if "theme_id" not in history.columns:
+        history["theme_id"] = history["theme"].astype(str)
+    if "category" not in history.columns:
+        history["category"] = None
+
+    source_preference = None
+    if "snapshot_source" in history.columns and not history["snapshot_source"].dropna().empty:
+        sources = sorted(set(history["snapshot_source"].dropna().astype(str).tolist()))
+        source_preference = sources[0] if len(sources) == 1 else ", ".join(sources)
+
+    boundary_times = pd.to_datetime(history["snapshot_time"]).dropna().drop_duplicates().sort_values()
+    window_start = boundary_times.iloc[0] if not boundary_times.empty else None
+    window_end = boundary_times.iloc[-1] if not boundary_times.empty else None
+    effective_window_days = int((window_end - window_start).days) if window_start is not None and window_end is not None else None
+    collapsed_to_available_history = bool(effective_window_days is not None and effective_window_days < int(lookback_days))
+    provenance_classes = sorted(set(history["provenance_class"].dropna().astype(str).tolist())) if "provenance_class" in history.columns else []
+    provenance_mix = (
+        "mixed"
+        if len(provenance_classes) > 1
+        else (f"{provenance_classes[0]}-only" if provenance_classes else "unknown")
+    )
+    boundary_rows = history[pd.to_datetime(history["snapshot_time"]).isin([window_start, window_end])].copy()
+    boundary_classes = sorted(set(boundary_rows["provenance_class"].dropna().astype(str).tolist())) if "provenance_class" in boundary_rows.columns else []
+    boundary_provenance_mix = (
+        "mixed"
+        if len(boundary_classes) > 1
+        else (f"{boundary_classes[0]}-only" if boundary_classes else "unknown")
+    )
+
+    history = history.sort_values(["theme_id", "snapshot_time", "theme"]).copy()
     history["rank"] = history.groupby("snapshot_time")["composite_score"].rank(method="dense", ascending=False)
 
-    first = history.groupby("theme", as_index=False).first()
-    last = history.groupby("theme", as_index=False).last()
+    first = history.groupby("theme_id", as_index=False).first()
+    last = history.groupby("theme_id", as_index=False).last()
 
-    merged = first[["theme", "composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct", "ticker_count", "rank"]].merge(
-        last[["theme", "composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct", "ticker_count", "rank"]],
-        on="theme",
+    merged = first[
+        ["theme_id", "theme", "category", "composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct", "ticker_count", "rank"]
+    ].merge(
+        last[
+            ["theme_id", "theme", "category", "composite_score", "avg_1w", "avg_1m", "avg_3m", "positive_1m_breadth_pct", "ticker_count", "rank"]
+        ],
+        on="theme_id",
         suffixes=("_start", "_end"),
     )
+    merged["theme"] = merged["theme_end"].where(merged["theme_end"].notna(), merged["theme_start"])
+    merged["category"] = merged["category_end"].where(merged["category_end"].notna(), merged["category_start"])
 
     merged["delta_composite"] = merged["composite_score_end"] - merged["composite_score_start"]
     merged["delta_avg_1w"] = merged["avg_1w_end"] - merged["avg_1w_start"]
@@ -53,12 +105,20 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
     merged["delta_breadth"] = merged["positive_1m_breadth_pct_end"] - merged["positive_1m_breadth_pct_start"]
     merged["delta_ticker_count"] = merged["ticker_count_end"] - merged["ticker_count_start"]
     merged["rank_change"] = merged["rank_start"] - merged["rank_end"]
+    merged["breadth_confidence_factor"] = [
+        min(
+            _historical_theme_confidence_factor(start_count),
+            _historical_theme_confidence_factor(end_count),
+        )
+        for start_count, end_count in zip(merged["ticker_count_start"], merged["ticker_count_end"])
+    ]
+    merged["effective_delta_breadth"] = merged["delta_breadth"] * merged["breadth_confidence_factor"]
 
     # Deterministic, auditable momentum score
     merged["momentum_score"] = (
         0.45 * merged["delta_composite"]
         + 0.25 * merged["delta_avg_1m"]
-        + 0.20 * merged["delta_breadth"]
+        + 0.20 * merged["effective_delta_breadth"]
         + 0.10 * merged["rank_change"]
     )
 
@@ -76,4 +136,15 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
         "weakening_themes": merged.sort_values(["delta_composite", "delta_breadth"], ascending=[True, True]).head(top_n),
         "new_leaders": entered,
         "dropped_leaders": dropped,
+        "source_preference": source_preference,
+        "meta": {
+            "requested_lookback_days": int(lookback_days),
+            "window_start": window_start,
+            "window_end": window_end,
+            "boundary_snapshot_count": int(boundary_times.nunique()),
+            "effective_window_days": effective_window_days,
+            "collapsed_to_available_history": collapsed_to_available_history,
+            "provenance_mix": provenance_mix,
+            "boundary_provenance_mix": boundary_provenance_mix,
+        },
     }

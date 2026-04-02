@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 theme_dashboard.duckdb
+.tmp/
+tests/_tmp_*.duckdb
+tests/_tmp_*/
