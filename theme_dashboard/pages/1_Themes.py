@@ -16,6 +16,7 @@ from src.leaderboard_utils import (
     build_window_leaderboard,
     current_leadership_quality_label,
     disambiguate_theme_labels,
+    format_top_ticker_leaders,
 )
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.queries import baseline_status, ticker_history_last_n_snapshots, ticker_history_last_n_trading_days, ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
@@ -509,6 +510,22 @@ def _apply_ticker_model_scores(ticker_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _attach_current_leadership_tickers(leadership_df: pd.DataFrame) -> pd.DataFrame:
+    if leadership_df.empty or "theme_id" not in leadership_df.columns:
+        return leadership_df
+
+    out = leadership_df.copy()
+    leaders_by_theme_id: dict[int, str] = {}
+    with get_conn() as conn:
+        for theme_id in out["theme_id"].dropna().astype(int).tolist():
+            ticker_df = theme_ticker_metrics(conn, theme_id)
+            scored = _apply_ticker_model_scores(ticker_df)
+            leaders_by_theme_id[int(theme_id)] = format_top_ticker_leaders(scored, top_k=3)
+
+    out["leaders"] = out["theme_id"].map(lambda value: leaders_by_theme_id.get(int(value), "") if pd.notna(value) else "")
+    return out
+
+
 def _build_ticker_composite_history_chart_df(
     conn,
     ticker_df: pd.DataFrame,
@@ -893,6 +910,7 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, sh
         "rank",
         "theme",
         "category",
+        "leaders",
         "current_momentum_score",
         "composite_score",
         "avg_1w",
@@ -920,6 +938,7 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, sh
         ) | {
             "theme": st.column_config.TextColumn("theme", width="small"),
             "category": st.column_config.TextColumn("category", width="small"),
+            "leaders": st.column_config.TextColumn("leaders", width="medium"),
             "quality": st.column_config.TextColumn("quality", width="small"),
         },
         on_select="rerun",
@@ -1485,7 +1504,7 @@ with explore_tab:
             "It does not rerun current/live snapshot refresh and does not intentionally rebuild the full recent window."
         )
 
-    leadership_df = build_current_leadership_table(current_rankings, top_k=12)
+    leadership_df = _attach_current_leadership_tickers(build_current_leadership_table(current_rankings, top_k=12))
     current_1w_df = build_current_performance_table(current_theme_metrics, "avg_1w", top_k=10)
     current_1m_df = build_current_performance_table(current_theme_metrics, "avg_1m", top_k=10)
     current_delta_lookup, current_delta_latest_date, current_delta_prior_date = _resolve_prior_daily_endpoint(momentum_1m.get("history", pd.DataFrame()))
@@ -1925,7 +1944,11 @@ with manage_tab:
             st.error(f"Create failed: {exc}")
 
     labels = {f"{r['name']} [{r['id']}]": int(r["id"]) for _, r in themes.iterrows()}
-    selected_label = st.selectbox("Select theme to manage", list(labels.keys()), key="manage_theme")
+    manage_theme_options = list(labels.keys())
+    next_manage_label = resolve_valid_selectbox_value(st.session_state.get("manage_theme"), manage_theme_options)
+    if next_manage_label is not None and st.session_state.get("manage_theme") != next_manage_label:
+        st.session_state["manage_theme"] = next_manage_label
+    selected_label = st.selectbox("Select theme to manage", manage_theme_options, key="manage_theme")
     selected_id = labels[selected_label]
     selected = themes[themes["id"] == selected_id].iloc[0]
 
@@ -1960,6 +1983,7 @@ with manage_tab:
         try:
             with get_conn() as conn:
                 delete_theme(conn, selected_id)
+            st.session_state.pop("manage_theme", None)
             prepare_post_mutation_refresh(
                 st.session_state,
                 "manage_ticker_feedback",

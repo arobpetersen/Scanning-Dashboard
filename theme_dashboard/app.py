@@ -9,7 +9,7 @@ from src.queries import last_refresh_run, synthetic_data_active
 from src.streamlit_utils import db_cache_token, load_theme_rankings_cached, reset_perf_timings, render_dataframe, show_perf_summary, stop_for_database_error
 from src.symbol_hygiene import refresh_eligible_tickers
 from src.suggestions_service import suggestion_status_counts
-from src.theme_service import active_ticker_universe, get_theme_members, list_themes, refresh_active_ticker_universe, seed_if_needed
+from src.theme_service import active_ticker_universe, get_theme_members, list_themes, refresh_active_ticker_universe, seed_if_needed, theme_registry_counts
 
 st.set_page_config(page_title="Theme Ops Dashboard", layout="wide")
 st.title("Theme Operations Dashboard")
@@ -21,6 +21,7 @@ try:
     with get_conn() as conn:
         seeded = seed_if_needed(conn)
         themes = list_themes(conn, active_only=False)
+        registry_counts = theme_registry_counts(conn)
 except Exception as exc:
     stop_for_database_error(exc)
 db_token = db_cache_token()
@@ -74,8 +75,8 @@ pending = int(sugg_counts[sugg_counts["status"] == "pending"]["cnt"].sum()) if n
 obsolete = int(sugg_counts[sugg_counts["status"] == "obsolete"]["cnt"].sum()) if not sugg_counts.empty else 0
 
 m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Themes", int(rankings.shape[0]) if not rankings.empty else 0)
-m2.metric("Active themes", int((rankings["is_active"] == True).sum()) if not rankings.empty else 0)
+m1.metric("Themes", int(registry_counts["themes_count"]))
+m2.metric("Active themes", int(registry_counts["active_themes_count"]))
 m3.metric("Pending suggestions", pending)
 m4.metric("Obsolete suggestions", obsolete)
 m5.metric("Refresh-eligible tickers", len(eligible_tickers))

@@ -228,6 +228,39 @@ def build_current_leadership_table(
     return leadership[deduped_cols]
 
 
+def format_top_ticker_leaders(
+    ticker_df: pd.DataFrame,
+    *,
+    top_k: int = 3,
+    score_col: str = "ticker_composite_score",
+    eligibility_col: str = "eligible",
+    ticker_col: str = "ticker",
+) -> str:
+    if ticker_df.empty or ticker_col not in ticker_df.columns:
+        return ""
+
+    leaders = ticker_df.copy()
+    if eligibility_col in leaders.columns:
+        leaders = leaders[leaders[eligibility_col] == True].copy()
+    if leaders.empty:
+        return ""
+
+    if score_col not in leaders.columns:
+        leaders[score_col] = np.nan
+    leaders[score_col] = pd.to_numeric(leaders[score_col], errors="coerce")
+    leaders[ticker_col] = leaders[ticker_col].fillna("").astype(str).str.strip().str.upper()
+    leaders = leaders[leaders[ticker_col] != ""].copy()
+    if leaders.empty:
+        return ""
+
+    leaders = (
+        leaders.sort_values([score_col, ticker_col], ascending=[False, True], na_position="last")
+        .drop_duplicates(subset=[ticker_col], keep="first")
+        .head(top_k)
+    )
+    return ", ".join(leaders[ticker_col].tolist())
+
+
 def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k: int = 10) -> pd.DataFrame:
     if rankings.empty:
         return pd.DataFrame()
