@@ -22,6 +22,7 @@ from src.leaderboard_utils import (
     build_current_performance_table,
     build_window_leaderboard,
     disambiguate_theme_labels,
+    format_top_ticker_leaders,
     historical_concentration_label,
 )
 from src.metric_formatting import format_theme_ticker_table, human_readable_number, short_timestamp
@@ -104,7 +105,7 @@ from src.suggestions_page_state import (
     sync_suggested_theme_checkbox_state,
 )
 from src.suggestions_service import recent_applied_suggestions
-from src.theme_service import add_ticker, clear_manual_ticker_suppression, get_theme_members, list_themes, refresh_active_ticker_universe, remove_ticker, replace_ticker_in_theme, seed_if_needed, set_manual_ticker_suppression, theme_membership_export, ticker_manual_suppression_state
+from src.theme_service import add_ticker, clear_manual_ticker_suppression, delete_theme, get_theme_members, list_themes, refresh_active_ticker_universe, remove_ticker, replace_ticker_in_theme, seed_if_needed, set_manual_ticker_suppression, theme_membership_export, theme_registry_counts, ticker_manual_suppression_state
 from src.theme_service import set_ticker_theme_assignments
 from src.ticker_onboarding import governed_ticker_onboarding_counts, list_governed_ticker_onboarding
 from src.provider_live import LiveProvider
@@ -142,6 +143,34 @@ class TestLeaderboardUtils(unittest.TestCase):
         self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 3, "positive_1m_breadth_pct": 66.67})), "Narrow")
         self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 5, "positive_1m_breadth_pct": 80.0})), "Broad")
         self.assertEqual(historical_concentration_label(pd.Series({"ticker_count": 5, "positive_1m_breadth_pct": 40.0})), "Narrow")
+
+    def test_format_top_ticker_leaders_prefers_eligible_highest_composite_names(self):
+        ticker_df = pd.DataFrame(
+            [
+                {"ticker": "NVDA", "eligible": True, "ticker_composite_score": 17.2},
+                {"ticker": "SMCI", "eligible": True, "ticker_composite_score": 13.5},
+                {"ticker": "DELL", "eligible": True, "ticker_composite_score": 12.0},
+                {"ticker": "AMD", "eligible": True, "ticker_composite_score": 9.0},
+                {"ticker": "OTC", "eligible": False, "ticker_composite_score": 99.0},
+            ]
+        )
+
+        leaders = format_top_ticker_leaders(ticker_df)
+
+        self.assertEqual(leaders, "NVDA, SMCI, DELL")
+
+    def test_format_top_ticker_leaders_returns_available_names_only(self):
+        ticker_df = pd.DataFrame(
+            [
+                {"ticker": "PLTR", "eligible": True, "ticker_composite_score": 11.0},
+                {"ticker": "SNOW", "eligible": True, "ticker_composite_score": 10.0},
+                {"ticker": "MISSING", "eligible": False, "ticker_composite_score": 50.0},
+            ]
+        )
+
+        leaders = format_top_ticker_leaders(ticker_df)
+
+        self.assertEqual(leaders, "PLTR, SNOW")
 
     def test_historical_concentration_label_prefers_historical_contributor_counts_over_ticker_count(self):
         self.assertEqual(
@@ -1726,6 +1755,40 @@ class TestCurrentThemeRankingHardening(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_theme_registry_counts_include_unranked_and_inactive_themes(self):
+        conn = self._build_conn()
+        try:
+            conn.execute("alter table themes add column created_at timestamp")
+            conn.execute("alter table themes add column updated_at timestamp")
+            conn.execute("insert into themes(id, name, category, is_active) values (3, 'Dormant', 'Legacy', false)")
+            conn.execute("insert into theme_membership values (1, 'AAA'), (1, 'BBB'), (1, 'CCC')")
+            conn.execute("insert into theme_membership values (2, 'XXX'), (2, 'YYY')")
+            conn.execute(
+                """
+                insert into ticker_snapshots values
+                (1, 'AAA', 10, 5, 6, 7, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'BBB', 12, 6, 7, 8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'CCC', 14, 7, 8, 9, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'XXX', 9, 30, 30, 30, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'YYY', 9, 25, 25, 25, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live')
+                """
+            )
+            conn.execute(
+                """
+                insert into theme_snapshots values
+                (1, '2026-03-12 22:00:00', 1, 3, 1, 1, 1, 50, 50, 50, 1, 'live'),
+                (1, '2026-03-12 22:00:00', 2, 2, 1, 1, 1, 50, 50, 50, 1, 'live')
+                """
+            )
+
+            counts = theme_registry_counts(conn)
+            rankings = compute_theme_rankings(conn)
+
+            self.assertEqual(counts, {"themes_count": 3, "active_themes_count": 2})
+            self.assertEqual(rankings["theme"].tolist(), ["Quality"])
+        finally:
+            conn.close()
+
 class TestBoundarySelection(unittest.TestCase):
     def test_recent_ticker_history_theme_history_caps_outlier_returns_and_allows_valid_thin_themes(self):
         conn = duckdb.connect(":memory:")
@@ -2393,6 +2456,19 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
         self.assertEqual(pending["ticker"].tolist(), ["AAA", "BBB"])
         self.assertEqual(resolved["ticker"].tolist(), ["CCC"])
 
+    def test_filter_symbol_hygiene_queue_supports_history_gap_view(self):
+        queue = pd.DataFrame(
+            [
+                {"ticker": "AAA", "status": "active", "suggested_status": None, "history_gap_flag": True},
+                {"ticker": "BBB", "status": "watch", "suggested_status": None, "history_gap_flag": False},
+                {"ticker": "CCC", "status": "refresh_suppressed", "suggested_status": None, "history_gap_flag": True},
+            ]
+        )
+
+        history_gaps = filter_symbol_hygiene_queue(queue, "History gaps")
+
+        self.assertEqual(history_gaps["ticker"].tolist(), ["AAA", "CCC"])
+
     def test_apply_staged_symbol_hygiene_actions_updates_multiple_rows(self):
         conn = duckdb.connect(":memory:")
         conn.execute(
@@ -2485,6 +2561,79 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
 
         self.assertEqual(out.iloc[0]["current_theme_names"], "3D Printing")
         self.assertEqual(out.iloc[0]["current_categories"], "Emerging Tech")
+        conn.close()
+
+    def test_symbol_hygiene_queue_includes_zero_history_advisory_candidates(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table ticker_daily_history(
+                run_id bigint,
+                ticker varchar,
+                trading_date date,
+                open double,
+                high double,
+                low double,
+                close double,
+                volume double,
+                vwap double,
+                trade_count bigint,
+                provenance_class varchar,
+                provenance_source_label varchar,
+                market_data_source varchar,
+                created_at timestamp,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Streaming & Media', 'Media', true)")
+        conn.execute("insert into theme_membership values (1, 'PARA')")
+        conn.execute("insert into symbol_refresh_status values ('PARA', 'active', null, null, null, null, 0, 0, null, '2026-04-07 20:00:00', 141, current_timestamp)")
+        conn.execute("insert into refresh_runs values (141, 'success', '2026-04-07 20:06:00')")
+        conn.execute(
+            """
+            insert into ticker_snapshots values
+            (141, 'PARA', 11.0, -2.0, -4.0, -8.0, null, 1000000, null, null, null, '2025-08-05 17:00:00', 'live')
+            """
+        )
+
+        out = symbol_hygiene_queue(conn, limit=20)
+        para = out[out["ticker"] == "PARA"].iloc[0]
+
+        self.assertTrue(bool(para["history_gap_flag"]))
+        self.assertEqual(int(para["history_row_count"]), 0)
+        self.assertEqual(str(para["history_review_focus"]), "review delisting / manual suppression")
+        self.assertIn("No stored ticker_daily_history rows", str(para["suggested_reason"]))
         conn.close()
 
     def test_symbol_hygiene_queue_flags_calculation_outliers_and_keeps_membership_visible(self):
@@ -2713,6 +2862,11 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
             "symbol_hygiene_queue(conn, limit=250, outlier_read_conn_factory=get_fresh_read_conn)",
             health_page_source,
         )
+        self.assertIn('["Pending review", "History gaps", "Suppressed / resolved", "All"]', health_page_source)
+        self.assertIn("History gap advisory: stored rows=", health_page_source)
+        self.assertIn('if st.button(f"Open `{ticker}` in Themes lookup", key=f"open_history_gap_{ticker}"):', health_page_source)
+        self.assertIn('st.session_state["manage_ticker_lookup"] = ticker', health_page_source)
+        self.assertIn('st.switch_page("pages/1_Themes.py")', health_page_source)
 
     def test_live_symbol_hygiene_queue_path_has_no_df_materialization_in_queue_or_outlier_helpers(self):
         import src.symbol_hygiene as symbol_hygiene_module
@@ -6432,6 +6586,34 @@ class TestThemeSeedBackfill(unittest.TestCase):
         self.assertTrue(bool(remove_result["removed"]))
         self.assertFalse(changed)
         self.assertEqual(members, [("IONQ",)])
+        conn.close()
+
+    @patch("src.theme_service.load_seed_file")
+    def test_seed_does_not_recreate_deleted_seed_theme_once_membership_exists(self, mock_load_seed):
+        mock_load_seed.return_value = [
+            {"name": "AI", "category": "Tech", "tickers": ["NVDA"]},
+            {"name": "Energy", "category": "Macro", "tickers": ["XOM"]},
+        ]
+
+        conn = duckdb.connect(":memory:")
+        conn.execute("create sequence if not exists themes_id_seq")
+        conn.execute("create table themes(id bigint primary key default nextval('themes_id_seq'), name varchar unique, category varchar, is_active boolean default true, created_at timestamp default current_timestamp, updated_at timestamp default current_timestamp)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar, created_at timestamp default current_timestamp, primary key(theme_id, ticker))")
+
+        first_seed = seed_if_needed(conn)
+        energy_id = int(conn.execute("select id from themes where name = 'Energy'").fetchone()[0])
+
+        delete_theme(conn, energy_id)
+        changed = seed_if_needed(conn)
+        remaining = conn.execute("select name from themes order by name").fetchall()
+        memberships = conn.execute(
+            "select t.name, m.ticker from theme_membership m join themes t on t.id = m.theme_id order by t.name, m.ticker"
+        ).fetchall()
+
+        self.assertTrue(first_seed)
+        self.assertFalse(changed)
+        self.assertEqual(remaining, [("AI",)])
+        self.assertEqual(memberships, [("AI", "NVDA")])
         conn.close()
 
     @patch("src.theme_service.load_seed_file")

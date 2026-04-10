@@ -205,9 +205,10 @@ def _seed_if_needed_core(conn) -> bool:
     """Idempotent seed/backfill.
 
     Seeds themes and membership when DB is empty, backfills membership when the membership
-    table is empty, and seeds memberships for newly inserted themes. It intentionally does
-    not re-add missing membership rows for already-existing themes once governed membership
-    has been established, so manual removals remain removed.
+    table is empty, and seeds memberships for newly inserted themes. Once governed
+    membership has been established, it intentionally does not recreate missing seed themes
+    or re-add missing membership rows for already-existing themes, so manual deletions and
+    removals remain removed.
     """
     seed_themes = load_seed_file(SEED_PATH)
 
@@ -226,15 +227,12 @@ def _seed_if_needed_core(conn) -> bool:
 
     themes_count = int(_fetchone_required(conn.execute("SELECT COUNT(*) FROM themes"), "themes count")[0])
     membership_count = int(_fetchone_required(conn.execute("SELECT COUNT(*) FROM theme_membership"), "theme membership count")[0])
-    seed_theme_names = {name for name, _, _ in prepared_themes}
-
-    existing_theme_names = {row[0] for row in conn.execute("SELECT name FROM themes").fetchall()}
-    missing_theme_names = seed_theme_names - existing_theme_names
     seed_all_memberships = themes_count == 0 or membership_count == 0
-    membership_seed_themes = set(seed_theme_names if seed_all_memberships else missing_theme_names)
-
-    if themes_count > 0 and not missing_theme_names and not seed_all_memberships:
+    if themes_count > 0 and not seed_all_memberships:
         return False
+
+    seed_theme_names = {name for name, _, _ in prepared_themes}
+    membership_seed_themes = set(seed_theme_names)
 
     changed = False
     conn.execute("BEGIN TRANSACTION")
@@ -315,6 +313,16 @@ def list_themes(conn, active_only: bool = False) -> pd.DataFrame:
         return active_conn.execute(sql).df()
 
     return _query_df_with_bootstrap_recovery(_load)
+
+
+def theme_registry_counts(conn) -> dict[str, int]:
+    themes = list_themes(conn, active_only=False)
+    if themes.empty:
+        return {"themes_count": 0, "active_themes_count": 0}
+    return {
+        "themes_count": int(themes.shape[0]),
+        "active_themes_count": int((themes["is_active"] == True).sum()),
+    }
 
 
 def theme_membership_export(conn) -> pd.DataFrame:

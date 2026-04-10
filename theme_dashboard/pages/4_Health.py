@@ -539,10 +539,10 @@ with ops_tab:
     else:
         queue_view = st.selectbox(
             "Queue view",
-            ["Pending review", "Suppressed / resolved", "All"],
+            ["Pending review", "History gaps", "Suppressed / resolved", "All"],
             index=0,
             key="symbol_hygiene_queue_view",
-            help="Pending review focuses on actionable items. Suppressed / resolved shows symbols already moved out of active refresh.",
+            help="Pending review mixes actionable suppression items with advisory history-gap reviews. History gaps isolates zero-history / stale-history names that still need manual investigation.",
         )
         queue_sort = st.selectbox(
             "Queue sort",
@@ -564,6 +564,8 @@ with ops_tab:
         )
         if queue_view == "Pending review":
             st.caption("Default view shows actionable review items. Already suppressed symbols move to `Suppressed / resolved` after approval.")
+        elif queue_view == "History gaps":
+            st.caption("This view isolates governed tickers with zero stored history or stale current snapshot data so you can review mapping, delisting, retry, or manual suppression decisions without mixing in the broader suppression queue.")
         elif queue_view == "Suppressed / resolved":
             st.caption("This view shows symbols already removed from active refresh. They remain in DuckDB for lineage/history and can be reviewed separately from theme membership.")
 
@@ -646,6 +648,17 @@ with ops_tab:
                         f"suggested_status={row.get('suggested_status') or 'none'}"
                     )
                     st.caption(str(row.get("suggested_reason") or recommendation_help))
+                    history_rows = row.get("history_row_count")
+                    history_rows_text = "-" if pd.isna(history_rows) else str(int(history_rows))
+                    history_latest = row.get("history_latest_trading_date")
+                    history_latest_text = _display_placeholder(history_latest)
+                    history_focus = str(row.get("history_review_focus") or "").strip()
+                    if bool(row.get("history_gap_flag")):
+                        st.caption(
+                            f"History gap advisory: stored rows=`{history_rows_text}` | "
+                            f"latest trading date=`{history_latest_text}` | "
+                            f"review focus=`{history_focus or 'review manually'}`"
+                        )
                     if row.get("outlier_reason"):
                         st.caption(
                             f"Calculation outlier: {row.get('outlier_reason')} "
@@ -664,6 +677,10 @@ with ops_tab:
                         st.caption(f"Categories: {current_categories or 'Uncategorized'}")
                     else:
                         st.caption("Not currently assigned to any theme.")
+                    if bool(row.get("history_gap_flag")):
+                        if st.button(f"Open `{ticker}` in Themes lookup", key=f"open_history_gap_{ticker}"):
+                            st.session_state["manage_ticker_lookup"] = ticker
+                            st.switch_page("pages/1_Themes.py")
                     if staged_action != "none":
                         st.info(f"Staged: {STAGED_ACTIONS[staged_action]}")
                     approve_help = (

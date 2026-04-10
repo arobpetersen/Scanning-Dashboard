@@ -26,6 +26,7 @@ CALCULATION_OUTLIER = "CALC_OUTLIER"
 
 NO_CANDLES_FLAG_THRESHOLD = 3
 NO_CANDLES_AUTO_SUPPRESS_THRESHOLD = 5
+STALE_HISTORY_REVIEW_DAYS = 90
 STAGED_ACTIONS = {
     "none": "No staged action",
     "suppress": "Stage suppress",
@@ -313,6 +314,171 @@ def _base_symbol_hygiene_queue(conn, limit: int = 200) -> pd.DataFrame:
     )
 
 
+def _preferred_history_source(conn) -> str | None:
+    if not table_exists(conn, "ticker_daily_history"):
+        return None
+    row = conn.execute(
+        """
+        SELECT market_data_source
+        FROM ticker_daily_history
+        ORDER BY CASE WHEN market_data_source = 'live' THEN 0 ELSE 1 END,
+                 trading_date DESC,
+                 updated_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
+def _history_gap_review_focus(ticker: str, history_row_count: object, days_since_last_valid_data: object) -> str:
+    normalized = str(ticker or "").strip().upper()
+    history_rows = int(history_row_count or 0)
+    stale_days = int(days_since_last_valid_data or 0) if pd.notna(days_since_last_valid_data) else None
+    if history_rows <= 0:
+        if "." in normalized or normalized.endswith("F") or normalized.endswith("Y"):
+            return "investigate mapping / symbol format"
+        if stale_days is not None and stale_days >= 180:
+            return "review delisting / manual suppression"
+        return "retry history fetch / investigate provider coverage"
+    if history_rows < 30:
+        return "retry history fetch / partial coverage review"
+    if stale_days is not None and stale_days >= STALE_HISTORY_REVIEW_DAYS:
+        return "stale current snapshot review"
+    return "review manually"
+
+
+def _history_gap_suggested_reason(ticker: str, history_row_count: object, history_latest_trading_date: object, days_since_last_valid_data: object) -> str:
+    history_rows = int(history_row_count or 0)
+    latest_history = str(history_latest_trading_date or "none")
+    stale_text = "unknown" if pd.isna(days_since_last_valid_data) else f"{int(days_since_last_valid_data)}d"
+    focus = _history_gap_review_focus(ticker, history_row_count, days_since_last_valid_data)
+    if history_rows <= 0:
+        return (
+            "No stored ticker_daily_history rows are available for this governed ticker, "
+            f"while current snapshot market data is stale by `{stale_text}`. Suggested review focus: `{focus}`."
+        )
+        return (
+            f"Stored ticker_daily_history coverage is only `{history_rows}` row(s) | latest trading date=`{latest_history}` | "
+            f"stale current snapshot age=`{stale_text}`. Suggested review focus: `{focus}`."
+        )
+
+
+def _history_gap_candidates(conn) -> pd.DataFrame:
+    if (
+        not table_exists(conn, "theme_membership")
+        or not table_exists(conn, "themes")
+        or not table_exists(conn, "symbol_refresh_status")
+        or not table_exists(conn, "ticker_snapshots")
+        or not table_exists(conn, "refresh_runs")
+        or not table_exists(conn, "ticker_daily_history")
+    ):
+        return pd.DataFrame()
+
+    preferred_snapshot_source = preferred_ticker_snapshot_source(conn) or "live"
+    preferred_history_source = _preferred_history_source(conn) or preferred_snapshot_source
+    candidates = _execute_df(
+        conn,
+        """
+        WITH latest_market_data AS (
+            SELECT
+                upper(trim(ts.ticker)) AS ticker,
+                MAX(ts.last_updated) AS last_market_data_at
+            FROM ticker_snapshots ts
+            JOIN refresh_runs r ON r.run_id = ts.run_id
+            WHERE r.status IN ('success', 'partial')
+              AND ts.snapshot_source = ?
+            GROUP BY upper(trim(ts.ticker))
+        ),
+        membership_context AS (
+            SELECT
+                upper(trim(m.ticker)) AS ticker,
+                STRING_AGG(t.name, ', ' ORDER BY t.name) AS current_theme_names,
+                STRING_AGG(
+                    DISTINCT COALESCE(NULLIF(t.category, ''), 'Uncategorized'),
+                    ', '
+                    ORDER BY COALESCE(NULLIF(t.category, ''), 'Uncategorized')
+                ) AS current_categories
+            FROM theme_membership m
+            JOIN themes t ON t.id = m.theme_id
+            WHERE t.is_active = TRUE
+            GROUP BY upper(trim(m.ticker))
+        ),
+        history_context AS (
+            SELECT
+                upper(trim(ticker)) AS ticker,
+                COUNT(DISTINCT trading_date) AS history_row_count,
+                MAX(trading_date) AS history_latest_trading_date
+            FROM ticker_daily_history
+            WHERE market_data_source = ?
+            GROUP BY upper(trim(ticker))
+        )
+        SELECT
+            s.ticker,
+            s.status,
+            s.suggested_status,
+            s.suggested_reason,
+            s.last_failure_category,
+            s.consecutive_failure_count,
+            s.rolling_failure_count,
+            s.last_success_at,
+            s.last_failure_at,
+            s.last_run_id,
+            lmd.last_market_data_at,
+            mc.current_theme_names,
+            mc.current_categories,
+            CASE
+              WHEN lmd.last_market_data_at IS NULL THEN NULL
+              ELSE DATE_DIFF('day', CAST(lmd.last_market_data_at AS DATE), CURRENT_DATE)
+            END AS days_since_last_valid_data,
+            COALESCE(hc.history_row_count, 0) AS history_row_count,
+            hc.history_latest_trading_date
+        FROM symbol_refresh_status s
+        JOIN membership_context mc ON mc.ticker = s.ticker
+        LEFT JOIN latest_market_data lmd ON lmd.ticker = s.ticker
+        LEFT JOIN history_context hc ON hc.ticker = s.ticker
+        WHERE COALESCE(s.status, 'active') <> 'refresh_suppressed'
+          AND (
+              COALESCE(hc.history_row_count, 0) = 0
+              OR (
+                  lmd.last_market_data_at IS NOT NULL
+                  AND DATE_DIFF('day', CAST(lmd.last_market_data_at AS DATE), CURRENT_DATE) >= ?
+                  AND COALESCE(hc.history_row_count, 0) < 30
+              )
+          )
+        ORDER BY
+            COALESCE(hc.history_row_count, 0),
+            CASE
+              WHEN lmd.last_market_data_at IS NULL THEN -1
+              ELSE DATE_DIFF('day', CAST(lmd.last_market_data_at AS DATE), CURRENT_DATE)
+            END DESC,
+            s.ticker
+        """,
+        [preferred_snapshot_source, preferred_history_source, STALE_HISTORY_REVIEW_DAYS],
+    )
+    if candidates.empty:
+        return candidates
+
+    candidates["history_gap_flag"] = True
+    candidates["history_review_focus"] = candidates.apply(
+        lambda row: _history_gap_review_focus(
+            row.get("ticker"),
+            row.get("history_row_count"),
+            row.get("days_since_last_valid_data"),
+        ),
+        axis=1,
+    )
+    candidates["suggested_reason"] = candidates.apply(
+        lambda row: _history_gap_suggested_reason(
+            row.get("ticker"),
+            row.get("history_row_count"),
+            row.get("history_latest_trading_date"),
+            row.get("days_since_last_valid_data"),
+        ),
+        axis=1,
+    )
+    return candidates
+
+
 def _allowlisted_calculation_outlier(state_row) -> bool:
     if not state_row:
         return False
@@ -548,8 +714,42 @@ def symbol_hygiene_queue(conn, limit: int = 200, *, outlier_read_conn_factory=No
     warnings = list(sync_result.get("warnings") or [])
     queue = _base_symbol_hygiene_queue(conn, limit=limit)
     queue.attrs["warnings"] = warnings
-    if queue.empty:
+    history_gaps = _history_gap_candidates(conn)
+    if queue.empty and history_gaps.empty:
         return queue
+    if queue.empty:
+        queue = history_gaps.copy()
+    elif not history_gaps.empty:
+        if "history_gap_flag" not in queue.columns:
+            queue["history_gap_flag"] = False
+        else:
+            queue["history_gap_flag"] = queue["history_gap_flag"].fillna(False).astype(bool)
+        if "history_row_count" not in queue.columns:
+            queue["history_row_count"] = pd.Series([None] * len(queue), index=queue.index)
+        if "history_latest_trading_date" not in queue.columns:
+            queue["history_latest_trading_date"] = pd.Series([None] * len(queue), index=queue.index)
+        if "history_review_focus" not in queue.columns:
+            queue["history_review_focus"] = pd.Series([None] * len(queue), index=queue.index)
+        advisory_only = history_gaps[~history_gaps["ticker"].isin(queue["ticker"].astype(str))].copy()
+        queue = pd.concat([queue, advisory_only], ignore_index=True, sort=False)
+        if "ticker" in history_gaps.columns:
+            advisory_map = history_gaps.set_index("ticker")[["history_gap_flag", "history_row_count", "history_latest_trading_date", "history_review_focus"]]
+            for column in advisory_map.columns:
+                queue[column] = queue.apply(
+                    lambda row: advisory_map.at[str(row["ticker"]), column]
+                    if str(row["ticker"]) in advisory_map.index and pd.isna(row.get(column))
+                    else row.get(column),
+                    axis=1,
+                )
+    if "history_gap_flag" not in queue.columns:
+        queue["history_gap_flag"] = False
+    queue["history_gap_flag"] = queue["history_gap_flag"].fillna(False).astype(bool)
+    if "history_row_count" not in queue.columns:
+        queue["history_row_count"] = None
+    if "history_latest_trading_date" not in queue.columns:
+        queue["history_latest_trading_date"] = None
+    if "history_review_focus" not in queue.columns:
+        queue["history_review_focus"] = None
 
     outlier_context, outlier_warnings = _load_calculation_outlier_candidates(
         conn,
@@ -580,9 +780,12 @@ def filter_symbol_hygiene_queue(queue: pd.DataFrame, queue_view: str) -> pd.Data
         return queue
 
     out = queue.copy()
+    history_gap_flag = out["history_gap_flag"].fillna(False) if "history_gap_flag" in out.columns else pd.Series(False, index=out.index)
     if queue_view == "Pending review":
-        mask = out["suggested_status"].notna() | out["status"].isin([INACTIVE_CANDIDATE, WATCH])
+        mask = out["suggested_status"].notna() | out["status"].isin([INACTIVE_CANDIDATE, WATCH]) | history_gap_flag
         out = out[mask & (out["status"] != REFRESH_SUPPRESSED)]
+    elif queue_view == "History gaps":
+        out = out[history_gap_flag]
     elif queue_view == "Suppressed / resolved":
         out = out[out["status"] == REFRESH_SUPPRESSED]
     return out.reset_index(drop=True)
@@ -599,17 +802,23 @@ def sort_symbol_hygiene_queue(queue: pd.DataFrame, sort_mode: str) -> pd.DataFra
     out["recommendation_explanation"] = decision["explanation"]
     out["_confidence_rank"] = out["confidence"].map({"high": 2, "medium": 1, "low": 0}).fillna(0)
     out["_days_since_sort"] = out["days_since_last_valid_data"].fillna(10**9)
+    history_gap_flag = out["history_gap_flag"].fillna(False) if "history_gap_flag" in out.columns else pd.Series(False, index=out.index)
+    history_row_count = out["history_row_count"] if "history_row_count" in out.columns else pd.Series([None] * len(out), index=out.index)
+    out["_history_gap_rank"] = history_gap_flag.astype(int)
+    out["_history_depth_sort"] = pd.to_numeric(history_row_count, errors="coerce").fillna(10**9)
 
     if sort_mode == "Longest invalid period":
-        sort_cols = ["_days_since_sort", "_confidence_rank", "consecutive_failure_count", "rolling_failure_count", "ticker"]
+        sort_cols = ["_history_gap_rank", "_days_since_sort", "_confidence_rank", "_history_depth_sort", "consecutive_failure_count", "rolling_failure_count", "ticker"]
+        ascending = [False, False, False, True, False, False, True]
     elif sort_mode == "Most consecutive failures":
-        sort_cols = ["consecutive_failure_count", "_confidence_rank", "_days_since_sort", "rolling_failure_count", "ticker"]
+        sort_cols = ["_history_gap_rank", "consecutive_failure_count", "_confidence_rank", "_days_since_sort", "_history_depth_sort", "rolling_failure_count", "ticker"]
+        ascending = [False, False, False, False, True, False, True]
     elif sort_mode == "Most rolling failures":
-        sort_cols = ["rolling_failure_count", "_confidence_rank", "_days_since_sort", "consecutive_failure_count", "ticker"]
+        sort_cols = ["_history_gap_rank", "rolling_failure_count", "_confidence_rank", "_days_since_sort", "_history_depth_sort", "consecutive_failure_count", "ticker"]
+        ascending = [False, False, False, False, True, False, True]
     else:
-        sort_cols = ["_confidence_rank", "_days_since_sort", "consecutive_failure_count", "rolling_failure_count", "ticker"]
-
-    ascending = [False, False, False, False, True]
+        sort_cols = ["_history_gap_rank", "_confidence_rank", "_days_since_sort", "_history_depth_sort", "consecutive_failure_count", "rolling_failure_count", "ticker"]
+        ascending = [False, False, False, True, False, False, True]
     return out.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
 
 
