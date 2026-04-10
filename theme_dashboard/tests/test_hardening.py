@@ -1545,6 +1545,29 @@ class TestCurrentThemeRankingHardening(unittest.TestCase):
             )
             """
         )
+        conn.execute(
+            """
+            create table ticker_daily_history(
+                run_id bigint,
+                ticker varchar,
+                trading_date date,
+                open double,
+                high double,
+                low double,
+                close double,
+                atr_14 double,
+                atr_pct_14 double,
+                volume double,
+                vwap double,
+                trade_count bigint,
+                provenance_class varchar,
+                provenance_source_label varchar,
+                market_data_source varchar,
+                created_at timestamp,
+                updated_at timestamp
+            )
+            """
+        )
         conn.execute("insert into refresh_runs values (1, 'live', '2026-03-12 20:00:00', '2026-03-12 22:00:00', 'success')")
         conn.execute("insert into themes values (1, 'Quality', 'Tech', true)")
         conn.execute("insert into themes values (2, 'Thin', 'Spec', true)")
@@ -1752,6 +1775,78 @@ class TestCurrentThemeRankingHardening(unittest.TestCase):
             self.assertIn("rank_shift_vs_legacy", snapshot["standardized_comparison"].columns)
             self.assertIn("standardized_recovery_factor", snapshot["standardized_comparison"].columns)
             self.assertIn("current_momentum_quality_factor", snapshot["current_momentum_comparison"].columns)
+        finally:
+            conn.close()
+
+    def test_compute_current_ranking_snapshot_exposes_atr_companion_score_and_rank(self):
+        conn = self._build_conn()
+        try:
+            conn.execute("insert into theme_membership values (1, 'AAA'), (1, 'BBB'), (1, 'CCC')")
+            conn.execute("insert into theme_membership values (2, 'XXX'), (2, 'YYY'), (2, 'ZZZ')")
+            conn.execute(
+                """
+                insert into ticker_snapshots values
+                (1, 'AAA', 10, 10, 20, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'BBB', 10, 10, 20, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'CCC', 10, 10, 20, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'XXX', 10, 10, 20, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'YYY', 10, 10, 20, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live'),
+                (1, 'ZZZ', 10, 10, 20, -8, null, 2000000, null, null, null, '2026-03-12 21:00:00', 'live')
+                """
+            )
+            trading_dates = pd.bdate_range("2026-02-11", periods=22)
+            latest_close_by_ticker = {
+                "AAA": 42.0,
+                "BBB": 40.0,
+                "CCC": 38.0,
+                "XXX": 37.0,
+                "YYY": 36.0,
+                "ZZZ": 35.0,
+            }
+            history_rows: list[dict[str, object]] = []
+            for ticker, latest_close in latest_close_by_ticker.items():
+                for idx, trading_date in enumerate(trading_dates):
+                    close_value = float(latest_close - (len(trading_dates) - 1 - idx))
+                    atr_value = 2.0 if ticker != "ZZZ" else None
+                    atr_pct_value = (atr_value / close_value) if atr_value is not None else None
+                    history_rows.append(
+                        {
+                            "run_id": 1,
+                            "ticker": ticker,
+                            "trading_date": trading_date.date(),
+                            "open": close_value - 1.0,
+                            "high": close_value + 1.0,
+                            "low": close_value - 1.0,
+                            "close": close_value,
+                            "atr_14": atr_value,
+                            "atr_pct_14": atr_pct_value,
+                            "volume": 1000.0,
+                            "vwap": close_value,
+                            "trade_count": 5,
+                            "provenance_class": "reconstructed",
+                            "provenance_source_label": "test",
+                            "market_data_source": "live",
+                            "created_at": pd.Timestamp("2026-03-12 22:00:00"),
+                            "updated_at": pd.Timestamp("2026-03-12 22:00:00"),
+                        }
+                    )
+            history_df = pd.DataFrame(history_rows)
+            conn.register("ticker_daily_history_incoming", history_df)
+            conn.execute("insert into ticker_daily_history select * from ticker_daily_history_incoming")
+            conn.unregister("ticker_daily_history_incoming")
+
+            snapshot = compute_current_ranking_snapshot(conn)
+            metrics = snapshot["theme_metrics"].sort_values("theme").reset_index(drop=True)
+            standardized = snapshot["standardized_rankings"].sort_values("theme").reset_index(drop=True)
+
+            self.assertIn("composite_atr_score", metrics.columns)
+            self.assertIn("composite_atr_rank", metrics.columns)
+            self.assertTrue(pd.notna(metrics.loc[0, "composite_atr_score"]))
+            self.assertEqual(int(metrics.loc[0, "eligible_atr_count"]), 3)
+            self.assertEqual(int(standardized.iloc[0]["composite_atr_rank"]), 1)
+            thin_row = metrics[metrics["theme"] == "Thin"].iloc[0]
+            self.assertEqual(int(thin_row["eligible_atr_count"]), 2)
+            self.assertTrue(pd.isna(thin_row["composite_atr_rank"]))
         finally:
             conn.close()
 

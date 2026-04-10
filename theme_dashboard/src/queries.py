@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 from .config import (
@@ -1471,12 +1472,15 @@ def ticker_history_last_n_trading_days(conn, ticker: str, trading_day_limit: int
     if not preferred_source or not table_exists(conn, "ticker_daily_history"):
         return pd.DataFrame()
 
+    atr_select = "atr_14, atr_pct_14," if table_has_column(conn, "ticker_daily_history", "atr_14") else "NULL AS atr_14, NULL AS atr_pct_14,"
+
     history = conn.execute(
-        """
+        f"""
         SELECT
             ticker,
             trading_date AS snapshot_date,
             close,
+            {atr_select}
             market_data_source,
             updated_at,
             ROW_NUMBER() OVER (
@@ -1500,7 +1504,33 @@ def ticker_history_last_n_trading_days(conn, ticker: str, trading_day_limit: int
     history["perf_1w"] = ((grouped.transform(lambda s: s / s.shift(5))) - 1.0) * 100.0
     history["perf_1m"] = ((grouped.transform(lambda s: s / s.shift(21))) - 1.0) * 100.0
     history["perf_3m"] = ((grouped.transform(lambda s: s / s.shift(63))) - 1.0) * 100.0
-    return history[["ticker", "snapshot_date", "perf_1w", "perf_1m", "perf_3m", "market_data_source"]].copy()
+    history["atr_14"] = pd.to_numeric(history.get("atr_14"), errors="coerce")
+    history["atr_pct_14"] = pd.to_numeric(history.get("atr_pct_14"), errors="coerce")
+    history["perf_1w_atr_units"] = np.where(
+        history["atr_14"].notna() & (history["atr_14"] != 0) & grouped.shift(5).notna(),
+        (history["close"] - grouped.shift(5)) / history["atr_14"],
+        np.nan,
+    )
+    history["perf_1m_atr_units"] = np.where(
+        history["atr_14"].notna() & (history["atr_14"] != 0) & grouped.shift(21).notna(),
+        (history["close"] - grouped.shift(21)) / history["atr_14"],
+        np.nan,
+    )
+    return history[
+        [
+            "ticker",
+            "snapshot_date",
+            "close",
+            "atr_14",
+            "atr_pct_14",
+            "perf_1w",
+            "perf_1m",
+            "perf_3m",
+            "perf_1w_atr_units",
+            "perf_1m_atr_units",
+            "market_data_source",
+        ]
+    ].copy()
 
 
 def latest_theme_snapshots(conn) -> pd.DataFrame:
@@ -1530,6 +1560,74 @@ def latest_ticker_snapshots(conn) -> pd.DataFrame:
         WHERE r.status IN ('success', 'partial')
           AND s.snapshot_source = ?
         QUALIFY ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) = 1
+        """,
+        [preferred_source],
+    ).df()
+
+
+def latest_ticker_history_research_fields(conn) -> pd.DataFrame:
+    preferred_source = _preferred_ticker_history_source(conn)
+    if (
+        not preferred_source
+        or not table_exists(conn, "ticker_daily_history")
+        or not table_has_column(conn, "ticker_daily_history", "atr_14")
+    ):
+        return pd.DataFrame(
+            columns=[
+                "ticker",
+                "latest_history_date",
+                "atr_14",
+                "atr_pct_14",
+                "perf_1w_atr_units",
+                "perf_1m_atr_units",
+            ]
+        )
+
+    return conn.execute(
+        """
+        WITH deduped AS (
+            SELECT
+                ticker,
+                trading_date,
+                close,
+                atr_14,
+                atr_pct_14,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ticker, trading_date
+                    ORDER BY updated_at DESC, provenance_source_label DESC
+                ) AS rn
+            FROM ticker_daily_history
+            WHERE market_data_source = ?
+        ),
+        history AS (
+            SELECT
+                ticker,
+                trading_date,
+                close,
+                atr_14,
+                atr_pct_14,
+                LAG(close, 5) OVER (PARTITION BY ticker ORDER BY trading_date) AS close_5d_ago,
+                LAG(close, 21) OVER (PARTITION BY ticker ORDER BY trading_date) AS close_21d_ago,
+                ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) AS latest_rn
+            FROM deduped
+            WHERE rn = 1
+        )
+        SELECT
+            ticker,
+            trading_date AS latest_history_date,
+            atr_14,
+            atr_pct_14,
+            CASE
+              WHEN atr_14 IS NOT NULL AND atr_14 <> 0 AND close_5d_ago IS NOT NULL THEN (close - close_5d_ago) / atr_14
+              ELSE NULL
+            END AS perf_1w_atr_units,
+            CASE
+              WHEN atr_14 IS NOT NULL AND atr_14 <> 0 AND close_21d_ago IS NOT NULL THEN (close - close_21d_ago) / atr_14
+              ELSE NULL
+            END AS perf_1m_atr_units
+        FROM history
+        WHERE latest_rn = 1
+        ORDER BY ticker
         """,
         [preferred_source],
     ).df()

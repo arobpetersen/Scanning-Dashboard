@@ -196,6 +196,10 @@ def build_current_leadership_table(
         leadership["eligible_standardized_count"] = np.nan
     if "eligible_momentum_count" not in leadership.columns:
         leadership["eligible_momentum_count"] = np.nan
+    if "composite_atr_score" not in leadership.columns:
+        leadership["composite_atr_score"] = np.nan
+    if "composite_atr_rank" not in leadership.columns:
+        leadership["composite_atr_rank"] = np.nan
     if score_col == "current_momentum_score" and output_score_col != "current_momentum_score":
         leadership["current_momentum_score_context"] = leadership["current_momentum_score"]
     elif score_col != "current_momentum_score" and output_score_col == "current_momentum_score":
@@ -208,8 +212,10 @@ def build_current_leadership_table(
         "theme_id",
         "theme",
         "category",
+        "composite_atr_rank",
         "current_momentum_score",
         output_score_col,
+        "composite_atr_score",
         "avg_1w",
         "avg_1m",
         "avg_3m",
@@ -290,6 +296,10 @@ def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k
     current["leadership_quality"] = current.apply(current_leadership_quality_label, axis=1)
     if "current_momentum_score" not in current.columns:
         current["current_momentum_score"] = np.nan
+    if "composite_atr_score" not in current.columns:
+        current["composite_atr_score"] = np.nan
+    if "composite_atr_rank" not in current.columns:
+        current["composite_atr_rank"] = np.nan
     if "avg_3m" not in current.columns:
         current["avg_3m"] = np.nan
     current = current.rename(columns={"positive_1m_breadth_pct": "breadth_1m"})
@@ -299,12 +309,14 @@ def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k
             "theme_id",
             "theme",
             "category",
+            "composite_atr_rank",
             "performance",
             "avg_1w",
             "avg_1m",
             "avg_3m",
             "current_momentum_score",
             "composite_score",
+            "composite_atr_score",
             "breadth_1m",
             "ticker_count",
             "eligible_contributor_count",

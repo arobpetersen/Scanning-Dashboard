@@ -12,7 +12,7 @@ from .config import (
     THEME_CONFIDENCE_FULL_COUNT,
 )
 from .db_introspection import table_exists, table_has_column
-from .queries import latest_ticker_snapshots, preferred_theme_snapshot_source
+from .queries import latest_ticker_history_research_fields, latest_ticker_snapshots, preferred_theme_snapshot_source
 
 
 METRIC_COLUMNS = [
@@ -62,6 +62,8 @@ CURRENT_RANKING_COLUMNS = [
     "eligible_breadth_pct",
     "avg_1w",
     "avg_1m",
+    "avg_1w_atr_units",
+    "avg_1m_atr_units",
     "avg_3m",
     "positive_1w_breadth_pct",
     "positive_1m_breadth_pct",
@@ -74,6 +76,14 @@ CURRENT_RANKING_COLUMNS = [
     "standardized_guardrail_factor",
     "standardized_recovery_factor",
     "standardized_composite_score",
+    "eligible_atr_count",
+    "composite_atr_base_strength_score",
+    "composite_atr_participation_ratio",
+    "composite_atr_participation_factor",
+    "composite_atr_guardrail_factor",
+    "composite_atr_recovery_factor",
+    "composite_atr_score",
+    "composite_atr_rank",
     "current_momentum_raw_score",
     "current_momentum_quality_factor",
     "current_momentum_score",
@@ -333,6 +343,9 @@ def _load_current_ranking_constituents(conn) -> pd.DataFrame:
 
     raw = membership.merge(latest, on="ticker", how="left")
     raw = raw.merge(statuses[["ticker", "status"]], on="ticker", how="left", suffixes=("", "_symbol"))
+    atr_research = latest_ticker_history_research_fields(conn)
+    if not atr_research.empty:
+        raw = raw.merge(atr_research, on="ticker", how="left")
     return raw
 
 
@@ -341,8 +354,11 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=CURRENT_RANKING_COLUMNS)
 
     prepared = raw.copy()
-    for col in ("price", "avg_volume", "perf_1w", "perf_1m", "perf_3m"):
-        prepared[col] = _safe_numeric(prepared.get(col))
+    for col in ("price", "avg_volume", "perf_1w", "perf_1m", "perf_3m", "perf_1w_atr_units", "perf_1m_atr_units", "atr_14", "atr_pct_14"):
+        if col in prepared.columns:
+            prepared[col] = _safe_numeric(prepared[col])
+        else:
+            prepared[col] = pd.Series(np.nan, index=prepared.index, dtype="float64")
 
     prepared["run_id"] = _safe_numeric(prepared.get("run_id"))
     prepared["snapshot_time"] = pd.to_datetime(prepared.get("snapshot_time"), errors="coerce")
@@ -372,16 +388,29 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
             upper=CURRENT_RANKING_RETURN_CAP_PCT,
         )
         capped_return_cols[perf_col] = capped_col
+    atr_capped_return_cols: dict[str, str] = {}
+    for perf_col in ("perf_1w_atr_units", "perf_1m_atr_units"):
+        eligible_col = f"{perf_col}_eligible"
+        capped_col = f"{perf_col}_capped"
+        prepared[eligible_col] = prepared["eligible_ticker"] & prepared[perf_col].notna()
+        prepared[capped_col] = prepared[perf_col].clip(
+            lower=-CURRENT_RANKING_RETURN_CAP_PCT,
+            upper=CURRENT_RANKING_RETURN_CAP_PCT,
+        )
+        atr_capped_return_cols[perf_col] = capped_col
 
     prepared["composite_metric_eligible"] = (
         prepared["perf_1w_eligible"] & prepared["perf_1m_eligible"] & prepared["perf_3m_eligible"]
     )
     prepared["standardized_metric_eligible"] = prepared["perf_1w_eligible"] & prepared["perf_1m_eligible"]
+    prepared["atr_metric_eligible"] = prepared["perf_1w_atr_units_eligible"] & prepared["perf_1m_atr_units_eligible"]
 
     prepared["ticker_present"] = prepared["ticker"].notna().astype(int)
     prepared["perf_1w_capped_for_agg"] = prepared[capped_return_cols["perf_1w"]].where(prepared["perf_1w_eligible"])
     prepared["perf_1m_capped_for_agg"] = prepared[capped_return_cols["perf_1m"]].where(prepared["perf_1m_eligible"])
     prepared["perf_3m_capped_for_agg"] = prepared[capped_return_cols["perf_3m"]].where(prepared["perf_3m_eligible"])
+    prepared["perf_1w_atr_units_capped_for_agg"] = prepared[atr_capped_return_cols["perf_1w_atr_units"]].where(prepared["perf_1w_atr_units_eligible"])
+    prepared["perf_1m_atr_units_capped_for_agg"] = prepared[atr_capped_return_cols["perf_1m_atr_units"]].where(prepared["perf_1m_atr_units_eligible"])
     prepared["perf_1w_positive"] = np.where(prepared["perf_1w_eligible"], prepared["perf_1w"] > 0, np.nan)
     prepared["perf_1m_positive"] = np.where(prepared["perf_1m_eligible"], prepared["perf_1m"] > 0, np.nan)
     prepared["perf_3m_positive"] = np.where(prepared["perf_3m_eligible"], prepared["perf_3m"] > 0, np.nan)
@@ -397,9 +426,12 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         eligible_3m_count=("perf_3m_eligible", "sum"),
         eligible_composite_count=("composite_metric_eligible", "sum"),
         eligible_standardized_count=("standardized_metric_eligible", "sum"),
+        eligible_atr_count=("atr_metric_eligible", "sum"),
         eligible_momentum_count=("standardized_metric_eligible", "sum"),
         avg_1w=("perf_1w_capped_for_agg", "mean"),
         avg_1m=("perf_1m_capped_for_agg", "mean"),
+        avg_1w_atr_units=("perf_1w_atr_units_capped_for_agg", "mean"),
+        avg_1m_atr_units=("perf_1m_atr_units_capped_for_agg", "mean"),
         avg_3m=("perf_3m_capped_for_agg", "mean"),
         positive_1w_breadth_pct=("perf_1w_positive", "mean"),
         positive_1m_breadth_pct=("perf_1m_positive", "mean"),
@@ -416,6 +448,7 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         "eligible_3m_count",
         "eligible_composite_count",
         "eligible_standardized_count",
+        "eligible_atr_count",
         "eligible_momentum_count",
     ]
     out[count_cols] = out[count_cols].fillna(0).astype(int)
@@ -463,6 +496,29 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         * out["standardized_recovery_factor"],
         np.nan,
     )
+    out["composite_atr_base_strength_score"] = (
+        STANDARDIZED_COMPOSITE_WEIGHTS["perf_1w"] * out["avg_1w_atr_units"].fillna(0.0)
+        + STANDARDIZED_COMPOSITE_WEIGHTS["perf_1m"] * out["avg_1m_atr_units"].fillna(0.0)
+    )
+    out["composite_atr_participation_ratio"] = np.where(
+        out["ticker_count"] > 0,
+        out["eligible_atr_count"] / out["ticker_count"],
+        0.0,
+    )
+    out["composite_atr_participation_factor"] = out["composite_atr_participation_ratio"].apply(standardized_participation_factor)
+    out["composite_atr_guardrail_factor"] = out["avg_3m"].apply(standardized_three_month_guardrail_factor)
+    out["composite_atr_recovery_factor"] = [
+        standardized_recovery_factor(base_score, avg_3m)
+        for base_score, avg_3m in zip(out["composite_atr_base_strength_score"], out["avg_3m"])
+    ]
+    out["composite_atr_score"] = np.where(
+        out["eligible_atr_count"] > 0,
+        out["composite_atr_base_strength_score"]
+        * out["composite_atr_participation_factor"]
+        * out["composite_atr_guardrail_factor"]
+        * out["composite_atr_recovery_factor"],
+        np.nan,
+    )
     out["current_momentum_raw_score"] = (
         CURRENT_MOMENTUM_WEIGHTS["perf_1w"] * out["avg_1w"].fillna(0.0)
         + CURRENT_MOMENTUM_WEIGHTS["perf_1m"] * out["avg_1m"].fillna(0.0)
@@ -477,6 +533,8 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         "eligible_breadth_pct",
         "avg_1w",
         "avg_1m",
+        "avg_1w_atr_units",
+        "avg_1m_atr_units",
         "avg_3m",
         "positive_1w_breadth_pct",
         "positive_1m_breadth_pct",
@@ -489,11 +547,18 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         "standardized_guardrail_factor",
         "standardized_recovery_factor",
         "standardized_composite_score",
+        "composite_atr_base_strength_score",
+        "composite_atr_participation_ratio",
+        "composite_atr_participation_factor",
+        "composite_atr_guardrail_factor",
+        "composite_atr_recovery_factor",
+        "composite_atr_score",
         "current_momentum_raw_score",
         "current_momentum_quality_factor",
         "current_momentum_score",
     ]
     out[numeric_cols] = out[numeric_cols].round(2)
+    out["composite_atr_rank"] = np.nan
     return out[CURRENT_RANKING_COLUMNS]
 
 
@@ -541,6 +606,8 @@ def _build_standardized_composite_validation(legacy_rankings: pd.DataFrame, stan
             "theme",
             "category",
             "standardized_composite_score",
+            "composite_atr_score",
+            "composite_atr_rank",
             "eligible_standardized_count",
             "standardized_participation_ratio",
             "standardized_participation_factor",
@@ -573,7 +640,7 @@ def _build_current_momentum_validation(
     standardized_rankings: pd.DataFrame,
 ) -> pd.DataFrame:
     current_1w = current_1w_rankings[
-        ["theme_id", "theme", "category", "avg_1w", "avg_1m", "standardized_composite_score"]
+        ["theme_id", "theme", "category", "avg_1w", "avg_1m", "standardized_composite_score", "composite_atr_score", "composite_atr_rank"]
     ].copy()
     current_1w["current_1w_rank"] = range(1, len(current_1w) + 1)
 
@@ -586,13 +653,15 @@ def _build_current_momentum_validation(
             "current_momentum_quality_factor",
             "current_momentum_score",
             "standardized_composite_score",
+            "composite_atr_score",
+            "composite_atr_rank",
             "avg_1w",
             "avg_1m",
         ]
     ].copy()
     current_momentum["current_momentum_rank"] = range(1, len(current_momentum) + 1)
 
-    standardized = standardized_rankings[["theme_id"]].copy()
+    standardized = standardized_rankings[["theme_id", "composite_atr_rank"]].copy()
     standardized["standardized_rank"] = range(1, len(standardized) + 1)
 
     comparison = current_1w.merge(
@@ -609,6 +678,20 @@ def _build_current_momentum_validation(
         comparison["standardized_composite_score_momentum"].notna(),
         comparison["standardized_composite_score_1w"],
     )
+    comparison["composite_atr_score"] = comparison["composite_atr_score_momentum"].where(
+        comparison["composite_atr_score_momentum"].notna(),
+        comparison["composite_atr_score_1w"],
+    )
+    atr_rank_fallback = comparison["composite_atr_rank"] if "composite_atr_rank" in comparison.columns else np.nan
+    comparison["composite_atr_rank"] = comparison["composite_atr_rank_momentum"].where(
+        comparison["composite_atr_rank_momentum"].notna(),
+        comparison["composite_atr_rank_1w"],
+    )
+    if isinstance(atr_rank_fallback, pd.Series):
+        comparison["composite_atr_rank"] = comparison["composite_atr_rank"].where(
+            comparison["composite_atr_rank"].notna(),
+            atr_rank_fallback,
+        )
     comparison["rank_shift_vs_1w"] = comparison["current_1w_rank"] - comparison["current_momentum_rank"]
     comparison["entered_momentum_view"] = comparison["current_1w_rank"].isna() & comparison["current_momentum_rank"].notna()
     comparison["dropped_from_momentum_view"] = comparison["current_1w_rank"].notna() & comparison["current_momentum_rank"].isna()
@@ -620,6 +703,7 @@ def _build_current_momentum_validation(
             "current_1w_rank",
             "current_momentum_rank",
             "standardized_rank",
+            "composite_atr_rank",
             "rank_shift_vs_1w",
             "avg_1w",
             "avg_1m",
@@ -627,6 +711,7 @@ def _build_current_momentum_validation(
             "current_momentum_quality_factor",
             "current_momentum_score",
             "standardized_composite_score",
+            "composite_atr_score",
             "entered_momentum_view",
             "dropped_from_momentum_view",
         ]
@@ -657,12 +742,33 @@ def compute_current_ranking_snapshot(conn) -> dict[str, pd.DataFrame]:
         score_col="standardized_composite_score",
         eligible_count_col="eligible_standardized_count",
     )
-    current_1w_rankings = _finalize_current_window_rankings(current, "avg_1w")
-    current_momentum_rankings = _finalize_current_rankings(
+    atr_rankings = _finalize_current_rankings(
         current,
-        score_col="current_momentum_score",
-        eligible_count_col="eligible_momentum_count",
+        score_col="composite_atr_score",
+        eligible_count_col="eligible_atr_count",
     )
+    if not atr_rankings.empty:
+        atr_rankings = atr_rankings.copy()
+        atr_rankings["composite_atr_rank"] = range(1, len(atr_rankings) + 1)
+        atr_rank_lookup = atr_rankings.set_index("theme_id")["composite_atr_rank"].to_dict()
+        current["composite_atr_rank"] = current["theme_id"].map(atr_rank_lookup)
+        standardized_rankings["composite_atr_rank"] = standardized_rankings["theme_id"].map(atr_rank_lookup)
+        legacy_rankings["composite_atr_rank"] = legacy_rankings["theme_id"].map(atr_rank_lookup)
+        current_1w_rankings = _finalize_current_window_rankings(current, "avg_1w")
+        current_1m_rankings = _finalize_current_window_rankings(current, "avg_1m")
+        current_momentum_rankings = _finalize_current_rankings(
+            current,
+            score_col="current_momentum_score",
+            eligible_count_col="eligible_momentum_count",
+        )
+    else:
+        current_1w_rankings = _finalize_current_window_rankings(current, "avg_1w")
+        current_1m_rankings = _finalize_current_window_rankings(current, "avg_1m")
+        current_momentum_rankings = _finalize_current_rankings(
+            current,
+            score_col="current_momentum_score",
+            eligible_count_col="eligible_momentum_count",
+        )
     standardized_comparison = _build_standardized_composite_validation(legacy_rankings, standardized_rankings)
     current_momentum_comparison = _build_current_momentum_validation(
         current_1w_rankings,

@@ -346,7 +346,7 @@ def _current_table_column_config(columns: list[str], *, text_columns: set[str] |
             configs[column] = st.column_config.TextColumn(column, width="medium")
         elif column in {"ticker_count", "tickers", "rank_change"}:
             configs[column] = st.column_config.NumberColumn(column, format="%d", width="small")
-        elif column in {"current_momentum_score", "composite_score", "momentum", "composite"}:
+        elif column in {"current_momentum_score", "composite_score", "composite_atr_score", "momentum", "composite", "Comp ATR"}:
             configs[column] = st.column_config.NumberColumn(column, format="%.2f", width="small")
         elif column in {"performance", "avg_1w", "avg_1m", "breadth_1m", "eligible_breadth_pct", "eligible %"}:
             # These values are already rendered in percentage-point form like
@@ -913,6 +913,7 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, sh
         "leaders",
         "current_momentum_score",
         "composite_score",
+        "composite_atr_score",
         "avg_1w",
         "avg_1m",
         "avg_3m",
@@ -923,6 +924,7 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, sh
         columns={
             "current_momentum_score": "momentum",
             "composite_score": "composite",
+            "composite_atr_score": "Comp ATR",
             "eligible_breadth_pct": "eligible %",
             "leadership_quality": "quality",
         }
@@ -1000,6 +1002,7 @@ def _render_current_performance(
         "avg_3m",
         "current_momentum_score",
         "composite_score",
+        "composite_atr_score",
     ]
     if show_daily_deltas:
         prior_rank_col = {"avg_1w": "prior_rank_1w", "avg_1m": "prior_rank_1m"}.get(metric_col)
@@ -1023,6 +1026,7 @@ def _render_current_performance(
         columns={
             "current_momentum_score": "momentum",
             "composite_score": "composite",
+            "composite_atr_score": "Comp ATR",
             "eligible_breadth_pct": "eligible %",
             "ticker_count": "tickers",
             "leadership_quality": "quality",
@@ -1071,6 +1075,8 @@ def _render_standardized_composite_validation(
             standardized_rankings = standardized_rankings.copy()
             for col in (
                 "legacy_composite_score",
+                "composite_atr_score",
+                "composite_atr_rank",
                 "standardized_participation_ratio",
                 "standardized_guardrail_factor",
                 "standardized_recovery_factor",
@@ -1110,6 +1116,7 @@ def _render_standardized_composite_validation(
                         "theme",
                         "category",
                         "standardized_composite_score",
+                        "composite_atr_score",
                         "legacy_composite_score",
                         "avg_1w",
                         "avg_1m",
@@ -1121,6 +1128,7 @@ def _render_standardized_composite_validation(
                 ].rename(
                     columns={
                         "standardized_composite_score": "std_composite",
+                        "composite_atr_score": "comp_atr",
                         "legacy_composite_score": "legacy_composite",
                         "standardized_participation_pct": "participation_pct",
                         "standardized_guardrail_factor": "guardrail_factor",
@@ -1136,6 +1144,8 @@ def _render_standardized_composite_validation(
 
         comparison = standardized_comparison.copy()
         for col in (
+            "composite_atr_rank",
+            "composite_atr_score",
             "standardized_participation_ratio",
             "standardized_guardrail_factor",
             "standardized_recovery_factor",
@@ -1166,6 +1176,7 @@ def _render_standardized_composite_validation(
                     "rank_shift_vs_legacy",
                     "legacy_composite_score",
                     "standardized_composite_score",
+                    "composite_atr_score",
                     "avg_1w",
                     "avg_1m",
                     "avg_3m",
@@ -1178,6 +1189,7 @@ def _render_standardized_composite_validation(
                     "rank_shift_vs_legacy": "rank_shift",
                     "legacy_composite_score": "legacy_composite",
                     "standardized_composite_score": "std_composite",
+                    "composite_atr_score": "comp_atr",
                     "standardized_participation_pct": "participation_pct",
                     "standardized_guardrail_factor": "guardrail_factor",
                     "standardized_recovery_factor": "recovery_factor",
@@ -1206,6 +1218,8 @@ def _render_current_momentum_validation(
                 "current_momentum_raw_score",
                 "current_momentum_quality_factor",
                 "standardized_composite_score",
+                "composite_atr_score",
+                "composite_atr_rank",
             ):
                 if col not in current_momentum_rankings.columns:
                     current_momentum_rankings[col] = np.nan
@@ -1242,6 +1256,7 @@ def _render_current_momentum_validation(
                         "momentum_leadership_score",
                         "current_momentum_raw_score",
                         "standardized_composite_score",
+                        "composite_atr_score",
                         "current_momentum_quality_factor",
                         "avg_1w",
                         "avg_1m",
@@ -1251,6 +1266,7 @@ def _render_current_momentum_validation(
                         "momentum_leadership_score": "momentum_score",
                         "current_momentum_raw_score": "momentum_raw",
                         "standardized_composite_score": "std_composite",
+                        "composite_atr_score": "comp_atr",
                         "current_momentum_quality_factor": "quality_factor",
                     }
                 ),
@@ -1267,6 +1283,8 @@ def _render_current_momentum_validation(
             "current_momentum_quality_factor",
             "current_momentum_score",
             "standardized_composite_score",
+            "composite_atr_score",
+            "composite_atr_rank",
         ):
             if col not in comparison.columns:
                 comparison[col] = np.nan
@@ -1296,6 +1314,7 @@ def _render_current_momentum_validation(
                     "avg_1m",
                     "current_momentum_score",
                     "standardized_composite_score",
+                    "composite_atr_score",
                     "current_momentum_quality_factor",
                 ]
             ].rename(
@@ -1304,6 +1323,7 @@ def _render_current_momentum_validation(
                     "current_momentum_rank": "momentum_rank",
                     "rank_shift_vs_1w": "rank_shift",
                     "standardized_composite_score": "std_composite",
+                    "composite_atr_score": "comp_atr",
                     "current_momentum_score": "momentum_score",
                     "current_momentum_quality_factor": "quality_factor",
                 }

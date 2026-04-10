@@ -15,10 +15,11 @@ from src.queries import (
     theme_ticker_metrics,
     theme_history_window,
     theme_snapshot_history,
+    ticker_history_last_n_trading_days,
     ticker_history_readiness,
 )
 from src.theme_service import add_ticker
-from src.ticker_history import persist_ticker_daily_history, ticker_daily_history_rows
+from src.ticker_history import persist_ticker_daily_history, recompute_ticker_daily_history_atr, ticker_daily_history_rows
 from src.ticker_onboarding import (
     list_governed_ticker_onboarding,
     run_governed_ticker_onboarding_backfill,
@@ -123,6 +124,240 @@ class TestHistoricalBackfill(unittest.TestCase):
         self.assertEqual(third, {"rows_written": 1, "rows_skipped": 0})
         self.assertEqual(len(stored), 1)
         self.assertEqual(float(stored.iloc[0]["close"]), 111.0)
+        conn.close()
+
+    def test_persist_ticker_daily_history_materializes_atr_fields_from_ohlc(self):
+        conn = self._conn()
+        dates = pd.bdate_range("2026-02-02", periods=30)
+        history = pd.DataFrame(
+            [
+                {
+                    "ticker": "NVDA",
+                    "snapshot_date": trading_date.date(),
+                    "open": float(99 + idx),
+                    "high": float(101 + idx),
+                    "low": float(99 + idx),
+                    "close": float(100 + idx),
+                    "volume": 1000.0,
+                    "vwap": float(100 + idx),
+                    "trade_count": 50,
+                }
+                for idx, trading_date in enumerate(dates, start=1)
+            ]
+        )
+
+        persist_ticker_daily_history(
+            conn,
+            history,
+            ticker="NVDA",
+            provenance_source_label="ticker_intake_backfill",
+            market_data_source="live",
+            run_id=1,
+            replace_existing=False,
+        )
+
+        stored = ticker_daily_history_rows(conn, tickers=["NVDA"], provenance_source_label="ticker_intake_backfill")
+        stored = stored.sort_values("trading_date").reset_index(drop=True)
+
+        self.assertTrue("atr_14" in stored.columns)
+        self.assertTrue("atr_pct_14" in stored.columns)
+        self.assertTrue(pd.isna(stored.iloc[12]["atr_14"]))
+        self.assertAlmostEqual(float(stored.iloc[13]["atr_14"]), 2.0, places=6)
+        self.assertAlmostEqual(float(stored.iloc[13]["atr_pct_14"]), 2.0 / 114.0, places=6)
+        conn.close()
+
+    def test_ticker_history_last_n_trading_days_exposes_atr_unit_returns(self):
+        conn = self._conn()
+        dates = pd.bdate_range("2026-02-02", periods=28)
+        history = pd.DataFrame(
+            [
+                {
+                    "ticker": "NVDA",
+                    "snapshot_date": trading_date.date(),
+                    "open": float(99 + idx),
+                    "high": float(101 + idx),
+                    "low": float(99 + idx),
+                    "close": float(100 + idx),
+                    "volume": 1000.0,
+                    "vwap": float(100 + idx),
+                    "trade_count": 50,
+                }
+                for idx, trading_date in enumerate(dates, start=1)
+            ]
+        )
+
+        persist_ticker_daily_history(
+            conn,
+            history,
+            ticker="NVDA",
+            provenance_source_label="ticker_intake_backfill",
+            market_data_source="live",
+            run_id=1,
+            replace_existing=False,
+        )
+
+        research = ticker_history_last_n_trading_days(conn, "NVDA", trading_day_limit=40).sort_values("snapshot_date").reset_index(drop=True)
+        latest = research.iloc[-1]
+
+        self.assertAlmostEqual(float(latest["atr_14"]), 2.0, places=6)
+        self.assertAlmostEqual(float(latest["perf_1w_atr_units"]), 2.5, places=6)
+        self.assertAlmostEqual(float(latest["perf_1m_atr_units"]), 10.5, places=6)
+        conn.close()
+
+    def test_recompute_ticker_daily_history_atr_backfills_existing_rows(self):
+        conn = self._conn()
+        dates = pd.bdate_range("2026-02-02", periods=19)
+        history = pd.DataFrame(
+            [
+                {
+                    "ticker": "NVDA",
+                    "snapshot_date": trading_date.date(),
+                    "open": float(99 + idx),
+                    "high": float(101 + idx),
+                    "low": float(99 + idx),
+                    "close": float(100 + idx),
+                    "volume": 1000.0,
+                    "vwap": float(100 + idx),
+                    "trade_count": 50,
+                }
+                for idx, trading_date in enumerate(dates, start=1)
+            ]
+        )
+
+        persist_ticker_daily_history(
+            conn,
+            history,
+            ticker="NVDA",
+            provenance_source_label="ticker_intake_backfill",
+            market_data_source="live",
+            run_id=1,
+            replace_existing=False,
+        )
+        conn.execute("update ticker_daily_history set atr_14 = null, atr_pct_14 = null where ticker = 'NVDA'")
+
+        result = recompute_ticker_daily_history_atr(conn, tickers=["NVDA"], market_data_source="live")
+        restored = ticker_daily_history_rows(conn, tickers=["NVDA"], provenance_source_label="ticker_intake_backfill").sort_values("trading_date").reset_index(drop=True)
+
+        self.assertEqual(int(result["series_recomputed"]), 1)
+        self.assertGreaterEqual(int(result["rows_updated"]), 19)
+        self.assertAlmostEqual(float(restored.iloc[-1]["atr_14"]), 2.0, places=6)
+        conn.close()
+
+    def test_recompute_ticker_daily_history_atr_updates_all_matching_provenance_rows_in_one_series(self):
+        conn = self._conn()
+        dates = pd.bdate_range("2026-02-02", periods=19)
+        primary_history = pd.DataFrame(
+            [
+                {
+                    "ticker": "NVDA",
+                    "snapshot_date": trading_date.date(),
+                    "open": float(99 + idx),
+                    "high": float(101 + idx),
+                    "low": float(99 + idx),
+                    "close": float(100 + idx),
+                    "volume": 1000.0,
+                    "vwap": float(100 + idx),
+                    "trade_count": 50,
+                }
+                for idx, trading_date in enumerate(dates, start=1)
+            ]
+        )
+        shadow_history = primary_history.copy()
+
+        persist_ticker_daily_history(
+            conn,
+            primary_history,
+            ticker="NVDA",
+            provenance_source_label="ticker_intake_backfill",
+            market_data_source="live",
+            run_id=1,
+            replace_existing=False,
+        )
+        persist_ticker_daily_history(
+            conn,
+            shadow_history,
+            ticker="NVDA",
+            provenance_source_label="secondary_import",
+            market_data_source="live",
+            run_id=2,
+            replace_existing=False,
+        )
+        conn.execute("update ticker_daily_history set atr_14 = null, atr_pct_14 = null where ticker = 'NVDA'")
+
+        result = recompute_ticker_daily_history_atr(conn, tickers=["NVDA"], market_data_source="live")
+        rows = conn.execute(
+            """
+            select provenance_source_label, atr_14
+            from ticker_daily_history
+            where ticker = 'NVDA' and trading_date = ?
+            order by provenance_source_label
+            """,
+            [dates[-1].date()],
+        ).fetchall()
+
+        self.assertEqual(int(result["series_recomputed"]), 1)
+        self.assertEqual(int(result["rows_updated"]), 38)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row[1] is not None for row in rows))
+        conn.close()
+
+    def test_recompute_ticker_daily_history_atr_honors_limit_and_start_after(self):
+        conn = self._conn()
+        dates = pd.bdate_range("2026-02-02", periods=19)
+        progress_updates: list[dict[str, object]] = []
+        for run_id, ticker in enumerate(["AMD", "NVDA", "TSLA"], start=1):
+            history = pd.DataFrame(
+                [
+                    {
+                        "ticker": ticker,
+                        "snapshot_date": trading_date.date(),
+                        "open": float(99 + idx),
+                        "high": float(101 + idx),
+                        "low": float(99 + idx),
+                        "close": float(100 + idx),
+                        "volume": 1000.0,
+                        "vwap": float(100 + idx),
+                        "trade_count": 50,
+                    }
+                    for idx, trading_date in enumerate(dates, start=1)
+                ]
+            )
+            persist_ticker_daily_history(
+                conn,
+                history,
+                ticker=ticker,
+                provenance_source_label="ticker_intake_backfill",
+                market_data_source="live",
+                run_id=run_id,
+                replace_existing=False,
+            )
+        conn.execute("update ticker_daily_history set atr_14 = null, atr_pct_14 = null")
+
+        result = recompute_ticker_daily_history_atr(
+            conn,
+            market_data_source="live",
+            start_after_ticker="AMD",
+            limit=1,
+            progress_callback=lambda update: progress_updates.append(dict(update)),
+        )
+
+        amd_latest = conn.execute(
+            "select atr_14 from ticker_daily_history where ticker = 'AMD' order by trading_date desc limit 1"
+        ).fetchone()[0]
+        nvda_latest = conn.execute(
+            "select atr_14 from ticker_daily_history where ticker = 'NVDA' order by trading_date desc limit 1"
+        ).fetchone()[0]
+        tsla_latest = conn.execute(
+            "select atr_14 from ticker_daily_history where ticker = 'TSLA' order by trading_date desc limit 1"
+        ).fetchone()[0]
+
+        self.assertEqual(int(result["series_recomputed"]), 1)
+        self.assertEqual(int(result["rows_updated"]), 19)
+        self.assertIsNone(amd_latest)
+        self.assertIsNotNone(nvda_latest)
+        self.assertIsNone(tsla_latest)
+        self.assertEqual(len(progress_updates), 1)
+        self.assertEqual(str(progress_updates[0]["ticker"]), "NVDA")
         conn.close()
 
     def test_newly_governed_ticker_creates_onboarding_state(self):

@@ -257,6 +257,8 @@ CREATE TABLE IF NOT EXISTS ticker_daily_history (
     high DOUBLE,
     low DOUBLE,
     close DOUBLE,
+    atr_14 DOUBLE,
+    atr_pct_14 DOUBLE,
     volume DOUBLE,
     vwap DOUBLE,
     trade_count BIGINT,
@@ -580,6 +582,8 @@ def init_db() -> None:
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS proposed_theme_category VARCHAR")
         conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
         conn.execute("ALTER TABLE theme_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
+        conn.execute("ALTER TABLE ticker_daily_history ADD COLUMN IF NOT EXISTS atr_14 DOUBLE")
+        conn.execute("ALTER TABLE ticker_daily_history ADD COLUMN IF NOT EXISTS atr_pct_14 DOUBLE")
         conn.execute("ALTER TABLE historical_reconstruction_runs ADD COLUMN IF NOT EXISTS ticker_history_rows_written BIGINT DEFAULT 0")
         conn.execute("ALTER TABLE historical_reconstruction_runs ADD COLUMN IF NOT EXISTS ticker_history_rows_skipped BIGINT DEFAULT 0")
         conn.execute("ALTER TABLE scanner_import_runs ADD COLUMN IF NOT EXISTS files_failed BIGINT DEFAULT 0")
