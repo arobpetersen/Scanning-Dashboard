@@ -250,16 +250,18 @@ with ops_tab:
         r3.metric("Remaining", int(readiness["remaining_trading_days"]))
         r4.metric("Status", str(readiness["status_label"]).title())
         c1, c2, c3 = st.columns(3)
-        c1.metric("Governed active tickers", int(readiness["governed_active_tickers"]))
+        c1.metric("Expected active tickers", int(readiness["governed_active_tickers"]))
         c2.metric(
-            f"Governed tickers with >={int(readiness['target_trading_days'])} rows",
+            f"Expected tickers with >={int(readiness['target_trading_days'])} rows",
             int(readiness["governed_active_tickers_ready"]),
         )
         c3.metric("Ready coverage", f"{float(readiness['governed_ready_pct']):.1f}%")
         st.caption(
             f"Source=`{readiness.get('market_data_source') or 'none'}` | "
+            f"Raw governed=`{int(readiness.get('governed_active_tickers_raw') or readiness['governed_active_tickers'])}` | "
+            f"Suppressed exclusions=`{int(readiness.get('governed_active_tickers_suppressed') or 0)}` | "
             f"Depth range=`{int(readiness['min_ticker_depth'])}` / `{float(readiness['median_ticker_depth']):.1f}` / `{int(readiness['max_ticker_depth'])}` "
-            "(min / median / max rows across governed active tickers)"
+            "(min / median / max rows across expected unsuppressed governed tickers)"
         )
         if readiness.get("earliest_trading_date") or readiness.get("latest_trading_date"):
             st.caption(

@@ -1,6 +1,7 @@
 import unittest
 
 import duckdb
+import pandas as pd
 
 from src.airtable_export import (
     build_theme_snapshot_history_records,
@@ -12,7 +13,14 @@ from src.airtable_export import (
     theme_history_export_key,
     ticker_history_export_key,
 )
-from src.queries import theme_snapshot_history_recent, ticker_snapshot_history_recent
+from src.queries import (
+    _recent_ticker_history_theme_history,
+    _preferred_ticker_history_source,
+    theme_leadership_rank_history,
+    theme_leadership_rank_history_long,
+    theme_snapshot_history_recent,
+    ticker_snapshot_history_recent,
+)
 
 
 class TestAirtableExportKeys(unittest.TestCase):
@@ -24,6 +32,7 @@ class TestAirtableExportKeys(unittest.TestCase):
 class TestAirtableExportQueries(unittest.TestCase):
     def test_recent_history_queries_are_bounded_per_entity(self):
         conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
         conn.execute("create table refresh_runs(run_id bigint, status varchar, finished_at timestamp)")
         conn.execute(
             """
@@ -63,6 +72,7 @@ class TestAirtableExportQueries(unittest.TestCase):
             """
         )
 
+        conn.execute("insert into themes values (1, 'AI', 'Tech'), (2, 'Energy', 'Macro')")
         for run_id in range(1, 6):
             ts = f"2026-03-0{run_id} 22:00:00"
             conn.execute("insert into refresh_runs values (?, 'success', ?)", [run_id, ts])
@@ -84,6 +94,265 @@ class TestAirtableExportQueries(unittest.TestCase):
         self.assertEqual(ticker_out.groupby("ticker").size().to_dict(), {"AAA": 3, "BBB": 3})
         self.assertEqual(theme_out.iloc[0]["run_id"], 5)
         self.assertEqual(ticker_out.iloc[0]["run_id"], 5)
+        conn.close()
+
+    def test_theme_leadership_rank_history_returns_recent_daily_rank_series(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1w_breadth_pct double,
+                positive_1m_breadth_pct double,
+                positive_3m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            insert into themes values
+                (1, 'AI', 'Tech'),
+                (2, 'Energy', 'Macro'),
+                (3, 'Rare Earths', 'Macro')
+            """
+        )
+        rows = [
+            (1, "2026-04-08 22:00:00", 1, 12.0),
+            (1, "2026-04-08 22:00:00", 2, 15.0),
+            (2, "2026-04-09 22:00:00", 1, 16.0),
+            (2, "2026-04-09 22:00:00", 2, 14.0),
+            (3, "2026-04-10 22:00:00", 1, 18.0),
+            (3, "2026-04-10 22:00:00", 2, 13.0),
+            (3, "2026-04-10 22:00:00", 3, 17.0),
+        ]
+        for run_id, snapshot_time, theme_id, composite_score in rows:
+            conn.execute(
+                """
+                insert into theme_snapshots values
+                (?, ?, ?, 5, 1, 2, 3, 40, 50, 60, ?, 'live')
+                """,
+                [run_id, snapshot_time, theme_id, composite_score],
+            )
+
+        out = theme_leadership_rank_history(conn, [1, 2, 3], lookback_points=3).sort_values("theme_id").reset_index(drop=True)
+
+        self.assertEqual(out["theme_id"].tolist(), [1, 2, 3])
+        self.assertEqual(out.iloc[0]["rank_history"], [2.0, 1.0, 1.0])
+        self.assertEqual(out.iloc[1]["rank_history"], [1.0, 2.0, 3.0])
+        self.assertIsNone(out.iloc[2]["rank_history"])
+        self.assertEqual(int(out.iloc[2]["rank_history_points"]), 1)
+        self.assertEqual(str(out.iloc[0]["rank_history_start_date"]), "2026-04-08")
+        self.assertEqual(str(out.iloc[0]["rank_history_end_date"]), "2026-04-10")
+        conn.close()
+
+    def test_theme_leadership_rank_history_can_rank_within_supplied_universe(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1w_breadth_pct double,
+                positive_1m_breadth_pct double,
+                positive_3m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into themes values
+                (1, 'Leader', 'Tech'),
+                (2, 'Chaser', 'Tech'),
+                (3, 'Outside', 'Macro')
+            """
+        )
+        rows = [
+            (1, "2026-04-08 22:00:00", 1, 12.0),
+            (1, "2026-04-08 22:00:00", 2, 10.0),
+            (1, "2026-04-08 22:00:00", 3, 15.0),
+            (2, "2026-04-09 22:00:00", 1, 16.0),
+            (2, "2026-04-09 22:00:00", 2, 14.0),
+            (2, "2026-04-09 22:00:00", 3, 18.0),
+        ]
+        for run_id, snapshot_time, theme_id, composite_score in rows:
+            conn.execute(
+                """
+                insert into theme_snapshots values
+                (?, ?, ?, 5, 1, 2, 3, 40, 50, 60, ?, 'live')
+                """,
+                [run_id, snapshot_time, theme_id, composite_score],
+            )
+
+        out = theme_leadership_rank_history(
+            conn,
+            [1, 2],
+            lookback_points=2,
+            ranking_theme_ids=[1, 2],
+        ).sort_values("theme_id").reset_index(drop=True)
+
+        self.assertEqual(out.iloc[0]["rank_history"], [1.0, 1.0])
+        self.assertEqual(out.iloc[1]["rank_history"], [2.0, 2.0])
+        conn.close()
+
+    def test_theme_leadership_rank_history_long_preserves_true_broader_universe_rank(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1w_breadth_pct double,
+                positive_1m_breadth_pct double,
+                positive_3m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into themes values
+                (1, 'Leader', 'Tech'),
+                (2, 'Chaser', 'Tech'),
+                (3, 'Outside', 'Macro')
+            """
+        )
+        rows = [
+            (1, "2026-04-08 22:00:00", 1, 12.0),
+            (1, "2026-04-08 22:00:00", 2, 10.0),
+            (1, "2026-04-08 22:00:00", 3, 15.0),
+            (2, "2026-04-09 22:00:00", 1, 16.0),
+            (2, "2026-04-09 22:00:00", 2, 14.0),
+            (2, "2026-04-09 22:00:00", 3, 18.0),
+        ]
+        for run_id, snapshot_time, theme_id, composite_score in rows:
+            conn.execute(
+                """
+                insert into theme_snapshots values
+                (?, ?, ?, 5, 1, 2, 3, 40, 50, 60, ?, 'live')
+                """,
+                [run_id, snapshot_time, theme_id, composite_score],
+            )
+
+        out = theme_leadership_rank_history_long(conn, [1, 2], lookback_points=2)
+
+        leader_ranks = out[out["theme_id"] == 1]["rank"].tolist()
+        chaser_ranks = out[out["theme_id"] == 2]["rank"].tolist()
+        self.assertEqual(leader_ranks, [2.0, 2.0])
+        self.assertEqual(chaser_ranks, [3.0, 3.0])
+        conn.close()
+
+    def test_theme_leadership_rank_history_long_keeps_one_point_per_theme_per_day(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute(
+            """
+            create table theme_snapshots(
+                run_id bigint,
+                snapshot_time timestamp,
+                theme_id bigint,
+                ticker_count bigint,
+                avg_1w double,
+                avg_1m double,
+                avg_3m double,
+                positive_1w_breadth_pct double,
+                positive_1m_breadth_pct double,
+                positive_3m_breadth_pct double,
+                composite_score double,
+                snapshot_source varchar
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into themes values
+                (1, 'Leader', 'Tech'),
+                (2, 'Chaser', 'Tech')
+            """
+        )
+        rows = [
+            (1, "2026-04-08 10:00:00", 1, 12.0),
+            (2, "2026-04-08 15:30:00", 1, 13.0),
+            (1, "2026-04-08 10:00:00", 2, 9.0),
+            (2, "2026-04-08 15:30:00", 2, 8.0),
+            (3, "2026-04-09 15:30:00", 1, 14.0),
+            (3, "2026-04-09 15:30:00", 2, 11.0),
+        ]
+        for run_id, snapshot_time, theme_id, composite_score in rows:
+            conn.execute(
+                """
+                insert into theme_snapshots values
+                (?, ?, ?, 5, 1, 2, 3, 40, 50, 60, ?, 'live')
+                """,
+                [run_id, snapshot_time, theme_id, composite_score],
+            )
+
+        out = theme_leadership_rank_history_long(conn, [1, 2], lookback_points=2)
+
+        per_day_counts = out.groupby(["theme_id", "snapshot_date"]).size().to_dict()
+        self.assertEqual(per_day_counts, {(1, pd.to_datetime("2026-04-08").date()): 1, (1, pd.to_datetime("2026-04-09").date()): 1, (2, pd.to_datetime("2026-04-08").date()): 1, (2, pd.to_datetime("2026-04-09").date()): 1})
+        leader_day_one = out[(out["theme_id"] == 1) & (out["snapshot_date"] == pd.to_datetime("2026-04-08").date())]
+        self.assertEqual(leader_day_one.iloc[0]["rank"], 1.0)
+        conn.close()
+
+    def test_recent_ticker_history_theme_history_dedupes_daily_history_before_coverage_counts(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table ticker_daily_history(
+                ticker varchar,
+                trading_date date,
+                close double,
+                market_data_source varchar,
+                updated_at timestamp
+            )
+            """
+        )
+        conn.execute("insert into themes values (1, 'Test Theme', 'Tech')")
+        conn.execute("insert into theme_membership values (1, 'AAA'), (1, 'BBB')")
+        rows = [
+            ("AAA", "2026-04-10", 10.0, "live", "2026-04-10 10:00:00"),
+            ("AAA", "2026-04-10", 10.0, "live", "2026-04-10 11:00:00"),
+            ("BBB", "2026-04-10", 20.0, "live", "2026-04-10 10:00:00"),
+            ("BBB", "2026-04-10", 20.0, "live", "2026-04-10 11:00:00"),
+            ("AAA", "2026-04-11", 11.0, "live", "2026-04-11 11:00:00"),
+            ("BBB", "2026-04-11", 21.0, "live", "2026-04-11 11:00:00"),
+        ]
+        for row in rows:
+            conn.execute("insert into ticker_daily_history values (?, ?, ?, ?, ?)", row)
+
+        source = _preferred_ticker_history_source(conn)
+        out = _recent_ticker_history_theme_history(conn, source, theme_id=1)
+
+        latest = out.sort_values("snapshot_date").tail(1).iloc[0]
+        self.assertEqual(int(latest["ticker_count"]), 2)
+        self.assertEqual(int(latest["covered_eligible_constituent_count"]), 2)
         conn.close()
 
 

@@ -291,6 +291,48 @@ CREATE TABLE IF NOT EXISTS reconstructed_theme_snapshots (
     PRIMARY KEY (snapshot_date, theme_id, provenance_source_label)
 );
 
+CREATE TABLE IF NOT EXISTS canonical_theme_daily_snapshots (
+    snapshot_date DATE NOT NULL,
+    snapshot_time TIMESTAMP NOT NULL,
+    run_id BIGINT NOT NULL,
+    theme_id BIGINT NOT NULL,
+    theme VARCHAR NOT NULL,
+    category VARCHAR,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    snapshot_source VARCHAR NOT NULL DEFAULT 'live',
+    extract_session VARCHAR,
+    is_canonical_daily BOOLEAN NOT NULL DEFAULT TRUE,
+    canonical_reason VARCHAR,
+    ticker_count BIGINT NOT NULL DEFAULT 0,
+    eligible_ticker_count BIGINT NOT NULL DEFAULT 0,
+    eligible_1w_count BIGINT NOT NULL DEFAULT 0,
+    eligible_1m_count BIGINT NOT NULL DEFAULT 0,
+    eligible_3m_count BIGINT NOT NULL DEFAULT 0,
+    eligible_composite_count BIGINT NOT NULL DEFAULT 0,
+    eligible_standardized_count BIGINT NOT NULL DEFAULT 0,
+    eligible_momentum_count BIGINT NOT NULL DEFAULT 0,
+    eligible_breadth_pct DOUBLE,
+    avg_1w DOUBLE,
+    avg_1m DOUBLE,
+    avg_3m DOUBLE,
+    positive_1w_breadth_pct DOUBLE,
+    positive_1m_breadth_pct DOUBLE,
+    positive_3m_breadth_pct DOUBLE,
+    legacy_composite_score DOUBLE,
+    standardized_base_strength_score DOUBLE,
+    standardized_participation_ratio DOUBLE,
+    standardized_participation_factor DOUBLE,
+    standardized_guardrail_factor DOUBLE,
+    standardized_recovery_factor DOUBLE,
+    standardized_composite_score DOUBLE,
+    current_momentum_raw_score DOUBLE,
+    current_momentum_quality_factor DOUBLE,
+    current_momentum_score DOUBLE,
+    canonical_rank BIGINT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (snapshot_date, theme_id)
+);
+
 CREATE TABLE IF NOT EXISTS theme_suggestions (
     suggestion_id BIGINT PRIMARY KEY DEFAULT nextval('suggestion_id_seq'),
     suggestion_type VARCHAR NOT NULL,
@@ -453,6 +495,9 @@ CREATE INDEX IF NOT EXISTS idx_theme_snapshots_run_id ON theme_snapshots(run_id)
 CREATE INDEX IF NOT EXISTS idx_theme_snapshots_theme_id ON theme_snapshots(theme_id);
 CREATE INDEX IF NOT EXISTS idx_reconstructed_theme_snapshots_theme_id ON reconstructed_theme_snapshots(theme_id);
 CREATE INDEX IF NOT EXISTS idx_reconstructed_theme_snapshots_date ON reconstructed_theme_snapshots(snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_canonical_theme_daily_snapshots_date ON canonical_theme_daily_snapshots(snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_canonical_theme_daily_snapshots_theme_id ON canonical_theme_daily_snapshots(theme_id);
+CREATE INDEX IF NOT EXISTS idx_canonical_theme_daily_snapshots_rank ON canonical_theme_daily_snapshots(snapshot_date, canonical_rank);
 CREATE INDEX IF NOT EXISTS idx_historical_reconstruction_runs_status ON historical_reconstruction_runs(status);
 CREATE INDEX IF NOT EXISTS idx_ticker_daily_history_ticker ON ticker_daily_history(ticker);
 CREATE INDEX IF NOT EXISTS idx_ticker_daily_history_date ON ticker_daily_history(trading_date);

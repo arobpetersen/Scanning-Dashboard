@@ -381,6 +381,20 @@ def _recent_ticker_history_theme_history(
             FROM membership
             WHERE is_eligible
         ),
+        deduped_history AS (
+            SELECT
+                upper(trim(h.ticker)) AS ticker,
+                h.trading_date,
+                h.close
+            FROM ticker_daily_history h
+            JOIN governed_tickers g ON upper(trim(g.ticker)) = upper(trim(h.ticker))
+            WHERE h.market_data_source = ?
+              AND h.trading_date BETWEEN ? AND ?
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY upper(trim(h.ticker)), h.trading_date, h.market_data_source
+                ORDER BY h.updated_at DESC, h.close DESC
+            ) = 1
+        ),
         perf AS (
             SELECT
                 h.ticker,
@@ -389,10 +403,7 @@ def _recent_ticker_history_theme_history(
                 ((h.close / LAG(h.close, 5) OVER (PARTITION BY h.ticker ORDER BY h.trading_date)) - 1.0) * 100.0 AS perf_1w,
                 ((h.close / LAG(h.close, 21) OVER (PARTITION BY h.ticker ORDER BY h.trading_date)) - 1.0) * 100.0 AS perf_1m,
                 ((h.close / LAG(h.close, 63) OVER (PARTITION BY h.ticker ORDER BY h.trading_date)) - 1.0) * 100.0 AS perf_3m
-            FROM ticker_daily_history h
-            JOIN governed_tickers g ON g.ticker = h.ticker
-            WHERE h.market_data_source = ?
-              AND h.trading_date BETWEEN ? AND ?
+            FROM deduped_history h
         ),
         recent_perf AS (
             SELECT *
@@ -1565,6 +1576,223 @@ def latest_ticker_snapshots(conn) -> pd.DataFrame:
     ).df()
 
 
+def latest_canonical_theme_daily_snapshots(conn) -> pd.DataFrame:
+    if not table_exists(conn, "canonical_theme_daily_snapshots"):
+        return pd.DataFrame()
+    return conn.execute(
+        """
+        WITH latest_date AS (
+            SELECT MAX(snapshot_date) AS snapshot_date
+            FROM canonical_theme_daily_snapshots
+        )
+        SELECT *
+        FROM canonical_theme_daily_snapshots
+        WHERE snapshot_date = (SELECT snapshot_date FROM latest_date)
+        ORDER BY canonical_rank ASC NULLS LAST, theme ASC
+        """
+    ).df()
+
+
+def canonical_theme_rank_history(conn, theme_id: int, days: int = 10) -> pd.DataFrame:
+    if not table_exists(conn, "canonical_theme_daily_snapshots"):
+        return pd.DataFrame()
+    limit_days = max(1, int(days))
+    return conn.execute(
+        """
+        WITH recent_dates AS (
+            SELECT DISTINCT snapshot_date
+            FROM canonical_theme_daily_snapshots
+            ORDER BY snapshot_date DESC
+            LIMIT ?
+        )
+        SELECT
+            c.snapshot_date,
+            c.snapshot_time,
+            c.theme_id,
+            c.theme,
+            c.category,
+            c.canonical_rank,
+            c.standardized_composite_score
+        FROM canonical_theme_daily_snapshots c
+        JOIN recent_dates d ON d.snapshot_date = c.snapshot_date
+        WHERE c.theme_id = ?
+        ORDER BY c.snapshot_date ASC
+        """,
+        [limit_days, int(theme_id)],
+    ).df()
+
+
+def canonical_theme_leadership_rank_history_long(
+    conn,
+    theme_ids: list[int],
+    lookback_points: int = 10,
+) -> pd.DataFrame:
+    normalized_theme_ids = sorted({int(theme_id) for theme_id in theme_ids or []})
+    empty = pd.DataFrame(
+        columns=[
+            "theme_id",
+            "theme",
+            "category",
+            "snapshot_date",
+            "snapshot_time",
+            "rank",
+            "standardized_composite_score",
+            "snapshot_source",
+            "extract_session",
+            "canonical_reason",
+        ]
+    )
+    if not normalized_theme_ids or not table_exists(conn, "canonical_theme_daily_snapshots"):
+        return empty
+
+    limit_points = max(int(lookback_points), 1)
+    return conn.execute(
+        """
+        WITH recent_dates AS (
+            SELECT DISTINCT snapshot_date
+            FROM canonical_theme_daily_snapshots
+            ORDER BY snapshot_date DESC
+            LIMIT ?
+        )
+        SELECT
+            c.theme_id,
+            c.theme,
+            c.category,
+            c.snapshot_date,
+            c.snapshot_time,
+            c.canonical_rank AS rank,
+            c.standardized_composite_score,
+            c.snapshot_source,
+            c.extract_session,
+            c.canonical_reason
+        FROM canonical_theme_daily_snapshots c
+        JOIN recent_dates d ON d.snapshot_date = c.snapshot_date
+        WHERE c.theme_id IN (SELECT UNNEST(?::BIGINT[]))
+          AND c.canonical_rank IS NOT NULL
+        ORDER BY c.snapshot_date ASC, c.canonical_rank ASC, c.theme ASC
+        """,
+        [limit_points, normalized_theme_ids],
+    ).df()
+
+
+def canonical_theme_leadership_rank_history(
+    conn,
+    theme_ids: list[int],
+    lookback_points: int = 7,
+) -> pd.DataFrame:
+    normalized_theme_ids = sorted({int(theme_id) for theme_id in theme_ids or []})
+    empty = pd.DataFrame(
+        columns=[
+            "theme_id",
+            "rank_history",
+            "rank_history_points",
+            "rank_history_start_date",
+            "rank_history_end_date",
+        ]
+    )
+    if not normalized_theme_ids:
+        return empty
+
+    history_long = canonical_theme_leadership_rank_history_long(
+        conn,
+        normalized_theme_ids,
+        lookback_points=int(lookback_points),
+    )
+    if history_long.empty:
+        return empty
+
+    history_long = history_long.copy()
+    history_long["snapshot_date"] = pd.to_datetime(history_long["snapshot_date"], errors="coerce").dt.date
+    history_long["rank"] = pd.to_numeric(history_long["rank"], errors="coerce")
+    history_long = history_long.dropna(subset=["snapshot_date", "rank"])
+    if history_long.empty:
+        return empty
+
+    recent_dates = sorted(history_long["snapshot_date"].dropna().unique().tolist())[-max(int(lookback_points), 1) :]
+    if not recent_dates:
+        return empty
+
+    rows: list[dict[str, object]] = []
+    for theme_id in normalized_theme_ids:
+        theme_rows = history_long[history_long["theme_id"] == int(theme_id)].copy()
+        series_by_date = {
+            snapshot_date: float(rank)
+            for snapshot_date, rank in zip(theme_rows["snapshot_date"], theme_rows["rank"])
+            if snapshot_date is not None and rank is not None and not pd.isna(rank)
+        }
+        rank_history = [series_by_date[snapshot_date] for snapshot_date in recent_dates if snapshot_date in series_by_date]
+        point_count = sum(1 for value in rank_history if value is not None and not pd.isna(value))
+        rows.append(
+            {
+                "theme_id": int(theme_id),
+                "rank_history": rank_history if point_count >= 2 else None,
+                "rank_history_points": int(point_count),
+                "rank_history_start_date": recent_dates[0],
+                "rank_history_end_date": recent_dates[-1],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def canonical_theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
+    if not table_exists(conn, "canonical_theme_daily_snapshots"):
+        return pd.DataFrame()
+    lookback_days = max(int(lookback_days), 1)
+    latest_row = conn.execute(
+        """
+        SELECT MAX(snapshot_date) AS latest_snapshot_date
+        FROM canonical_theme_daily_snapshots
+        """
+    ).fetchone()
+    latest_snapshot_date = latest_row[0] if latest_row else None
+    if latest_snapshot_date is None:
+        return pd.DataFrame()
+    start_date = pd.Timestamp(latest_snapshot_date) - pd.Timedelta(days=lookback_days)
+    return conn.execute(
+        """
+        SELECT
+            snapshot_time,
+            snapshot_date,
+            theme_id,
+            theme,
+            category,
+            ticker_count,
+            avg_1w,
+            avg_1m,
+            avg_3m,
+            positive_1m_breadth_pct,
+            standardized_composite_score AS composite_score,
+            snapshot_source,
+            'canonical_daily' AS provenance_class,
+            canonical_rank AS rank,
+            extract_session,
+            canonical_reason
+        FROM canonical_theme_daily_snapshots
+        WHERE snapshot_date >= ?
+          AND snapshot_date <= ?
+          AND canonical_rank IS NOT NULL
+        ORDER BY snapshot_time ASC, canonical_rank ASC, theme ASC
+        """,
+        [start_date.date(), latest_snapshot_date],
+    ).df()
+
+
+def canonical_theme_snapshot_counts(conn) -> pd.DataFrame:
+    if not table_exists(conn, "canonical_theme_daily_snapshots"):
+        return pd.DataFrame(
+            [{"canonical_snapshot_dates": 0, "canonical_snapshot_rows": 0, "latest_canonical_snapshot_date": None}]
+        )
+    return conn.execute(
+        """
+        SELECT
+            COUNT(DISTINCT snapshot_date) AS canonical_snapshot_dates,
+            COUNT(*) AS canonical_snapshot_rows,
+            MAX(snapshot_date) AS latest_canonical_snapshot_date
+        FROM canonical_theme_daily_snapshots
+        """
+    ).df()
+
+
 def latest_ticker_history_research_fields(conn) -> pd.DataFrame:
     preferred_source = _preferred_ticker_history_source(conn)
     if (
@@ -1871,16 +2099,51 @@ def classify_ticker_history_readiness(
 
 
 def ticker_history_readiness(conn, target_trading_days: int = 30) -> pd.DataFrame:
+    suppression_table_exists = table_exists(conn, "symbol_refresh_status")
+    has_status = suppression_table_exists and table_has_column(conn, "symbol_refresh_status", "status")
+    has_manual_suppressed = suppression_table_exists and table_has_column(conn, "symbol_refresh_status", "manual_suppressed")
+    suppressed_expr_parts: list[str] = []
+    if has_status:
+        suppressed_expr_parts.append("COALESCE(sr.status, 'active') = 'refresh_suppressed'")
+    if has_manual_suppressed:
+        suppressed_expr_parts.append("COALESCE(sr.manual_suppressed, FALSE)")
+    suppressed_expr = " OR ".join(suppressed_expr_parts) if suppressed_expr_parts else "FALSE"
+
     governed_active_tickers = conn.execute(
+        f"""
+        WITH governed AS (
+            SELECT DISTINCT upper(trim(m.ticker)) AS ticker
+            FROM theme_membership m
+            JOIN themes t ON t.id = m.theme_id
+            WHERE t.is_active = TRUE
+        ),
+        status_rollup AS (
+            SELECT
+                upper(trim(ticker)) AS ticker,
+                MAX(CASE WHEN {suppressed_expr} THEN 1 ELSE 0 END) AS operationally_suppressed
+            FROM symbol_refresh_status sr
+            GROUP BY 1
+        )
+        SELECT
+            g.ticker,
+            COALESCE(sr.operationally_suppressed, 0) AS operationally_suppressed
+        FROM governed g
+        LEFT JOIN status_rollup sr ON sr.ticker = g.ticker
+        ORDER BY g.ticker
         """
-        SELECT DISTINCT m.ticker
+        if suppression_table_exists
+        else """
+        SELECT DISTINCT upper(trim(m.ticker)) AS ticker, 0 AS operationally_suppressed
         FROM theme_membership m
         JOIN themes t ON t.id = m.theme_id
         WHERE t.is_active = TRUE
-        ORDER BY m.ticker
+        ORDER BY upper(trim(m.ticker))
         """
     ).df()
-    governed_count = int(len(governed_active_tickers))
+    raw_governed_count = int(len(governed_active_tickers))
+    expected_governed = governed_active_tickers[governed_active_tickers["operationally_suppressed"] != 1].copy()
+    governed_count = int(len(expected_governed))
+    suppressed_count = int(raw_governed_count - governed_count)
 
     if not table_exists(conn, "ticker_daily_history"):
         return pd.DataFrame(
@@ -1891,6 +2154,8 @@ def ticker_history_readiness(conn, target_trading_days: int = 30) -> pd.DataFram
                     "available_trading_days": 0,
                     "remaining_trading_days": int(target_trading_days),
                     "governed_active_tickers": governed_count,
+                    "governed_active_tickers_raw": raw_governed_count,
+                    "governed_active_tickers_suppressed": suppressed_count,
                     "governed_active_tickers_ready": 0,
                     "governed_ready_pct": 0.0,
                     "min_ticker_depth": 0,
@@ -1924,6 +2189,8 @@ def ticker_history_readiness(conn, target_trading_days: int = 30) -> pd.DataFram
                     "available_trading_days": 0,
                     "remaining_trading_days": int(target_trading_days),
                     "governed_active_tickers": governed_count,
+                    "governed_active_tickers_raw": raw_governed_count,
+                    "governed_active_tickers_suppressed": suppressed_count,
                     "governed_active_tickers_ready": 0,
                     "governed_ready_pct": 0.0,
                     "min_ticker_depth": 0,
@@ -1936,26 +2203,24 @@ def ticker_history_readiness(conn, target_trading_days: int = 30) -> pd.DataFram
             ]
         )
 
-    coverage = conn.execute(
-        """
-        WITH governed AS (
-            SELECT DISTINCT m.ticker
-            FROM theme_membership m
-            JOIN themes t ON t.id = m.theme_id
-            WHERE t.is_active = TRUE
-        )
-        SELECT
-            g.ticker,
-            COUNT(DISTINCT h.trading_date) AS trading_day_rows
-        FROM governed g
-        LEFT JOIN ticker_daily_history h
-          ON h.ticker = g.ticker
-         AND h.market_data_source = ?
-        GROUP BY g.ticker
-        ORDER BY g.ticker
-        """,
-        [market_data_source],
-    ).df()
+    conn.register("expected_governed_tickers", expected_governed[["ticker"]])
+    try:
+        coverage = conn.execute(
+            """
+            SELECT
+                g.ticker,
+                COUNT(DISTINCT h.trading_date) AS trading_day_rows
+            FROM expected_governed_tickers g
+            LEFT JOIN ticker_daily_history h
+              ON h.ticker = g.ticker
+             AND h.market_data_source = ?
+            GROUP BY g.ticker
+            ORDER BY g.ticker
+            """,
+            [market_data_source],
+        ).df()
+    finally:
+        conn.unregister("expected_governed_tickers")
     overall = conn.execute(
         """
         SELECT
@@ -1989,6 +2254,8 @@ def ticker_history_readiness(conn, target_trading_days: int = 30) -> pd.DataFram
                 "available_trading_days": available_trading_days,
                 "remaining_trading_days": remaining_trading_days,
                 "governed_active_tickers": governed_count,
+                "governed_active_tickers_raw": raw_governed_count,
+                "governed_active_tickers_suppressed": suppressed_count,
                 "governed_active_tickers_ready": ready_count,
                 "governed_ready_pct": ready_pct,
                 "min_ticker_depth": min_depth,
@@ -2027,6 +2294,127 @@ def theme_snapshot_history_recent(conn, snapshot_limit: int = 14) -> pd.DataFram
         """,
         [snapshot_limit],
     ).df()
+
+
+def theme_leadership_rank_history(
+    conn,
+    theme_ids: list[int],
+    lookback_points: int = 7,
+    *,
+    ranking_theme_ids: list[int] | None = None,
+) -> pd.DataFrame:
+    normalized_theme_ids = sorted({int(theme_id) for theme_id in theme_ids or []})
+    ranking_universe_ids = sorted({int(theme_id) for theme_id in (ranking_theme_ids or normalized_theme_ids)})
+    empty = pd.DataFrame(
+        columns=[
+            "theme_id",
+            "rank_history",
+            "rank_history_points",
+            "rank_history_start_date",
+            "rank_history_end_date",
+        ]
+    )
+    if not normalized_theme_ids:
+        return empty
+
+    def _load(active_conn=conn) -> pd.DataFrame:
+        calendar_lookback_days = max(int(lookback_points) + 7, int(lookback_points) * 3)
+        start_date = pd.Timestamp.utcnow().tz_localize(None).normalize() - pd.Timedelta(days=calendar_lookback_days)
+        history = _recent_movement_theme_snapshot_union(active_conn, start_date=start_date)
+        if history.empty:
+            return empty.copy()
+
+        ranked = history.copy()
+        ranked["snapshot_time"] = pd.to_datetime(ranked["snapshot_time"], errors="coerce")
+        ranked["snapshot_date"] = pd.to_datetime(ranked["snapshot_time"], errors="coerce").dt.date
+        ranked["composite_score"] = pd.to_numeric(ranked["composite_score"], errors="coerce")
+        ranked = ranked.dropna(subset=["snapshot_time", "snapshot_date", "composite_score"])
+        if ranked.empty:
+            return empty.copy()
+
+        # Keep one deterministic daily winner per theme using the latest
+        # resolved snapshot row already selected by the historical union.
+        ranked = (
+            ranked.sort_values(["theme_id", "snapshot_date", "snapshot_time"], ascending=[True, True, False])
+            .drop_duplicates(subset=["theme_id", "snapshot_date"], keep="first")
+            .reset_index(drop=True)
+        )
+
+        recent_dates = sorted(ranked["snapshot_date"].dropna().unique().tolist())[-max(int(lookback_points), 1) :]
+        if not recent_dates:
+            return empty.copy()
+
+        ranked = ranked[ranked["snapshot_date"].isin(recent_dates)].copy()
+        ranked = ranked[ranked["theme_id"].isin(ranking_universe_ids)].copy()
+        if ranked.empty:
+            return empty.copy()
+        ranked["rank"] = ranked.groupby("snapshot_date")["composite_score"].rank(method="dense", ascending=False)
+        ranked = ranked[ranked["theme_id"].isin(normalized_theme_ids)].copy()
+
+        rows: list[dict[str, object]] = []
+        for theme_id in normalized_theme_ids:
+            theme_rows = ranked[ranked["theme_id"] == int(theme_id)].copy()
+            series_by_date = {
+                snapshot_date: float(rank)
+                for snapshot_date, rank in zip(theme_rows["snapshot_date"], theme_rows["rank"])
+                if snapshot_date is not None and rank is not None and not pd.isna(rank)
+            }
+            rank_history = [series_by_date[snapshot_date] for snapshot_date in recent_dates if snapshot_date in series_by_date]
+            point_count = sum(1 for value in rank_history if value is not None and not pd.isna(value))
+            rows.append(
+                {
+                    "theme_id": int(theme_id),
+                    "rank_history": rank_history if point_count >= 2 else None,
+                    "rank_history_points": int(point_count),
+                    "rank_history_start_date": recent_dates[0],
+                    "rank_history_end_date": recent_dates[-1],
+                }
+            )
+        return pd.DataFrame(rows)
+
+    return _with_bootstrap_recovery(_load)
+
+
+def theme_leadership_rank_history_long(
+    conn,
+    theme_ids: list[int],
+    lookback_points: int = 10,
+) -> pd.DataFrame:
+    normalized_theme_ids = sorted({int(theme_id) for theme_id in theme_ids or []})
+    empty = pd.DataFrame(columns=["theme_id", "theme", "category", "snapshot_date", "rank"])
+    if not normalized_theme_ids:
+        return empty
+
+    def _load(active_conn=conn) -> pd.DataFrame:
+        calendar_lookback_days = max(int(lookback_points) + 7, int(lookback_points) * 3)
+        start_date = pd.Timestamp.utcnow().tz_localize(None).normalize() - pd.Timedelta(days=calendar_lookback_days)
+        history = _recent_movement_theme_snapshot_union(active_conn, start_date=start_date)
+        if history.empty:
+            return empty.copy()
+
+        ranked = history.copy()
+        ranked["snapshot_date"] = pd.to_datetime(ranked["snapshot_time"], errors="coerce").dt.date
+        ranked["composite_score"] = pd.to_numeric(ranked["composite_score"], errors="coerce")
+        ranked = ranked.dropna(subset=["snapshot_date", "composite_score"])
+        if ranked.empty:
+            return empty.copy()
+
+        recent_dates = sorted(ranked["snapshot_date"].dropna().unique().tolist())[-max(int(lookback_points), 1) :]
+        if not recent_dates:
+            return empty.copy()
+
+        ranked = ranked[ranked["snapshot_date"].isin(recent_dates)].copy()
+        ranked["rank"] = ranked.groupby("snapshot_date")["composite_score"].rank(method="dense", ascending=False)
+        ranked = ranked[ranked["theme_id"].isin(normalized_theme_ids)].copy()
+        if ranked.empty:
+            return empty.copy()
+        ranked["rank"] = pd.to_numeric(ranked["rank"], errors="coerce")
+        return ranked[["theme_id", "theme", "category", "snapshot_date", "rank"]].sort_values(
+            ["snapshot_date", "rank", "theme"],
+            ascending=[True, True, True],
+        ).reset_index(drop=True)
+
+    return _with_bootstrap_recovery(_load)
 
 
 def tickers_dimension(conn) -> pd.DataFrame:

@@ -267,6 +267,88 @@ def format_top_ticker_leaders(
     return ", ".join(leaders[ticker_col].tolist())
 
 
+def format_rank_history_delta(rank_history, *, lookback_points: int) -> str:
+    if not isinstance(rank_history, (list, tuple)):
+        return "-"
+    cleaned = [float(value) for value in rank_history if value is not None and not pd.isna(value)]
+    if len(cleaned) < 2:
+        return "-"
+    improvement = int(round(cleaned[0] - cleaned[-1]))
+    if improvement > 0:
+        delta = f"+{improvement}"
+    elif improvement < 0:
+        delta = str(improvement)
+    else:
+        delta = "0"
+    return f"{int(lookback_points)}d: {delta}"
+
+
+def format_rank_history_movement(rank_history, current_rank: int | float | None) -> str:
+    if not isinstance(rank_history, (list, tuple)) or current_rank is None or pd.isna(current_rank):
+        return "-"
+    cleaned = [float(value) for value in rank_history if value is not None and not pd.isna(value)]
+    if len(cleaned) < 2:
+        return "-"
+    start_rank = int(round(cleaned[0]))
+    end_rank = int(round(float(current_rank)))
+    delta = start_rank - end_rank
+    return f"{start_rank} → {end_rank} ({delta:+d})"
+
+
+def build_current_rank_movers_table(
+    rankings: pd.DataFrame,
+    rank_history: pd.DataFrame,
+    *,
+    direction: str,
+    top_k: int = 8,
+) -> pd.DataFrame:
+    if rankings.empty or rank_history.empty:
+        return pd.DataFrame()
+
+    current = rankings.copy().reset_index(drop=True)
+    current["current_rank"] = current.index + 1
+    history = rank_history.copy()
+    history["prior_rank"] = history["rank_history"].apply(
+        lambda values: (
+            float([value for value in values if value is not None and not pd.isna(value)][0])
+            if isinstance(values, (list, tuple)) and len([value for value in values if value is not None and not pd.isna(value)]) >= 2
+            else np.nan
+        )
+    )
+    merged = current.merge(history[["theme_id", "rank_history", "prior_rank"]], on="theme_id", how="left")
+    merged = merged.dropna(subset=["prior_rank"]).copy()
+    if merged.empty:
+        return pd.DataFrame()
+
+    merged["rank_move_value"] = merged["prior_rank"] - merged["current_rank"]
+    if direction == "riser":
+        merged = merged[merged["rank_move_value"] > 0].copy()
+        merged = merged.sort_values(["rank_move_value", "current_rank", "theme"], ascending=[False, True, True])
+    elif direction == "faller":
+        merged = merged[merged["rank_move_value"] < 0].copy()
+        merged = merged.sort_values(["rank_move_value", "current_rank", "theme"], ascending=[True, True, True])
+    else:
+        raise ValueError(f"Unsupported mover direction: {direction}")
+    if merged.empty:
+        return pd.DataFrame()
+
+    merged["move"] = merged.apply(
+        lambda row: format_rank_history_movement(row.get("rank_history"), row.get("current_rank")),
+        axis=1,
+    )
+    out = merged.head(top_k).copy()
+    return out[
+        [
+            "current_rank",
+            "theme_id",
+            "theme",
+            "category",
+            "move",
+            "composite_score",
+        ]
+    ].reset_index(drop=True)
+
+
 def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k: int = 10) -> pd.DataFrame:
     if rankings.empty:
         return pd.DataFrame()

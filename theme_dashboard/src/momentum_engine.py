@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from .config import THEME_CONFIDENCE_FULL_COUNT
-from .queries import theme_history_window, top_n_membership_changes
+from .queries import canonical_theme_history_window, theme_history_window
 
 METRIC_COLS = [
     "composite_score",
@@ -45,8 +45,45 @@ def _historical_theme_confidence_factor(ticker_count: int | float) -> float:
     return min(1.0, (float(ticker_count) / float(THEME_CONFIDENCE_FULL_COUNT)) ** 0.5)
 
 
+def _top_n_membership_changes_from_history(history: pd.DataFrame, top_n: int = 20) -> tuple[list[str], list[str]]:
+    if history.empty:
+        return [], []
+    boundary_times = pd.to_datetime(history["snapshot_time"]).dropna().drop_duplicates().sort_values()
+    if len(boundary_times) < 2:
+        return [], []
+    start_time = boundary_times.iloc[0]
+    end_time = boundary_times.iloc[-1]
+    sort_cols = ["rank", "theme", "theme_id"] if "rank" in history.columns else ["composite_score", "theme", "theme_id"]
+    ascending = [True, True, True] if "rank" in history.columns else [False, True, True]
+    start_top = (
+        history[pd.to_datetime(history["snapshot_time"]) == start_time]
+        .sort_values(sort_cols, ascending=ascending)
+        .head(top_n)
+    )
+    end_top = (
+        history[pd.to_datetime(history["snapshot_time"]) == end_time]
+        .sort_values(sort_cols, ascending=ascending)
+        .head(top_n)
+    )
+    start_map = {
+        str(row["theme_id"]): str(row["theme"])
+        for _, row in start_top[["theme_id", "theme"]].drop_duplicates(subset=["theme_id"]).iterrows()
+    } if not start_top.empty else {}
+    end_map = {
+        str(row["theme_id"]): str(row["theme"])
+        for _, row in end_top[["theme_id", "theme"]].drop_duplicates(subset=["theme_id"]).iterrows()
+    } if not end_top.empty else {}
+    start_set = set(start_map.keys())
+    end_set = set(end_map.keys())
+    entered = [(end_map[theme_id], theme_id) for theme_id in sorted(end_set - start_set, key=lambda value: (end_map[value], value))]
+    dropped = [(start_map[theme_id], theme_id) for theme_id in sorted(start_set - end_set, key=lambda value: (start_map[value], value))]
+    return [label for label, _ in entered], [label for label, _ in dropped]
+
+
 def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
-    history = theme_history_window(conn, lookback_days)
+    history = canonical_theme_history_window(conn, lookback_days)
+    if history.empty:
+        history = theme_history_window(conn, lookback_days)
     if history.empty:
         return _empty_result()
 
@@ -81,7 +118,8 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
     )
 
     history = history.sort_values(["theme_id", "snapshot_time", "theme"]).copy()
-    history["rank"] = history.groupby("snapshot_time")["composite_score"].rank(method="dense", ascending=False)
+    if "rank" not in history.columns or history["rank"].isna().all():
+        history["rank"] = history.groupby("snapshot_time")["composite_score"].rank(method="dense", ascending=False)
 
     first = history.groupby("theme_id", as_index=False).first()
     last = history.groupby("theme_id", as_index=False).last()
@@ -124,7 +162,7 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
 
     merged = merged.round(2)
 
-    entered, dropped = top_n_membership_changes(conn, lookback_days, top_n=top_n)
+    entered, dropped = _top_n_membership_changes_from_history(history, top_n=top_n)
 
     return {
         "history": history,

@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from .fetch_data import run_refresh
 from .historical_backfill import run_daily_historical_append
+from .rankings import persist_canonical_theme_daily_snapshot_for_run
 from .theme_service import active_ticker_universe
 
 EASTERN_TZ = ZoneInfo("America/New_York")
@@ -77,13 +78,22 @@ def run_scheduled_eod_refresh(conn, provider_name: str = "live", force: bool = F
     if not tickers:
         return None
 
-    return run_refresh(
+    run_id = run_refresh(
         conn,
         provider_name,
         tickers=tickers,
         scope_type="scheduled_eod",
         scope_theme_name=None,
     )
+    if run_id is not None:
+        persist_canonical_theme_daily_snapshot_for_run(
+            conn,
+            run_id,
+            extract_session="after_hours_official",
+            canonical_reason="scheduled_eod_refresh",
+            is_canonical_daily=True,
+        )
+    return run_id
 
 
 def run_scheduled_historical_append(conn, provider_name: str = "live", force: bool = False) -> dict[str, object] | None:

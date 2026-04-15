@@ -690,6 +690,35 @@ class TestHistoricalBackfill(unittest.TestCase):
         self.assertEqual(readiness.iloc[0]["status_label"], "ready")
         conn.close()
 
+    def test_ticker_history_readiness_excludes_operationally_suppressed_tickers_from_default_denominator(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'Cloud', 'Tech', true)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'NVDA')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'MSFT')")
+        conn.execute(
+            """
+            insert into symbol_refresh_status(
+                ticker, status, manual_suppressed, updated_at
+            ) values ('MSFT', 'refresh_suppressed', false, CURRENT_TIMESTAMP)
+            """
+        )
+
+        dates = pd.bdate_range("2026-01-15", periods=30)
+        history = pd.DataFrame(
+            [{"snapshot_date": ts.date(), "close": 100 + idx, "volume": 1000 + idx} for idx, ts in enumerate(dates)]
+        )
+        persist_ticker_daily_history(conn, history, ticker="NVDA", provenance_source_label="daily_historical_append", market_data_source="live")
+
+        readiness = ticker_history_readiness(conn, target_trading_days=30)
+
+        self.assertEqual(int(readiness.iloc[0]["governed_active_tickers_raw"]), 2)
+        self.assertEqual(int(readiness.iloc[0]["governed_active_tickers_suppressed"]), 1)
+        self.assertEqual(int(readiness.iloc[0]["governed_active_tickers"]), 1)
+        self.assertEqual(int(readiness.iloc[0]["governed_active_tickers_ready"]), 1)
+        self.assertEqual(float(readiness.iloc[0]["governed_ready_pct"]), 100.0)
+        conn.close()
+
     def test_classify_ticker_history_readiness_thresholds(self):
         self.assertEqual(classify_ticker_history_readiness(10, 0.0, target_trading_days=30), "accumulating")
         self.assertEqual(classify_ticker_history_readiness(24, 10.0, target_trading_days=30), "near ready")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date, datetime, time
+
 import numpy as np
 import pandas as pd
 
@@ -87,6 +89,47 @@ CURRENT_RANKING_COLUMNS = [
     "current_momentum_raw_score",
     "current_momentum_quality_factor",
     "current_momentum_score",
+]
+
+
+CANONICAL_THEME_DAILY_COLUMNS = [
+    "snapshot_date",
+    "snapshot_time",
+    "run_id",
+    "theme_id",
+    "theme",
+    "category",
+    "is_active",
+    "snapshot_source",
+    "extract_session",
+    "is_canonical_daily",
+    "canonical_reason",
+    "ticker_count",
+    "eligible_ticker_count",
+    "eligible_1w_count",
+    "eligible_1m_count",
+    "eligible_3m_count",
+    "eligible_composite_count",
+    "eligible_standardized_count",
+    "eligible_momentum_count",
+    "eligible_breadth_pct",
+    "avg_1w",
+    "avg_1m",
+    "avg_3m",
+    "positive_1w_breadth_pct",
+    "positive_1m_breadth_pct",
+    "positive_3m_breadth_pct",
+    "legacy_composite_score",
+    "standardized_base_strength_score",
+    "standardized_participation_ratio",
+    "standardized_participation_factor",
+    "standardized_guardrail_factor",
+    "standardized_recovery_factor",
+    "standardized_composite_score",
+    "current_momentum_raw_score",
+    "current_momentum_quality_factor",
+    "current_momentum_score",
+    "canonical_rank",
 ]
 
 
@@ -296,6 +339,759 @@ def persist_theme_snapshot_for_run(conn, run_id: int) -> None:
         """
     )
     conn.unregister("theme_snapshot_incoming")
+
+
+def _load_ranking_constituents_for_run(conn, run_id: int) -> pd.DataFrame:
+    membership = conn.execute(
+        """
+        SELECT
+            t.id AS theme_id,
+            t.name AS theme,
+            t.category,
+            t.is_active,
+            m.ticker
+        FROM themes t
+        LEFT JOIN theme_membership m ON m.theme_id = t.id
+        """
+    ).df()
+    if membership.empty:
+        return membership
+
+    snapshots = conn.execute(
+        """
+        SELECT
+            s.run_id,
+            rr.finished_at AS snapshot_time,
+            s.ticker,
+            s.price,
+            s.avg_volume,
+            s.perf_1w,
+            s.perf_1m,
+            s.perf_3m
+        FROM ticker_snapshots s
+        JOIN refresh_runs rr ON rr.run_id = s.run_id
+        WHERE s.run_id = ?
+        """,
+        [run_id],
+    ).df()
+    if snapshots.empty:
+        for col in ("run_id", "snapshot_time", "price", "avg_volume", "perf_1w", "perf_1m", "perf_3m"):
+            membership[col] = np.nan
+        membership["status"] = None
+        return membership
+
+    if table_exists(conn, "symbol_refresh_status"):
+        status_cols = ["ticker"]
+        if table_has_column(conn, "symbol_refresh_status", "status"):
+            status_cols.append("status")
+        statuses = conn.execute(f"SELECT {', '.join(status_cols)} FROM symbol_refresh_status").df()
+        if "status" not in statuses.columns:
+            statuses["status"] = None
+    else:
+        statuses = pd.DataFrame(columns=["ticker", "status"])
+
+    raw = membership.merge(snapshots, on="ticker", how="left")
+    raw = raw.merge(statuses[["ticker", "status"]], on="ticker", how="left", suffixes=("", "_symbol"))
+    return raw
+
+
+def compute_current_ranking_metrics_for_run(conn, run_id: int) -> pd.DataFrame:
+    return _build_current_ranking_metrics(_load_ranking_constituents_for_run(conn, run_id))
+
+
+def _load_ranking_constituents_for_trading_date(
+    conn,
+    snapshot_date: date | str,
+    *,
+    market_data_source: str = "live",
+) -> pd.DataFrame:
+    snapshot_ts = pd.Timestamp(snapshot_date)
+    if pd.isna(snapshot_ts):
+        return pd.DataFrame()
+
+    membership = conn.execute(
+        """
+        SELECT
+            t.id AS theme_id,
+            t.name AS theme,
+            t.category,
+            t.is_active,
+            upper(trim(m.ticker)) AS ticker
+        FROM themes t
+        LEFT JOIN theme_membership m ON m.theme_id = t.id
+        """
+    ).df()
+    if membership.empty:
+        return membership
+
+    history = conn.execute(
+        """
+        WITH deduped_history AS (
+            SELECT
+                upper(trim(ticker)) AS ticker,
+                trading_date,
+                close AS price,
+                volume,
+                atr_14,
+                atr_pct_14,
+                ROW_NUMBER() OVER (
+                    PARTITION BY upper(trim(ticker)), trading_date, market_data_source
+                    ORDER BY updated_at DESC, created_at DESC, close DESC
+                ) AS row_rank
+            FROM ticker_daily_history
+            WHERE market_data_source = ?
+              AND trading_date <= ?
+        )
+        SELECT
+            ticker,
+            trading_date,
+            price,
+            volume,
+            atr_14,
+            atr_pct_14
+        FROM deduped_history
+        WHERE row_rank = 1
+        ORDER BY ticker, trading_date
+        """,
+        [market_data_source, snapshot_ts.date()],
+    ).df()
+    if history.empty:
+        for col in (
+            "run_id",
+            "snapshot_time",
+            "price",
+            "avg_volume",
+            "perf_1w",
+            "perf_1m",
+            "perf_3m",
+            "perf_1w_atr_units",
+            "perf_1m_atr_units",
+            "atr_14",
+            "atr_pct_14",
+        ):
+            membership[col] = np.nan
+        membership["status"] = None
+        return membership
+
+    history = history.sort_values(["ticker", "trading_date"]).copy()
+    history["trading_date"] = pd.to_datetime(history["trading_date"], errors="coerce").dt.date
+    grouped_close = history.groupby("ticker")["price"]
+    history["perf_1w"] = ((grouped_close.transform(lambda s: s / s.shift(5))) - 1.0) * 100.0
+    history["perf_1m"] = ((grouped_close.transform(lambda s: s / s.shift(21))) - 1.0) * 100.0
+    history["perf_3m"] = ((grouped_close.transform(lambda s: s / s.shift(63))) - 1.0) * 100.0
+    history["avg_volume"] = history.groupby("ticker")["volume"].transform(
+        lambda s: s.rolling(window=20, min_periods=1).mean()
+    )
+    history["perf_1w_atr_units"] = np.where(
+        history["atr_14"].notna() & (history["atr_14"] != 0) & grouped_close.shift(5).notna(),
+        (history["price"] - grouped_close.shift(5)) / history["atr_14"],
+        np.nan,
+    )
+    history["perf_1m_atr_units"] = np.where(
+        history["atr_14"].notna() & (history["atr_14"] != 0) & grouped_close.shift(21).notna(),
+        (history["price"] - grouped_close.shift(21)) / history["atr_14"],
+        np.nan,
+    )
+    day_rows = history[history["trading_date"] == snapshot_ts.date()][
+        [
+            "ticker",
+            "price",
+            "avg_volume",
+            "perf_1w",
+            "perf_1m",
+            "perf_3m",
+            "perf_1w_atr_units",
+            "perf_1m_atr_units",
+            "atr_14",
+            "atr_pct_14",
+        ]
+    ].copy()
+    if day_rows.empty:
+        for col in (
+            "run_id",
+            "snapshot_time",
+            "price",
+            "avg_volume",
+            "perf_1w",
+            "perf_1m",
+            "perf_3m",
+            "perf_1w_atr_units",
+            "perf_1m_atr_units",
+            "atr_14",
+            "atr_pct_14",
+        ):
+            membership[col] = np.nan
+        membership["status"] = None
+        return membership
+
+    snapshot_time = datetime.combine(snapshot_ts.date(), time(hour=17, minute=0, second=0))
+    day_rows["run_id"] = np.nan
+    day_rows["snapshot_time"] = snapshot_time
+
+    if table_exists(conn, "symbol_refresh_status"):
+        status_cols = ["ticker"]
+        if table_has_column(conn, "symbol_refresh_status", "status"):
+            status_cols.append("status")
+        statuses = conn.execute(f"SELECT {', '.join(status_cols)} FROM symbol_refresh_status").df()
+        if "status" not in statuses.columns:
+            statuses["status"] = None
+        statuses["ticker"] = statuses["ticker"].astype(str).str.strip().str.upper()
+    else:
+        statuses = pd.DataFrame(columns=["ticker", "status"])
+
+    raw = membership.merge(day_rows, on="ticker", how="left")
+    raw = raw.merge(statuses[["ticker", "status"]], on="ticker", how="left", suffixes=("", "_symbol"))
+    return raw
+
+
+def compute_current_ranking_metrics_for_trading_date(
+    conn,
+    snapshot_date: date | str,
+    *,
+    market_data_source: str = "live",
+) -> pd.DataFrame:
+    raw = _load_ranking_constituents_for_trading_date(
+        conn,
+        snapshot_date,
+        market_data_source=market_data_source,
+    )
+    return _build_current_ranking_metrics(raw)
+
+
+def _insert_canonical_history_repair_run(
+    conn,
+    *,
+    snapshot_date: date,
+    market_data_source: str,
+    ticker_count: int,
+    success_count: int,
+) -> int:
+    finished_at = datetime.combine(snapshot_date, time(hour=17, minute=0, second=0))
+    started_at = datetime.combine(snapshot_date, time(hour=16, minute=55, second=0))
+    return int(
+        conn.execute(
+            """
+            INSERT INTO refresh_runs(
+                provider, started_at, finished_at, status,
+                ticker_count, success_count, failure_count, scope_type, error_message
+            )
+            VALUES (?, ?, ?, 'success', ?, ?, 0, 'canonical_history_repair', ?)
+            RETURNING run_id
+            """,
+            [
+                "synthetic_backfill",
+                started_at,
+                finished_at,
+                int(ticker_count),
+                int(success_count),
+                f"Canonical daily history repair from ticker_daily_history ({market_data_source})",
+            ],
+        ).fetchone()[0]
+    )
+
+
+def build_canonical_theme_daily_rows_for_trading_date(
+    conn,
+    snapshot_date: date | str,
+    *,
+    market_data_source: str = "live",
+    extract_session: str,
+    canonical_reason: str,
+    is_canonical_daily: bool = True,
+) -> pd.DataFrame:
+    snapshot_ts = pd.Timestamp(snapshot_date)
+    if pd.isna(snapshot_ts):
+        return pd.DataFrame(columns=CANONICAL_THEME_DAILY_COLUMNS)
+
+    raw = _load_ranking_constituents_for_trading_date(
+        conn,
+        snapshot_ts.date(),
+        market_data_source=market_data_source,
+    )
+    if raw.empty:
+        return pd.DataFrame(columns=CANONICAL_THEME_DAILY_COLUMNS)
+
+    represented_ticker_count = int(raw["price"].notna().sum()) if "price" in raw.columns else 0
+    run_id = _insert_canonical_history_repair_run(
+        conn,
+        snapshot_date=snapshot_ts.date(),
+        market_data_source=market_data_source,
+        ticker_count=represented_ticker_count,
+        success_count=represented_ticker_count,
+    )
+    raw = raw.copy()
+    raw["run_id"] = int(run_id)
+    metrics = _build_current_ranking_metrics(raw)
+    if metrics.empty:
+        return pd.DataFrame(columns=CANONICAL_THEME_DAILY_COLUMNS)
+
+    canonical = metrics.copy()
+    canonical["snapshot_date"] = snapshot_ts.date()
+    canonical["snapshot_time"] = datetime.combine(snapshot_ts.date(), time(hour=17, minute=0, second=0))
+    canonical["run_id"] = int(run_id)
+    canonical["snapshot_source"] = "synthetic_backfill"
+    canonical["extract_session"] = extract_session
+    canonical["is_canonical_daily"] = bool(is_canonical_daily)
+    canonical["canonical_reason"] = canonical_reason
+
+    ranked = _finalize_current_rankings(
+        canonical,
+        score_col="standardized_composite_score",
+        eligible_count_col="eligible_standardized_count",
+    )
+    ranked = ranked.copy()
+    ranked["canonical_rank"] = range(1, len(ranked) + 1)
+    canonical["canonical_rank"] = canonical["theme_id"].map(ranked.set_index("theme_id")["canonical_rank"])
+    return canonical[CANONICAL_THEME_DAILY_COLUMNS].copy()
+
+
+def persist_canonical_theme_daily_snapshot_for_trading_date(
+    conn,
+    snapshot_date: date | str,
+    *,
+    market_data_source: str = "live",
+    extract_session: str = "ticker_history_repair",
+    canonical_reason: str = "missing_full_theme_run_history_repair",
+    is_canonical_daily: bool = True,
+    overwrite_existing: bool = False,
+) -> dict[str, int | str]:
+    snapshot_ts = pd.Timestamp(snapshot_date)
+    if pd.isna(snapshot_ts):
+        return {"run_id": 0, "snapshot_date": "", "row_count": 0, "inserted_count": 0, "status": "invalid_date"}
+
+    snapshot_date_value = snapshot_ts.date()
+    existing_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM canonical_theme_daily_snapshots WHERE snapshot_date = ?",
+            [snapshot_date_value],
+        ).fetchone()[0]
+    )
+    if existing_count > 0 and not overwrite_existing:
+        return {
+            "run_id": 0,
+            "snapshot_date": str(snapshot_date_value),
+            "row_count": existing_count,
+            "inserted_count": 0,
+            "status": "existing_snapshot_date",
+        }
+
+    canonical_rows = build_canonical_theme_daily_rows_for_trading_date(
+        conn,
+        snapshot_date_value,
+        market_data_source=market_data_source,
+        extract_session=extract_session,
+        canonical_reason=canonical_reason,
+        is_canonical_daily=is_canonical_daily,
+    )
+    if canonical_rows.empty:
+        return {
+            "run_id": 0,
+            "snapshot_date": str(snapshot_date_value),
+            "row_count": 0,
+            "inserted_count": 0,
+            "status": "no_history_rows_for_date",
+        }
+
+    if overwrite_existing:
+        conn.execute(
+            "DELETE FROM canonical_theme_daily_snapshots WHERE snapshot_date = ?",
+            [snapshot_date_value],
+        )
+
+    incoming = canonical_rows.copy()
+    conn.register("canonical_theme_daily_incoming", incoming)
+    inserted = conn.execute(
+        """
+        INSERT INTO canonical_theme_daily_snapshots(
+            snapshot_date, snapshot_time, run_id, theme_id, theme, category, is_active,
+            snapshot_source, extract_session, is_canonical_daily, canonical_reason,
+            ticker_count, eligible_ticker_count, eligible_1w_count, eligible_1m_count,
+            eligible_3m_count, eligible_composite_count, eligible_standardized_count,
+            eligible_momentum_count, eligible_breadth_pct, avg_1w, avg_1m, avg_3m,
+            positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+            legacy_composite_score, standardized_base_strength_score, standardized_participation_ratio,
+            standardized_participation_factor, standardized_guardrail_factor,
+            standardized_recovery_factor, standardized_composite_score,
+            current_momentum_raw_score, current_momentum_quality_factor,
+            current_momentum_score, canonical_rank
+        )
+        SELECT
+            i.snapshot_date, i.snapshot_time, i.run_id, i.theme_id, i.theme, i.category, i.is_active,
+            i.snapshot_source, i.extract_session, i.is_canonical_daily, i.canonical_reason,
+            i.ticker_count, i.eligible_ticker_count, i.eligible_1w_count, i.eligible_1m_count,
+            i.eligible_3m_count, i.eligible_composite_count, i.eligible_standardized_count,
+            i.eligible_momentum_count, i.eligible_breadth_pct, i.avg_1w, i.avg_1m, i.avg_3m,
+            i.positive_1w_breadth_pct, i.positive_1m_breadth_pct, i.positive_3m_breadth_pct,
+            i.legacy_composite_score, i.standardized_base_strength_score, i.standardized_participation_ratio,
+            i.standardized_participation_factor, i.standardized_guardrail_factor,
+            i.standardized_recovery_factor, i.standardized_composite_score,
+            i.current_momentum_raw_score, i.current_momentum_quality_factor,
+            i.current_momentum_score, i.canonical_rank
+        FROM canonical_theme_daily_incoming i
+        WHERE ?
+           OR NOT EXISTS (
+                SELECT 1
+                FROM canonical_theme_daily_snapshots existing
+                WHERE existing.snapshot_date = i.snapshot_date
+                  AND existing.theme_id = i.theme_id
+           )
+        RETURNING run_id
+        """,
+        [bool(overwrite_existing)],
+    ).fetchall()
+    conn.unregister("canonical_theme_daily_incoming")
+    run_id = int(canonical_rows["run_id"].iloc[0]) if not canonical_rows.empty else 0
+    return {
+        "run_id": run_id,
+        "snapshot_date": str(snapshot_date_value),
+        "row_count": int(len(canonical_rows)),
+        "inserted_count": int(len(inserted)),
+        "status": "history_repaired",
+    }
+
+
+def build_canonical_theme_daily_rows_for_run(
+    conn,
+    run_id: int,
+    *,
+    extract_session: str,
+    canonical_reason: str,
+    is_canonical_daily: bool = True,
+) -> pd.DataFrame:
+    run_meta = conn.execute(
+        """
+        SELECT finished_at, provider, status
+        FROM refresh_runs
+        WHERE run_id = ?
+        """,
+        [run_id],
+    ).fetchone()
+    if run_meta is None:
+        raise ValueError(f"Unknown refresh run_id: {run_id}")
+
+    snapshot_time, provider, status = run_meta
+    if status not in {"success", "partial"}:
+        raise ValueError(f"Refresh run {run_id} is not complete enough for canonical persistence: status={status}")
+    if snapshot_time is None:
+        raise ValueError(f"Refresh run {run_id} has no finished_at timestamp")
+
+    metrics = compute_current_ranking_metrics_for_run(conn, run_id)
+    if metrics.empty:
+        return pd.DataFrame(columns=CANONICAL_THEME_DAILY_COLUMNS)
+
+    canonical = metrics.copy()
+    snapshot_timestamp = pd.Timestamp(snapshot_time)
+    canonical["snapshot_date"] = snapshot_timestamp.date()
+    canonical["snapshot_time"] = snapshot_timestamp
+    canonical["run_id"] = int(run_id)
+    canonical["snapshot_source"] = provider if provider in {"live", "mock", "synthetic_backfill"} else "live"
+    canonical["extract_session"] = extract_session
+    canonical["is_canonical_daily"] = bool(is_canonical_daily)
+    canonical["canonical_reason"] = canonical_reason
+
+    ranked = _finalize_current_rankings(
+        canonical,
+        score_col="standardized_composite_score",
+        eligible_count_col="eligible_standardized_count",
+    )
+    ranked = ranked.copy()
+    ranked["canonical_rank"] = range(1, len(ranked) + 1)
+    canonical["canonical_rank"] = canonical["theme_id"].map(ranked.set_index("theme_id")["canonical_rank"])
+    return canonical[CANONICAL_THEME_DAILY_COLUMNS].copy()
+
+
+def persist_canonical_theme_daily_snapshot_for_run(
+    conn,
+    run_id: int,
+    *,
+    extract_session: str = "after_hours_official",
+    canonical_reason: str = "official_daily_refresh",
+    is_canonical_daily: bool = True,
+    overwrite_existing: bool = False,
+) -> dict[str, int | str]:
+    # Current assumption: "official daily" is asserted by the caller via
+    # extract_session/canonical_reason. We do not yet infer this from an
+    # upstream run-classification table, and we do not let later non-canonical
+    # refreshes overwrite an existing canonical theme/date lock.
+    canonical_rows = build_canonical_theme_daily_rows_for_run(
+        conn,
+        run_id,
+        extract_session=extract_session,
+        canonical_reason=canonical_reason,
+        is_canonical_daily=is_canonical_daily,
+    )
+    if canonical_rows.empty:
+        return {"run_id": int(run_id), "snapshot_date": "", "row_count": 0, "inserted_count": 0}
+
+    snapshot_date = canonical_rows["snapshot_date"].iloc[0]
+    if overwrite_existing:
+        conn.execute(
+            "DELETE FROM canonical_theme_daily_snapshots WHERE snapshot_date = ?",
+            [snapshot_date],
+        )
+
+    incoming = canonical_rows.copy()
+    conn.register("canonical_theme_daily_incoming", incoming)
+    inserted = conn.execute(
+        """
+        INSERT INTO canonical_theme_daily_snapshots(
+            snapshot_date, snapshot_time, run_id, theme_id, theme, category, is_active,
+            snapshot_source, extract_session, is_canonical_daily, canonical_reason,
+            ticker_count, eligible_ticker_count, eligible_1w_count, eligible_1m_count,
+            eligible_3m_count, eligible_composite_count, eligible_standardized_count,
+            eligible_momentum_count, eligible_breadth_pct, avg_1w, avg_1m, avg_3m,
+            positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+            legacy_composite_score, standardized_base_strength_score, standardized_participation_ratio,
+            standardized_participation_factor, standardized_guardrail_factor,
+            standardized_recovery_factor, standardized_composite_score,
+            current_momentum_raw_score, current_momentum_quality_factor,
+            current_momentum_score, canonical_rank
+        )
+        SELECT
+            i.snapshot_date, i.snapshot_time, i.run_id, i.theme_id, i.theme, i.category, i.is_active,
+            i.snapshot_source, i.extract_session, i.is_canonical_daily, i.canonical_reason,
+            i.ticker_count, i.eligible_ticker_count, i.eligible_1w_count, i.eligible_1m_count,
+            i.eligible_3m_count, i.eligible_composite_count, i.eligible_standardized_count,
+            i.eligible_momentum_count, i.eligible_breadth_pct, i.avg_1w, i.avg_1m, i.avg_3m,
+            i.positive_1w_breadth_pct, i.positive_1m_breadth_pct, i.positive_3m_breadth_pct,
+            i.legacy_composite_score, i.standardized_base_strength_score, i.standardized_participation_ratio,
+            i.standardized_participation_factor, i.standardized_guardrail_factor,
+            i.standardized_recovery_factor, i.standardized_composite_score,
+            i.current_momentum_raw_score, i.current_momentum_quality_factor,
+            i.current_momentum_score, i.canonical_rank
+        FROM canonical_theme_daily_incoming i
+        WHERE ?
+           OR NOT EXISTS (
+                SELECT 1
+                FROM canonical_theme_daily_snapshots existing
+                WHERE existing.snapshot_date = i.snapshot_date
+                  AND existing.theme_id = i.theme_id
+           )
+        RETURNING theme_id
+        """,
+        [bool(overwrite_existing)],
+    ).fetchall()
+    conn.unregister("canonical_theme_daily_incoming")
+    return {
+        "run_id": int(run_id),
+        "snapshot_date": str(snapshot_date),
+        "row_count": int(len(canonical_rows)),
+        "inserted_count": int(len(inserted)),
+    }
+
+
+def canonical_backfill_candidate_runs_by_date(
+    conn,
+    *,
+    recent_trading_day_limit: int = 30,
+    provider: str = "live",
+) -> pd.DataFrame:
+    limit_days = max(int(recent_trading_day_limit), 1)
+    target_dates = conn.execute(
+        """
+        WITH recent_trading_dates AS (
+            SELECT DISTINCT trading_date
+            FROM ticker_daily_history
+            WHERE market_data_source = ?
+            ORDER BY trading_date DESC
+            LIMIT ?
+        )
+        SELECT trading_date
+        FROM recent_trading_dates
+        ORDER BY trading_date ASC
+        """,
+        [provider, limit_days],
+    ).df()
+    if target_dates.empty:
+        return pd.DataFrame(
+            columns=[
+                "snapshot_date",
+                "run_id",
+                "provider",
+                "status",
+                "scope_type",
+                "finished_at",
+                "ticker_count",
+                "success_count",
+                "selection_reason",
+                "selection_status",
+            ]
+        )
+
+    candidates = conn.execute(
+        """
+        WITH target_dates AS (
+            SELECT trading_date AS snapshot_date
+            FROM (
+                SELECT DISTINCT trading_date
+                FROM ticker_daily_history
+                WHERE market_data_source = ?
+                ORDER BY trading_date DESC
+                LIMIT ?
+            )
+        ),
+        candidate_runs AS (
+            SELECT
+                CAST(r.finished_at AS DATE) AS snapshot_date,
+                r.run_id,
+                r.provider,
+                r.status,
+                r.scope_type,
+                r.finished_at,
+                r.ticker_count,
+                r.success_count,
+                CASE
+                    WHEN r.scope_type = 'scheduled_eod' THEN 0
+                    WHEN r.scope_type = 'active_themes' THEN 1
+                    ELSE 9
+                END AS scope_priority
+            FROM refresh_runs r
+            JOIN target_dates d ON d.snapshot_date = CAST(r.finished_at AS DATE)
+            WHERE r.status IN ('success', 'partial')
+              AND r.finished_at IS NOT NULL
+              AND r.provider = ?
+              AND r.scope_type IN ('scheduled_eod', 'active_themes')
+        ),
+        ranked AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY snapshot_date
+                    ORDER BY scope_priority ASC, success_count DESC, ticker_count DESC, finished_at DESC, run_id DESC
+                ) AS winner_rank
+            FROM candidate_runs
+        )
+        SELECT
+            d.snapshot_date,
+            r.run_id,
+            r.provider,
+            r.status,
+            r.scope_type,
+            r.finished_at,
+            r.ticker_count,
+            r.success_count,
+            CASE
+                WHEN r.run_id IS NULL THEN 'no_completed_full_theme_run_for_trading_date'
+                WHEN r.scope_type = 'scheduled_eod' THEN 'scheduled_eod_preferred'
+                ELSE 'active_themes_fallback'
+            END AS selection_reason,
+            CASE
+                WHEN r.run_id IS NULL THEN 'missing_run'
+                ELSE 'selected'
+            END AS selection_status
+        FROM target_dates d
+        LEFT JOIN ranked r
+          ON r.snapshot_date = d.snapshot_date
+         AND r.winner_rank = 1
+        ORDER BY d.snapshot_date ASC
+        """,
+        [provider, limit_days, provider],
+    ).df()
+    return candidates
+
+
+def backfill_canonical_theme_daily_snapshots_for_recent_trading_days(
+    conn,
+    *,
+    recent_trading_day_limit: int = 30,
+    provider: str = "live",
+    overwrite_existing: bool = False,
+) -> dict[str, object]:
+    before = conn.execute(
+        """
+        SELECT
+            COUNT(DISTINCT snapshot_date) AS date_count,
+            COUNT(*) AS row_count,
+            MIN(snapshot_date) AS min_date,
+            MAX(snapshot_date) AS max_date
+        FROM canonical_theme_daily_snapshots
+        """
+    ).df().iloc[0].to_dict()
+
+    candidates = canonical_backfill_candidate_runs_by_date(
+        conn,
+        recent_trading_day_limit=recent_trading_day_limit,
+        provider=provider,
+    )
+    if candidates.empty:
+        return {
+            "before": before,
+            "after": before,
+            "results": [],
+            "missing_dates": [],
+            "selected_run_dates": 0,
+        }
+
+    results: list[dict[str, object]] = []
+    missing_dates: list[dict[str, object]] = []
+    for row in candidates.itertuples(index=False):
+        snapshot_date = row.snapshot_date
+        run_id = row.run_id
+        if run_id is None or pd.isna(run_id):
+            repair_result = persist_canonical_theme_daily_snapshot_for_trading_date(
+                conn,
+                snapshot_date,
+                market_data_source=provider,
+                extract_session="ticker_history_repair",
+                canonical_reason="missing_full_theme_run_history_repair",
+                is_canonical_daily=True,
+                overwrite_existing=overwrite_existing,
+            )
+            if int(repair_result.get("inserted_count", 0) or 0) > 0:
+                repair_result.update(
+                    {
+                        "selection_reason": "ticker_history_repair_fallback",
+                        "scope_type": "canonical_history_repair",
+                        "finished_at": None,
+                        "ticker_count": 0,
+                        "success_count": 0,
+                    }
+                )
+                results.append(repair_result)
+                continue
+            missing_dates.append(
+                {
+                    "snapshot_date": str(snapshot_date),
+                    "reason": str(repair_result.get("status") or row.selection_reason),
+                }
+            )
+            continue
+        persist_result = persist_canonical_theme_daily_snapshot_for_run(
+            conn,
+            int(run_id),
+            extract_session="backfill_selected_run",
+            canonical_reason="recent_trading_day_backfill",
+            is_canonical_daily=True,
+            overwrite_existing=overwrite_existing,
+        )
+        persist_result.update(
+            {
+                "selection_reason": str(row.selection_reason),
+                "scope_type": str(row.scope_type),
+                "finished_at": row.finished_at,
+                "ticker_count": int(row.ticker_count or 0),
+                "success_count": int(row.success_count or 0),
+            }
+        )
+        results.append(persist_result)
+
+    after = conn.execute(
+        """
+        SELECT
+            COUNT(DISTINCT snapshot_date) AS date_count,
+            COUNT(*) AS row_count,
+            MIN(snapshot_date) AS min_date,
+            MAX(snapshot_date) AS max_date
+        FROM canonical_theme_daily_snapshots
+        """
+    ).df().iloc[0].to_dict()
+    return {
+        "before": before,
+        "after": after,
+        "results": results,
+        "missing_dates": missing_dates,
+        "selected_run_dates": int(len(results)),
+    }
 
 
 def _safe_numeric(series: pd.Series) -> pd.Series:

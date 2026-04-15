@@ -20,8 +20,10 @@ from src.leaderboard_utils import (
     build_category_theme_breakdown,
     build_current_leadership_table,
     build_current_performance_table,
+    build_current_rank_movers_table,
     build_window_leaderboard,
     disambiguate_theme_labels,
+    format_rank_history_delta,
     format_top_ticker_leaders,
     historical_concentration_label,
 )
@@ -1044,6 +1046,48 @@ class TestSuggestionsPageState(unittest.TestCase):
         self.assertEqual(out.iloc[2]["leadership_quality"], "Narrow leader")
         self.assertEqual(out.iloc[3]["leadership_quality"], "Broad leader")
         self.assertEqual(int(out.iloc[0]["eligible_contributor_count"]), 6)
+
+    def test_rank_history_delta_helper_formats_compact_table_text(self):
+        self.assertEqual(
+            format_rank_history_delta([3.0, 2.0, 1.0], lookback_points=10),
+            "10d: +2",
+        )
+        self.assertEqual(
+            format_rank_history_delta([5.0, 5.0], lookback_points=10),
+            "10d: 0",
+        )
+        self.assertEqual(
+            format_rank_history_delta([6.0, 9.0], lookback_points=10),
+            "10d: -3",
+        )
+        self.assertEqual(
+            format_rank_history_delta(None, lookback_points=10),
+            "-",
+        )
+
+    def test_build_current_rank_movers_table_uses_current_rankable_universe(self):
+        rankings = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "A", "category": "Tech", "composite_score": 15.0},
+                {"theme_id": 2, "theme": "B", "category": "Tech", "composite_score": 14.0},
+                {"theme_id": 3, "theme": "C", "category": "Macro", "composite_score": 13.0},
+            ]
+        )
+        rank_history = pd.DataFrame(
+            [
+                {"theme_id": 1, "rank_history": [3.0, 1.0]},
+                {"theme_id": 2, "rank_history": [1.0, 2.0]},
+                {"theme_id": 3, "rank_history": [2.0, 3.0]},
+            ]
+        )
+
+        risers = build_current_rank_movers_table(rankings, rank_history, direction="riser", top_k=5)
+        fallers = build_current_rank_movers_table(rankings, rank_history, direction="faller", top_k=5)
+
+        self.assertEqual(risers["theme"].tolist(), ["A"])
+        self.assertEqual(risers.iloc[0]["move"], "3 → 1 (+2)")
+        self.assertEqual(fallers["theme"].tolist(), ["B", "C"])
+        self.assertEqual(fallers.iloc[0]["move"], "1 → 2 (-1)")
 
     def test_current_performance_table_uses_metric_specific_eligible_counts(self):
         rankings = pd.DataFrame(

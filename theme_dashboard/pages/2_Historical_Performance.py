@@ -8,17 +8,13 @@ from src.leaderboard_utils import (
     current_leadership_quality_label,
     disambiguate_theme_labels,
     format_top_ticker_leaders,
-    historical_concentration_label,
 )
 from src.queries import (
     baseline_status,
-    historical_theme_boundary_debug,
-    historical_theme_movement_row_audit,
+    canonical_theme_snapshot_counts,
     theme_ticker_metrics,
-    theme_snapshot_history,
 )
 from src.rankings import ticker_standardized_composite_score
-from src.rotation_engine import compute_theme_rotation
 from src.streamlit_utils import (
     clear_current_market_view_caches,
     db_cache_token,
@@ -406,7 +402,10 @@ def _attach_grid_top_tickers(grid: pd.DataFrame, *, top_k: int = 4) -> pd.DataFr
 st.set_page_config(page_title="Historical Performance", layout="wide")
 st.title("Historical Performance Research Grid")
 st.caption("Research workflow: audit current, historical, and ATR-companion theme behavior in one dense grid.")
-st.caption("Themes remains the curated operating page. Use this page as the cross-theme experimentation and movement-analysis workbench.")
+st.caption(
+    "Themes remains the curated operating page. Use this page as the canonical-primary historical comparison workbench; "
+    "legacy lineage/audit helpers remain separate and are not the source of truth for the main rank interpretation here."
+)
 reset_perf_timings("historical_performance")
 
 try:
@@ -426,13 +425,17 @@ lookback_days = 30
 analysis_top_n = max(20, len(themes))
 momentum = load_theme_momentum_cached(db_token, int(lookback_days), top_n=analysis_top_n)
 with get_conn() as conn:
+    canonical_counts = canonical_theme_snapshot_counts(conn)
+    canonical_count_row = canonical_counts.iloc[0] if not canonical_counts.empty else {}
+    total_canonical_snapshot_dates = int((canonical_count_row.get("canonical_snapshot_dates") if canonical_count_row is not None else 0) or 0)
+    latest_canonical_snapshot_date = canonical_count_row.get("latest_canonical_snapshot_date") if canonical_count_row is not None else None
     snapshot_count_row = conn.execute("SELECT COUNT(DISTINCT snapshot_time) FROM theme_snapshots").fetchone()
     total_theme_snapshot_sets = int((snapshot_count_row[0] if snapshot_count_row else 0) or 0)
 
 history = momentum["history"]
 if history.empty:
     st.info(
-        f"No snapshots available in the default 30-day research window. Theme snapshot sets currently available: {total_theme_snapshot_sets}. "
+        f"No snapshots available in the default 30-day research window. Canonical daily dates currently available: {total_canonical_snapshot_dates}; legacy theme snapshot sets currently available: {total_theme_snapshot_sets}. "
         "At least 2 boundary snapshots are required for comparisons. Run another refresh if history is still being seeded."
     )
     st.stop()
@@ -441,18 +444,35 @@ snapshot_count = int(history["snapshot_time"].nunique())
 if snapshot_count < 2:
     st.warning(
         f"Not enough historical snapshots for the default 30-day research window (have {snapshot_count}, need at least 2 boundary snapshots). "
-        f"Total theme snapshot sets currently stored: {total_theme_snapshot_sets}. Run another refresh if appropriate."
+        f"Canonical daily dates currently stored: {total_canonical_snapshot_dates}; legacy theme snapshot sets currently stored: {total_theme_snapshot_sets}. Run another refresh if appropriate."
     )
     st.stop()
 
 summary = momentum["window_summary"]
 window_meta = momentum.get("meta", {})
+window_source_preference = str(momentum.get("source_preference") or "unknown")
+window_provenance_mix = str(window_meta.get("provenance_mix") or "unknown")
+using_canonical_primary = "canonical_daily" in window_provenance_mix
 
 master_grid = _build_master_research_grid(themes, summary, history, current_snapshot)
 master_grid = _attach_grid_top_tickers(master_grid, top_k=4)
 st.subheader("Master Theme Research Grid")
 st.caption(
-    "Primary research surface: one row per theme combining current ranking context, ATR companion comparison, and historical start-to-end movement."
+    "Primary research surface: one row per theme combining current ranking context, ATR companion comparison, and historical start-to-end movement. "
+    "This workflow now prefers canonical daily standardized history when available."
+)
+if using_canonical_primary:
+    st.caption(
+        f"Primary window source: `canonical_daily` | latest canonical date: `{latest_canonical_snapshot_date or '-'}` | source label: `{window_source_preference}`."
+    )
+else:
+    st.caption(
+        f"Primary window source fallback: `{window_provenance_mix}` | source label: `{window_source_preference}`. "
+        "Canonical daily coverage was not available for this window, so legacy movement history was used."
+    )
+st.caption(
+    "Legacy lineage/debug tools are intentionally outside the main workflow. Treat the grid and summary tables above as the primary canonical view; "
+    "use legacy audit helpers only when you need to inspect historical winner selection or provenance edge cases."
 )
 fg1, fg2, fg3 = st.columns(3)
 with fg1:

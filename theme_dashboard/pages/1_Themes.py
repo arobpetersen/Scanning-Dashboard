@@ -13,13 +13,26 @@ from src.leaderboard_utils import (
     build_category_theme_breakdown,
     build_current_leadership_table,
     build_current_performance_table,
+    build_current_rank_movers_table,
     build_window_leaderboard,
     current_leadership_quality_label,
     disambiguate_theme_labels,
     format_top_ticker_leaders,
 )
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
-from src.queries import baseline_status, ticker_history_last_n_snapshots, ticker_history_last_n_trading_days, ticker_lookup_memberships, ticker_lookup_summary, theme_snapshot_history, theme_ticker_metrics
+from src.queries import (
+    baseline_status,
+    canonical_theme_leadership_rank_history,
+    canonical_theme_leadership_rank_history_long,
+    theme_leadership_rank_history,
+    theme_leadership_rank_history_long,
+    theme_snapshot_history,
+    theme_ticker_metrics,
+    ticker_history_last_n_snapshots,
+    ticker_history_last_n_trading_days,
+    ticker_lookup_memberships,
+    ticker_lookup_summary,
+)
 from src.rankings import (
     CURRENT_MOMENTUM_WEIGHTS,
     current_momentum_quality_factor,
@@ -83,6 +96,8 @@ DAILY_HISTORICAL_APPEND_STALE_MINUTES = 45
 TICKER_COMPOSITE_CHART_TARGET_DAILY_POINTS = 20
 TICKER_COMPOSITE_CHART_TRADING_DAY_LOOKBACK = 140
 TICKER_COMPOSITE_CHART_RAW_SNAPSHOT_LIMIT = 160
+CURRENT_LEADERSHIP_TREND_POINTS = 10
+CURRENT_RANK_MOVER_LOOKBACK_POINTS = 5
 try:
     init_db()
     with get_conn() as conn:
@@ -526,6 +541,161 @@ def _attach_current_leadership_tickers(leadership_df: pd.DataFrame) -> pd.DataFr
     return out
 
 
+def _render_current_leadership_rank_study(
+    leadership_df: pd.DataFrame,
+    label_by_id: dict[int, str],
+    *,
+    lookback_points: int = CURRENT_LEADERSHIP_TREND_POINTS,
+) -> None:
+    if leadership_df.empty or "theme_id" not in leadership_df.columns:
+        return
+
+    with st.expander("Leadership Trend Study", expanded=False):
+        st.caption(
+            "Overlay of the currently visible leadership themes using true recent historical rank. Lower rank is better, and rank 1 is shown at the top. Themes may appear well outside the current visible cohort in earlier days."
+        )
+        top_n_choice = st.segmented_control(
+            "Study depth",
+            options=[3, 5, 10],
+            default=5,
+            format_func=lambda value: f"Top {int(value)}",
+            key="current_leadership_trend_study_top_n",
+        )
+        study_top_n = int(top_n_choice or 5)
+        study_df = leadership_df.head(study_top_n).copy()
+        theme_ids = study_df["theme_id"].dropna().astype(int).tolist()
+        with get_conn() as conn:
+            rank_history_long = canonical_theme_leadership_rank_history_long(
+                conn,
+                theme_ids,
+                lookback_points=int(lookback_points),
+            )
+
+        if rank_history_long.empty:
+            st.info("Not enough recent canonical daily rank data is available for the visible leadership themes.")
+            return
+
+        chart_df = rank_history_long.copy()
+        chart_df["theme_label"] = chart_df["theme_id"].map(
+            lambda theme_id: label_by_id.get(int(theme_id), str(theme_id))
+        )
+        chart_df["snapshot_date"] = pd.to_datetime(chart_df["snapshot_date"], errors="coerce")
+        chart_df = chart_df.dropna(subset=["snapshot_date", "rank", "theme_label"])
+        if chart_df.empty:
+            st.info("Not enough recent canonical daily rank data is available for the visible leadership themes.")
+            return
+
+        chart_df = chart_df.sort_values(["snapshot_date", "rank", "theme_label"]).copy()
+        date_order = (
+            chart_df["snapshot_date"]
+            .dropna()
+            .drop_duplicates()
+            .sort_values()
+            .dt.strftime("%m/%d")
+            .tolist()
+        )
+        chart_df["snapshot_label"] = chart_df["snapshot_date"].dt.strftime("%m/%d")
+        rank_max = float(pd.to_numeric(chart_df["rank"], errors="coerce").dropna().max())
+        chart = (
+            alt.Chart(chart_df)
+            .mark_line(point=alt.OverlayMarkDef(size=45, filled=True))
+            .encode(
+                x=alt.X(
+                    "snapshot_label:O",
+                    sort=date_order,
+                    axis=alt.Axis(
+                        title=None,
+                        labelAngle=0,
+                        labelOverlap=False,
+                    ),
+                ),
+                y=alt.Y(
+                    "rank:Q",
+                    title="Historical rank",
+                    scale=alt.Scale(domain=[1, max(rank_max, 1.0)], reverse=True),
+                    axis=alt.Axis(tickMinStep=1),
+                ),
+                color=alt.Color("theme_label:N", title="Theme"),
+                order=alt.Order("snapshot_date:T"),
+                tooltip=[
+                    alt.Tooltip("theme_label:N", title="Theme"),
+                    alt.Tooltip("yearmonthdate(snapshot_date):T", title="Date"),
+                    alt.Tooltip("rank:Q", title="Rank", format=".0f"),
+                ],
+            )
+            .interactive()
+        )
+        st.altair_chart(chart, width="stretch")
+        latest_chart_date = pd.to_datetime(chart_df["snapshot_date"], errors="coerce").max()
+        st.caption("Scroll to zoom. Drag to pan. Double-click to reset.")
+        st.caption(
+            f"Showing the current top `{study_top_n}` leadership themes across the last `{int(lookback_points)}` available canonical daily dates from standardized theme snapshots. Latest chart date: `{short_timestamp(latest_chart_date) or '-'}`."
+        )
+
+
+def _render_current_rank_movers(
+    current_rankings: pd.DataFrame,
+    label_by_id: dict[int, str],
+    *,
+    lookback_points: int = CURRENT_RANK_MOVER_LOOKBACK_POINTS,
+) -> None:
+    if current_rankings.empty or "theme_id" not in current_rankings.columns:
+        return
+
+    theme_ids = current_rankings["theme_id"].dropna().astype(int).tolist()
+    with get_conn() as conn:
+        rank_history = canonical_theme_leadership_rank_history(
+            conn,
+            theme_ids,
+            lookback_points=int(lookback_points),
+        )
+
+    risers = build_current_rank_movers_table(current_rankings, rank_history, direction="riser", top_k=8)
+    fallers = build_current_rank_movers_table(current_rankings, rank_history, direction="faller", top_k=8)
+    if risers.empty and fallers.empty:
+        return
+
+    st.markdown("**Fast Risers / Fast Fallers**")
+    st.caption(
+        f"These tables use canonical daily standardized ranks from the same Themes ranking model. `move` compares the current rank against the earliest point in the last `{int(lookback_points)}` available canonical daily dates."
+    )
+    col1, col2 = st.columns(2)
+
+    def _render_mover_table(title: str, mover_df: pd.DataFrame, key: str) -> None:
+        st.markdown(f"**{title}**")
+        if mover_df.empty:
+            st.info(f"No {title.lower()} for the current 5-day window.")
+            return
+        display_df = _display_theme_table(mover_df)
+        visible_df = display_df[
+            ["current_rank", "theme", "category", "move", "composite_score"]
+        ].rename(
+            columns={
+                "current_rank": "rank",
+                "composite_score": "composite",
+            }
+        )
+        render_dataframe(
+            key,
+            visible_df,
+            width="stretch",
+            hide_index=True,
+            column_config=_current_table_column_config(
+                list(visible_df.columns),
+                text_columns={"move"},
+            ) | {
+                "theme": st.column_config.TextColumn("theme", width="small"),
+                "category": st.column_config.TextColumn("category", width="small"),
+                "move": st.column_config.TextColumn("move", width="small"),
+            },
+        )
+
+    with col1:
+        _render_mover_table("Fast Risers", risers, "fast_risers_table")
+    with col2:
+        _render_mover_table("Fast Fallers", fallers, "fast_fallers_table")
+
+
 def _build_ticker_composite_history_chart_df(
     conn,
     ticker_df: pd.DataFrame,
@@ -959,6 +1129,7 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, sh
         if should_apply_selection_token(selection_token, st.session_state.get(handled_key)):
             _set_theme_selection(picked_theme_id, picked_label, "current_leadership")
             st.session_state[handled_key] = selection_token
+    _render_current_leadership_rank_study(leadership_df, label_by_id)
 
 
 def _render_current_performance(
@@ -1395,7 +1566,7 @@ with explore_tab:
         )
     st.caption(
         "Current Market Leadership and Current Top Themes use the latest preferred-source ticker snapshot shown above. "
-        "Theme Movement tables use resolved historical window ends shown above, which can differ from the current snapshot clock."
+        "Theme Movement tables now prefer canonical daily standardized snapshot windows shown above, which can differ from the current snapshot clock."
     )
     st.caption(
         "Default Themes-page `composite_score` now uses the standardized baseline: 30% avg_1w, 70% avg_1m, participation-aware, and 3M-skeptical without weighting 3M directly."
@@ -1544,6 +1715,7 @@ with explore_tab:
             show_daily_deltas=show_leadership_deltas,
             prior_lookup=current_delta_lookup,
         )
+        _render_current_rank_movers(current_rankings, label_by_id)
         _render_standardized_composite_validation(standardized_rankings, standardized_comparison)
 
     st.divider()
