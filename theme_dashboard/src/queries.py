@@ -926,7 +926,7 @@ def _historical_theme_boundary_debug_core(conn, theme_id: int, lookback_days: in
     )
     candidate_rows["suppression_honored"] = candidate_rows["provenance_class"].map(
         {
-            "captured": "unknown/legacy row",
+            "captured": "captured snapshot (suppression unknown)",
             "ticker_history_derived": "yes",
             "reconstructed": "yes",
         }
@@ -958,7 +958,7 @@ def _historical_theme_boundary_debug_core(conn, theme_id: int, lookback_days: in
                 ),
                 "suppression_honored_in_winner": (
                     {
-                        "captured": "unknown/legacy row",
+                        "captured": "captured snapshot (suppression unknown)",
                         "ticker_history_derived": "yes",
                         "reconstructed": "yes",
                     }.get(winner_row["winner_provenance_class"], "unknown")
@@ -1791,6 +1791,336 @@ def canonical_theme_snapshot_counts(conn) -> pd.DataFrame:
         FROM canonical_theme_daily_snapshots
         """
     ).df()
+
+
+def canonical_daily_window_status(conn) -> pd.DataFrame:
+    empty = pd.DataFrame(
+        [
+            {
+                "latest_raw_canonical_date": None,
+                "latest_ranked_canonical_date": None,
+                "raw_vs_ranked_date_differs": False,
+            }
+        ]
+    )
+
+    def _load(active_conn=conn) -> pd.DataFrame:
+        if not table_exists(active_conn, "canonical_theme_daily_snapshots"):
+            return empty.copy()
+
+        dates = active_conn.execute(
+            """
+            SELECT
+                MAX(snapshot_date) AS latest_raw_canonical_date,
+                MAX(CASE WHEN canonical_rank IS NOT NULL THEN snapshot_date ELSE NULL END) AS latest_ranked_canonical_date
+            FROM canonical_theme_daily_snapshots
+            """
+        ).df()
+        if dates.empty:
+            return empty.copy()
+
+        row = dates.iloc[0]
+        latest_raw = row.get("latest_raw_canonical_date")
+        latest_ranked = row.get("latest_ranked_canonical_date")
+        return pd.DataFrame(
+            [
+                {
+                    "latest_raw_canonical_date": latest_raw,
+                    "latest_ranked_canonical_date": latest_ranked,
+                    "raw_vs_ranked_date_differs": bool(
+                        latest_raw is not None and latest_ranked is not None and str(latest_raw) != str(latest_ranked)
+                    ),
+                }
+            ]
+        )
+
+    return _with_bootstrap_recovery(_load)
+
+
+def canonical_daily_recent_coverage(conn, trading_day_limit: int = 30) -> pd.DataFrame:
+    empty = pd.DataFrame(
+        columns=[
+            "expected_trading_date",
+            "market_data_source",
+            "has_canonical_coverage",
+            "canonical_row_count",
+            "ranked_canonical_row_count",
+            "repair_row_count",
+            "run_based_row_count",
+            "coverage_origin",
+            "snapshot_source_summary",
+            "canonical_reason_summary",
+        ]
+    )
+
+    def _load(active_conn=conn) -> pd.DataFrame:
+        preferred_source = _preferred_ticker_history_source(active_conn)
+        if not preferred_source or not table_exists(active_conn, "ticker_daily_history"):
+            return empty.copy()
+
+        limit_days = max(int(trading_day_limit), 1)
+        coverage = active_conn.execute(
+            """
+            WITH expected_dates AS (
+                SELECT trading_date AS expected_trading_date
+                FROM (
+                    SELECT DISTINCT trading_date
+                    FROM ticker_daily_history
+                    WHERE market_data_source = ?
+                    ORDER BY trading_date DESC
+                    LIMIT ?
+                )
+            ),
+            canonical_by_date AS (
+                SELECT
+                    snapshot_date,
+                    COUNT(*) AS canonical_row_count,
+                    SUM(CASE WHEN canonical_rank IS NOT NULL THEN 1 ELSE 0 END) AS ranked_canonical_row_count,
+                    SUM(
+                        CASE
+                            WHEN snapshot_source = 'synthetic_backfill'
+                              OR canonical_reason = 'missing_full_theme_run_history_repair'
+                              OR extract_session = 'ticker_history_repair'
+                            THEN 1
+                            ELSE 0
+                        END
+                    ) AS repair_row_count,
+                    SUM(
+                        CASE
+                            WHEN snapshot_source <> 'synthetic_backfill'
+                              AND canonical_reason <> 'missing_full_theme_run_history_repair'
+                              AND extract_session <> 'ticker_history_repair'
+                            THEN 1
+                            ELSE 0
+                        END
+                    ) AS run_based_row_count,
+                    STRING_AGG(DISTINCT snapshot_source, ', ' ORDER BY snapshot_source) AS snapshot_source_summary,
+                    STRING_AGG(DISTINCT canonical_reason, ', ' ORDER BY canonical_reason) AS canonical_reason_summary
+                FROM canonical_theme_daily_snapshots
+                GROUP BY snapshot_date
+            )
+            SELECT
+                e.expected_trading_date,
+                ? AS market_data_source,
+                COALESCE(c.canonical_row_count, 0) > 0 AS has_canonical_coverage,
+                COALESCE(c.canonical_row_count, 0) AS canonical_row_count,
+                COALESCE(c.ranked_canonical_row_count, 0) AS ranked_canonical_row_count,
+                COALESCE(c.repair_row_count, 0) AS repair_row_count,
+                COALESCE(c.run_based_row_count, 0) AS run_based_row_count,
+                COALESCE(c.snapshot_source_summary, '') AS snapshot_source_summary,
+                COALESCE(c.canonical_reason_summary, '') AS canonical_reason_summary
+            FROM expected_dates e
+            LEFT JOIN canonical_by_date c ON c.snapshot_date = e.expected_trading_date
+            ORDER BY e.expected_trading_date DESC
+            """,
+            [preferred_source, limit_days, preferred_source],
+        ).df()
+        if coverage.empty:
+            return empty.copy()
+
+        coverage["coverage_origin"] = coverage.apply(
+            lambda row: (
+                "missing"
+                if int(row.get("canonical_row_count") or 0) <= 0
+                else (
+                    "repair_fallback"
+                    if int(row.get("repair_row_count") or 0) >= int(row.get("canonical_row_count") or 0)
+                    else (
+                        "run_based"
+                        if int(row.get("run_based_row_count") or 0) >= int(row.get("canonical_row_count") or 0)
+                        else "mixed"
+                    )
+                )
+            ),
+            axis=1,
+        )
+        return coverage.reset_index(drop=True)
+
+    return _with_bootstrap_recovery(_load)
+
+
+def canonical_daily_health_status(conn, trading_day_limit: int = 30, reconciliation_top_n: int = 10) -> pd.DataFrame:
+    empty = pd.DataFrame(
+        [
+            {
+                "market_data_source": None,
+                "latest_expected_trading_date": None,
+                "latest_canonical_snapshot_date": None,
+                "latest_expected_date_canonically_covered": False,
+                "canonical_trading_date_gap_count": 0,
+                "latest_canonical_row_count": 0,
+                "latest_canonical_ranked_row_count": 0,
+                "latest_canonical_repair_row_count": 0,
+                "latest_canonical_run_based_row_count": 0,
+                "recent_expected_trading_dates": 0,
+                "recent_covered_dates": 0,
+                "recent_missing_dates": 0,
+                "recent_repair_involved_dates": 0,
+                "reconciliation_reference_date": None,
+                "reconciliation_reference_is_latest_expected": False,
+                "reconciliation_top_n": int(max(int(reconciliation_top_n), 1)),
+                "current_standardized_leader_count": 0,
+                "canonical_leader_count": 0,
+                "top_n_mismatch_count": None,
+                "latest_day_leaders_match_current_standardized": False,
+                "reconciliation_status": "unavailable",
+            }
+        ]
+    )
+
+    def _load(active_conn=conn) -> pd.DataFrame:
+        coverage = canonical_daily_recent_coverage(active_conn, trading_day_limit=trading_day_limit)
+        if coverage.empty:
+            return empty.copy()
+
+        preferred_source = str(coverage.iloc[0].get("market_data_source") or "") or None
+        latest_expected_date = coverage.iloc[0]["expected_trading_date"]
+        latest_expected_covered = bool(coverage.iloc[0]["has_canonical_coverage"])
+        latest_canonical_row = active_conn.execute(
+            """
+            SELECT MAX(snapshot_date) AS latest_canonical_snapshot_date
+            FROM canonical_theme_daily_snapshots
+            """
+        ).df()
+        latest_canonical_date = (
+            latest_canonical_row.iloc[0]["latest_canonical_snapshot_date"] if not latest_canonical_row.empty else None
+        )
+
+        latest_counts = pd.DataFrame(
+            [
+                {
+                    "latest_canonical_row_count": 0,
+                    "latest_canonical_ranked_row_count": 0,
+                    "latest_canonical_repair_row_count": 0,
+                    "latest_canonical_run_based_row_count": 0,
+                }
+            ]
+        )
+        if latest_canonical_date is not None and table_exists(active_conn, "canonical_theme_daily_snapshots"):
+            latest_counts = active_conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS latest_canonical_row_count,
+                    SUM(CASE WHEN canonical_rank IS NOT NULL THEN 1 ELSE 0 END) AS latest_canonical_ranked_row_count,
+                    SUM(
+                        CASE
+                            WHEN snapshot_source = 'synthetic_backfill'
+                              OR canonical_reason = 'missing_full_theme_run_history_repair'
+                              OR extract_session = 'ticker_history_repair'
+                            THEN 1
+                            ELSE 0
+                        END
+                    ) AS latest_canonical_repair_row_count,
+                    SUM(
+                        CASE
+                            WHEN snapshot_source <> 'synthetic_backfill'
+                              AND canonical_reason <> 'missing_full_theme_run_history_repair'
+                              AND extract_session <> 'ticker_history_repair'
+                            THEN 1
+                            ELSE 0
+                        END
+                    ) AS latest_canonical_run_based_row_count
+                FROM canonical_theme_daily_snapshots
+                WHERE snapshot_date = ?
+                """,
+                [latest_canonical_date],
+            ).df()
+
+        latest_canonical_date_value = pd.Timestamp(latest_canonical_date).date() if latest_canonical_date is not None else None
+        canonical_gap_count = int(
+            (pd.to_datetime(coverage["expected_trading_date"], errors="coerce").dt.date > latest_canonical_date_value).sum()
+        ) if latest_canonical_date_value is not None else int(len(coverage))
+
+        reference_date = latest_expected_date if latest_expected_covered else latest_canonical_date
+        reference_is_latest_expected = bool(reference_date is not None and reference_date == latest_expected_date)
+
+        current_leaders: list[int] = []
+        canonical_leaders: list[int] = []
+        mismatch_count: int | None = None
+        reconciliation_status = "unavailable"
+        leaders_match = False
+
+        if reference_date is not None:
+            from .rankings import compute_current_ranking_snapshot
+
+            current_snapshot = compute_current_ranking_snapshot(active_conn)
+            standardized_rankings = current_snapshot.get("standardized_rankings", pd.DataFrame())
+            if not standardized_rankings.empty and "theme_id" in standardized_rankings.columns:
+                current_leaders = standardized_rankings["theme_id"].dropna().astype(int).tolist()
+
+            canonical_on_reference = active_conn.execute(
+                """
+                SELECT theme_id
+                FROM canonical_theme_daily_snapshots
+                WHERE snapshot_date = ?
+                  AND canonical_rank IS NOT NULL
+                ORDER BY canonical_rank ASC, theme ASC
+                """,
+                [reference_date],
+            ).df()
+            if not canonical_on_reference.empty:
+                canonical_leaders = canonical_on_reference["theme_id"].dropna().astype(int).tolist()
+
+            compare_n = max(int(reconciliation_top_n), 1)
+            if current_leaders and canonical_leaders:
+                compared = 0
+                mismatch_count = 0
+                for idx in range(compare_n):
+                    current_theme_id = current_leaders[idx] if idx < len(current_leaders) else None
+                    canonical_theme_id = canonical_leaders[idx] if idx < len(canonical_leaders) else None
+                    if current_theme_id is None and canonical_theme_id is None:
+                        continue
+                    compared += 1
+                    if current_theme_id != canonical_theme_id:
+                        mismatch_count += 1
+                if compared == 0:
+                    mismatch_count = None
+
+            if mismatch_count is None:
+                reconciliation_status = "unavailable"
+            elif not reference_is_latest_expected:
+                reconciliation_status = "stale_canonical_date"
+            elif mismatch_count == 0:
+                reconciliation_status = "matched"
+                leaders_match = True
+            else:
+                reconciliation_status = "mismatch"
+
+        recent_expected_count = int(len(coverage))
+        recent_covered_dates = int(coverage["has_canonical_coverage"].fillna(False).sum()) if not coverage.empty else 0
+        recent_missing_dates = int((~coverage["has_canonical_coverage"].fillna(False)).sum()) if not coverage.empty else 0
+        recent_repair_involved_dates = int((coverage["repair_row_count"].fillna(0) > 0).sum()) if not coverage.empty else 0
+
+        latest_counts_row = latest_counts.iloc[0] if not latest_counts.empty else {}
+        return pd.DataFrame(
+            [
+                {
+                    "market_data_source": preferred_source,
+                    "latest_expected_trading_date": latest_expected_date,
+                    "latest_canonical_snapshot_date": latest_canonical_date,
+                    "latest_expected_date_canonically_covered": latest_expected_covered,
+                    "canonical_trading_date_gap_count": canonical_gap_count,
+                    "latest_canonical_row_count": int(latest_counts_row.get("latest_canonical_row_count") or 0),
+                    "latest_canonical_ranked_row_count": int(latest_counts_row.get("latest_canonical_ranked_row_count") or 0),
+                    "latest_canonical_repair_row_count": int(latest_counts_row.get("latest_canonical_repair_row_count") or 0),
+                    "latest_canonical_run_based_row_count": int(latest_counts_row.get("latest_canonical_run_based_row_count") or 0),
+                    "recent_expected_trading_dates": recent_expected_count,
+                    "recent_covered_dates": recent_covered_dates,
+                    "recent_missing_dates": recent_missing_dates,
+                    "recent_repair_involved_dates": recent_repair_involved_dates,
+                    "reconciliation_reference_date": reference_date,
+                    "reconciliation_reference_is_latest_expected": reference_is_latest_expected,
+                    "reconciliation_top_n": int(max(int(reconciliation_top_n), 1)),
+                    "current_standardized_leader_count": int(len(current_leaders)),
+                    "canonical_leader_count": int(len(canonical_leaders)),
+                    "top_n_mismatch_count": mismatch_count,
+                    "latest_day_leaders_match_current_standardized": bool(leaders_match),
+                    "reconciliation_status": reconciliation_status,
+                }
+            ]
+        )
+
+    return _with_bootstrap_recovery(_load)
 
 
 def latest_ticker_history_research_fields(conn) -> pd.DataFrame:

@@ -1,32 +1,25 @@
-import altair as alt
 import pandas as pd
 import streamlit as st
 
 from src.database import get_conn, init_db
 from src.leaderboard_utils import (
-    build_window_leaderboard,
     current_leadership_quality_label,
     disambiguate_theme_labels,
     format_top_ticker_leaders,
 )
 from src.queries import (
-    baseline_status,
     canonical_theme_snapshot_counts,
     theme_ticker_metrics,
 )
 from src.rankings import ticker_standardized_composite_score
 from src.streamlit_utils import (
-    clear_current_market_view_caches,
     db_cache_token,
     extract_selected_row,
     load_current_ranking_snapshot_cached,
-    load_theme_inflections_cached,
     load_theme_momentum_cached,
-    queue_feedback_message,
     render_dataframe,
     render_feedback_message,
     reset_perf_timings,
-    show_perf_summary,
     stop_for_database_error,
 )
 from src.theme_selection import (
@@ -87,59 +80,8 @@ def _config_for_columns(columns: list[str]) -> dict:
     }
 
 
-def _render_explained_table(title: str, description: str, df: pd.DataFrame, columns: list[str], *, limit: int | None = 10):
-    st.write(f"**{title}**")
-    st.caption(description)
-    display_df = disambiguate_theme_labels(df)
-    if "theme_display" in display_df.columns and "theme" in display_df.columns:
-        display_df["theme"] = display_df["theme_display"]
-    shaped = display_df.reindex(columns=columns)
-    show_df = shaped if limit is None else shaped.head(limit)
-    render_dataframe(f"explained_{title}", show_df, width="stretch", column_config=_config_for_columns(columns))
-
-
 def _display_theme_name_from_row(row, label_by_id: dict[int, str], ids_by_name: dict[str, list[int]]) -> str:
     return _theme_label_for_display(row.get("theme_id"), row.get("theme"), label_by_id, ids_by_name)
-
-
-def _signal_reason_text(row: pd.Series) -> str:
-    return (
-        f"rank_change {row.get('rank_change', 0):+.0f}, "
-        f"momentum_score {row.get('momentum_score', 0):+.2f}, "
-        f"delta_composite {row.get('delta_composite', 0):+.2f}, "
-        f"delta_breadth {row.get('delta_breadth', 0):+.2f}"
-    )
-
-
-def _format_theme_list(df: pd.DataFrame, preview_limit: int = 5) -> str:
-    if df.empty or "theme" not in df.columns:
-        return "none"
-    display_df = disambiguate_theme_labels(df)
-    labels = []
-    for label in display_df.get("theme_display", display_df["theme"]).astype(str).tolist():
-        cleaned = label.strip()
-        if cleaned and cleaned not in labels:
-            labels.append(cleaned)
-    if not labels:
-        return "none"
-    shown = labels[:preview_limit]
-    if len(labels) > preview_limit:
-        shown.append(f"+{len(labels) - preview_limit} more")
-    return ", ".join(shown)
-
-
-def _history_depth_quality(window_meta: dict, summary: pd.DataFrame) -> str:
-    snapshot_count = int(window_meta.get("boundary_snapshot_count") or 0)
-    provenance_mix = str(window_meta.get("provenance_mix") or "unknown")
-    collapsed = bool(window_meta.get("collapsed_to_available_history"))
-    theme_count = int(summary.shape[0]) if not summary.empty else 0
-
-    if snapshot_count < 2 or theme_count == 0:
-        return "Too shallow"
-    if collapsed or "mixed" in provenance_mix or "reconstructed" in provenance_mix:
-        return "Mixed"
-    return "Good"
-
 
 def _normalize_theme_identifier(value) -> str | None:
     if value is None or pd.isna(value):
@@ -172,7 +114,7 @@ def _open_theme_in_themes(theme_id, fallback_theme_name: str | None, label_by_id
     st.switch_page("pages/1_Themes.py")
 
 
-def _theme_option_maps(themes: pd.DataFrame) -> tuple[dict[int, str], dict[str, int], dict[str, list[int]]]:
+def _theme_option_maps(themes: pd.DataFrame) -> tuple[dict[int, str], dict[str, list[int]]]:
     ids_by_name: dict[str, list[int]] = {}
     base_label_by_id: dict[int, str] = {}
     base_counts: dict[str, int] = {}
@@ -194,8 +136,7 @@ def _theme_option_maps(themes: pd.DataFrame) -> tuple[dict[int, str], dict[str, 
         else:
             label_by_id[theme_id] = base_label
 
-    id_by_label = {label: theme_id for theme_id, label in label_by_id.items()}
-    return label_by_id, id_by_label, ids_by_name
+    return label_by_id, ids_by_name
 
 
 def _theme_label_for_display(theme_id, fallback_theme_name: str | None, label_by_id: dict[int, str], ids_by_name: dict[str, list[int]]) -> str:
@@ -203,39 +144,6 @@ def _theme_label_for_display(theme_id, fallback_theme_name: str | None, label_by
     if resolved_id is not None and resolved_id in label_by_id:
         return label_by_id[resolved_id]
     return str(fallback_theme_name or resolved_id or "Unknown theme")
-
-
-def _build_overview_leaders(momentum: dict, perf_col: str, top_k: int = 10) -> tuple[pd.DataFrame, str | None]:
-    return build_window_leaderboard(momentum, perf_col, top_k=top_k)
-
-
-def _render_overview_panel(title: str, leaders: pd.DataFrame, perf_col: str, message: str | None, key_prefix: str):
-    st.markdown(f"**{title}**")
-    st.caption("Ranked by end-of-window performance first, with momentum and rank change only as secondary context. This is not a top-momentum table.")
-    if message:
-        st.info(message)
-        return
-
-    display = disambiguate_theme_labels(leaders.rename(columns={perf_col: "window_perf"}))
-    if "theme_display" in display.columns and "theme" in display.columns:
-        display["theme"] = display["theme_display"]
-    cols = ["rank", "theme", "window_perf", "momentum_score", "rank_change"]
-    event = render_dataframe(
-        f"{key_prefix}_overview",
-        display[cols],
-        hide_index=True,
-        width="stretch",
-        column_config=_config_for_columns(cols),
-        on_select="rerun",
-        selection_mode="single-cell",
-        key=f"{key_prefix}_table",
-    )
-
-    row_idx = extract_selected_row(event)
-    if row_idx is not None and 0 <= row_idx < len(display):
-        picked_row = display.iloc[int(row_idx)]
-        st.session_state["historical_selected_theme_id"] = _normalize_theme_identifier(picked_row.get("theme_id"))
-        st.session_state["historical_selected_theme_name"] = str(picked_row.get("theme") or "")
 
 
 def _build_master_research_grid(
@@ -403,8 +311,8 @@ st.set_page_config(page_title="Historical Performance", layout="wide")
 st.title("Historical Performance Research Grid")
 st.caption("Research workflow: audit current, historical, and ATR-companion theme behavior in one dense grid.")
 st.caption(
-    "Themes remains the curated operating page. Use this page as the canonical-primary historical comparison workbench; "
-    "legacy lineage/audit helpers remain separate and are not the source of truth for the main rank interpretation here."
+    "Themes remains the curated operating page. Use this page as the primary historical comparison workbench; "
+    "lineage and audit helpers remain separate from the main rank-interpretation surface."
 )
 reset_perf_timings("historical_performance")
 
@@ -416,7 +324,7 @@ try:
 except Exception as exc:
     stop_for_database_error(exc)
 db_token = db_cache_token()
-theme_label_by_id, theme_id_by_label, theme_ids_by_name = _theme_option_maps(themes)
+theme_label_by_id, theme_ids_by_name = _theme_option_maps(themes)
 
 render_feedback_message(st.session_state, "historical_refresh_feedback")
 
@@ -468,11 +376,11 @@ if using_canonical_primary:
 else:
     st.caption(
         f"Primary window source fallback: `{window_provenance_mix}` | source label: `{window_source_preference}`. "
-        "Canonical daily coverage was not available for this window, so legacy movement history was used."
+        "Canonical daily coverage was not available for this window, so the older movement-history path was used."
     )
 st.caption(
-    "Legacy lineage/debug tools are intentionally outside the main workflow. Treat the grid and summary tables above as the primary canonical view; "
-    "use legacy audit helpers only when you need to inspect historical winner selection or provenance edge cases."
+    "Lineage/debug tools are intentionally outside the main workflow. Treat the grid and summary tables above as the primary view; "
+    "use audit helpers only when you need to inspect winner selection or provenance edge cases."
 )
 fg1, fg2, fg3 = st.columns(3)
 with fg1:

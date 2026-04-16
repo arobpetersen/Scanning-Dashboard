@@ -821,7 +821,19 @@ def persist_canonical_theme_daily_snapshot_for_run(
         is_canonical_daily=is_canonical_daily,
     )
     if canonical_rows.empty:
-        return {"run_id": int(run_id), "snapshot_date": "", "row_count": 0, "inserted_count": 0}
+        return {"run_id": int(run_id), "snapshot_date": "", "row_count": 0, "inserted_count": 0, "status": "no_rows"}
+
+    rankable_row_count = int(canonical_rows["canonical_rank"].notna().sum()) if "canonical_rank" in canonical_rows.columns else 0
+    if rankable_row_count <= 0:
+        snapshot_date = canonical_rows["snapshot_date"].iloc[0]
+        return {
+            "run_id": int(run_id),
+            "snapshot_date": str(snapshot_date),
+            "row_count": int(len(canonical_rows)),
+            "inserted_count": 0,
+            "ranked_row_count": 0,
+            "status": "no_rankable_rows_for_run",
+        }
 
     snapshot_date = canonical_rows["snapshot_date"].iloc[0]
     if overwrite_existing:
@@ -877,6 +889,8 @@ def persist_canonical_theme_daily_snapshot_for_run(
         "snapshot_date": str(snapshot_date),
         "row_count": int(len(canonical_rows)),
         "inserted_count": int(len(inserted)),
+        "ranked_row_count": rankable_row_count,
+        "status": "materialized_from_run",
     }
 
 
@@ -1064,6 +1078,29 @@ def backfill_canonical_theme_daily_snapshots_for_recent_trading_days(
             is_canonical_daily=True,
             overwrite_existing=overwrite_existing,
         )
+        if str(persist_result.get("status") or "") == "no_rankable_rows_for_run":
+            repair_result = persist_canonical_theme_daily_snapshot_for_trading_date(
+                conn,
+                snapshot_date,
+                market_data_source=provider,
+                extract_session="ticker_history_repair",
+                canonical_reason="missing_full_theme_run_history_repair",
+                is_canonical_daily=True,
+                overwrite_existing=overwrite_existing,
+            )
+            repair_result.update(
+                {
+                    "selection_reason": f"{row.selection_reason}_rankability_repair_fallback",
+                    "scope_type": "canonical_history_repair",
+                    "finished_at": row.finished_at,
+                    "ticker_count": int(row.ticker_count or 0),
+                    "success_count": int(row.success_count or 0),
+                    "upstream_run_id": int(run_id),
+                    "upstream_run_status": str(persist_result.get("status") or "unknown"),
+                }
+            )
+            results.append(repair_result)
+            continue
         persist_result.update(
             {
                 "selection_reason": str(row.selection_reason),

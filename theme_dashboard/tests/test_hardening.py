@@ -292,9 +292,15 @@ class TestLeaderboardUtils(unittest.TestCase):
 
         self.assertEqual(ranked["theme"].tolist(), ["Thin", "Healthy"])
 
-    @patch("src.momentum_engine.top_n_membership_changes", return_value=([], []))
+    @patch("src.momentum_engine._top_n_membership_changes_from_history", return_value=([], []))
+    @patch("src.momentum_engine.canonical_theme_history_window", return_value=pd.DataFrame())
     @patch("src.momentum_engine.theme_history_window")
-    def test_compute_theme_momentum_damps_breadth_for_smaller_themes(self, mock_theme_history_window, _mock_membership):
+    def test_compute_theme_momentum_damps_breadth_for_smaller_themes(
+        self,
+        mock_theme_history_window,
+        _mock_canonical_history_window,
+        mock_membership_changes,
+    ):
         mock_theme_history_window.return_value = pd.DataFrame(
             [
                 {
@@ -357,6 +363,7 @@ class TestLeaderboardUtils(unittest.TestCase):
         self.assertAlmostEqual(float(summary.loc["Broad", "effective_delta_breadth"]), 100.0, places=2)
         self.assertAlmostEqual(float(summary.loc["Thin", "momentum_score"]), 14.14, places=2)
         self.assertAlmostEqual(float(summary.loc["Broad", "momentum_score"]), 20.0, places=2)
+        mock_membership_changes.assert_called_once()
 
 
 class TestHistoricalAnalyticsConnectionIsolation(unittest.TestCase):

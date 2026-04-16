@@ -26,6 +26,8 @@ from src.historical_backfill import (
 from src.metric_formatting import short_timestamp
 from src.queries import (
     baseline_status,
+    canonical_daily_health_status,
+    canonical_daily_recent_coverage,
     historical_reconstruction_runs,
     last_refresh_run,
     refresh_history,
@@ -164,6 +166,8 @@ try:
         counts = row_counts(conn)
         snaps = snapshot_counts(conn)
         baseline = baseline_status(conn)
+        canonical_daily_health = canonical_daily_health_status(conn, trading_day_limit=30, reconciliation_top_n=10)
+        canonical_daily_recent = canonical_daily_recent_coverage(conn, trading_day_limit=30)
         source_audit = source_audit_status(conn)
         ticker_history_ready = ticker_history_readiness(conn, target_trading_days=30)
         sugg_counts = suggestion_status_counts(conn)
@@ -268,6 +272,68 @@ with ops_tab:
                 f"Stored trading-date range: `{readiness.get('earliest_trading_date') or 'n/a'}` to "
                 f"`{readiness.get('latest_trading_date') or 'n/a'}`"
             )
+
+    if not canonical_daily_health.empty:
+        canonical = canonical_daily_health.iloc[0]
+        st.subheader("Canonical daily health")
+        st.caption(
+            "Operational guardrail for canonical daily rankings. This checks latest expected trading-date coverage, recent continuity, "
+            "and whether the latest canonical leaders still reconcile to the current standardized leaders."
+        )
+        g1, g2, g3, g4, g5, g6 = st.columns(6)
+        g1.metric("Latest expected date", str(canonical.get("latest_expected_trading_date") or "n/a"))
+        g2.metric("Latest canonical date", str(canonical.get("latest_canonical_snapshot_date") or "n/a"))
+        g3.metric("Date gap", int(canonical.get("canonical_trading_date_gap_count") or 0))
+        g4.metric(
+            "Latest date covered",
+            "yes" if bool(canonical.get("latest_expected_date_canonically_covered")) else "no",
+        )
+        g5.metric("Top-10 mismatch count", canonical.get("top_n_mismatch_count") if canonical.get("top_n_mismatch_count") is not None else "n/a")
+        g6.metric("Missing dates (30d)", int(canonical.get("recent_missing_dates") or 0))
+
+        st.caption(
+            f"Latest canonical rows=`{int(canonical.get('latest_canonical_row_count') or 0)}` | "
+            f"ranked=`{int(canonical.get('latest_canonical_ranked_row_count') or 0)}` | "
+            f"run-based=`{int(canonical.get('latest_canonical_run_based_row_count') or 0)}` | "
+            f"repair=`{int(canonical.get('latest_canonical_repair_row_count') or 0)}` | "
+            f"recent repair-involved dates=`{int(canonical.get('recent_repair_involved_dates') or 0)}` | "
+            f"reconciliation status=`{canonical.get('reconciliation_status') or 'unknown'}`"
+        )
+        if bool(canonical.get("latest_day_leaders_match_current_standardized")):
+            st.success("Latest expected trading date is canonically covered and the latest canonical leaders match current standardized leaders.")
+        elif str(canonical.get("reconciliation_status") or "") == "stale_canonical_date":
+            st.warning(
+                "Latest canonical coverage is stale versus the latest expected trading date. Leader reconciliation below is against the most recent canonical date, not the latest expected date."
+            )
+        elif str(canonical.get("reconciliation_status") or "") == "mismatch":
+            st.warning("Latest expected trading date is covered, but the canonical leader order does not fully reconcile to current standardized leaders.")
+        else:
+            st.info("Canonical daily reconciliation is unavailable until canonical coverage and ranked leaders are both present.")
+
+        if not canonical_daily_recent.empty:
+            exceptions = canonical_daily_recent[
+                canonical_daily_recent["coverage_origin"].astype(str).isin(["missing", "repair_fallback", "mixed"])
+            ].copy()
+            if exceptions.empty:
+                st.caption("Recent canonical continuity: all expected trading dates in the last 30-day window are covered by run-based canonical rows.")
+            else:
+                render_dataframe(
+                    "canonical_daily_recent_exceptions",
+                    exceptions[
+                        [
+                            "expected_trading_date",
+                            "coverage_origin",
+                            "canonical_row_count",
+                            "ranked_canonical_row_count",
+                            "repair_row_count",
+                            "run_based_row_count",
+                            "snapshot_source_summary",
+                            "canonical_reason_summary",
+                        ]
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
 
     st.subheader("Newly governed ticker onboarding")
     st.caption(

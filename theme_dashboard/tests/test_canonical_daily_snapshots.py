@@ -100,3 +100,23 @@ class TestCanonicalThemeDailySnapshots(unittest.TestCase):
             self.assertEqual(int(history.iloc[0]["canonical_rank"]), 1)
         finally:
             conn.close()
+
+    def test_persist_canonical_theme_daily_snapshot_for_run_skips_unrankable_run_rows(self):
+        conn = self._build_conn()
+        try:
+            conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAA'), (2, 'BBB')")
+            conn.execute(
+                """
+                insert into refresh_runs(run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count)
+                values (9, 'live', '2026-04-15 20:00:00', '2026-04-15 22:05:00', 'partial', 2, 0, 2)
+                """
+            )
+
+            result = persist_canonical_theme_daily_snapshot_for_run(conn, 9)
+
+            self.assertEqual(result["status"], "no_rankable_rows_for_run")
+            self.assertEqual(int(result["inserted_count"]), 0)
+            row_count = conn.execute("select count(*) from canonical_theme_daily_snapshots").fetchone()[0]
+            self.assertEqual(row_count, 0)
+        finally:
+            conn.close()

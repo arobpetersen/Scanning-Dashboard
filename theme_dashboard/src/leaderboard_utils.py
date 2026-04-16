@@ -292,7 +292,7 @@ def format_rank_history_movement(rank_history, current_rank: int | float | None)
     start_rank = int(round(cleaned[0]))
     end_rank = int(round(float(current_rank)))
     delta = start_rank - end_rank
-    return f"{start_rank} → {end_rank} ({delta:+d})"
+    return f"{start_rank} -> {end_rank} ({delta:+d})"
 
 
 def build_current_rank_movers_table(

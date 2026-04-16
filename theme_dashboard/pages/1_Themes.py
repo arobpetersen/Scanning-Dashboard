@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from src.database import get_bootstrap_conn, get_conn, init_db
-from src.eod_refresh import run_scheduled_historical_append
+from src.eod_refresh import materialize_latest_canonical_day, run_latest_daily_sync, run_scheduled_historical_append
 from src.historical_backfill import reconstruct_theme_history_range
 from src.leaderboard_utils import (
     build_category_leaderboard,
@@ -22,10 +22,9 @@ from src.leaderboard_utils import (
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.queries import (
     baseline_status,
+    canonical_daily_window_status,
     canonical_theme_leadership_rank_history,
     canonical_theme_leadership_rank_history_long,
-    theme_leadership_rank_history,
-    theme_leadership_rank_history_long,
     theme_snapshot_history,
     theme_ticker_metrics,
     ticker_history_last_n_snapshots,
@@ -66,8 +65,6 @@ from src.theme_selection import (
     SELECTED_THEME_LABEL_KEY,
     SELECTED_THEME_SOURCE_KEY,
     describe_selection_source,
-    prepare_replaceable_selectbox_widget_key,
-    resolve_theme_selection,
     rotate_replaceable_selectbox_widget,
     set_theme_selection_state,
     should_apply_selection_token,
@@ -104,6 +101,7 @@ try:
         seed_if_needed(conn)
         themes = list_themes(conn, active_only=False)
         baseline = baseline_status(conn)
+        canonical_window_status = canonical_daily_window_status(conn)
 except Exception as exc:
     stop_for_database_error(exc)
 db_token = db_cache_token()
@@ -114,6 +112,37 @@ if themes.empty:
 
 def _handled_selection_key(source: str) -> str:
     return f"{source}_handled_selection_token"
+
+
+def _short_date_label(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)) or pd.isna(value):
+        return "-"
+    stamp = pd.to_datetime(value, errors="coerce")
+    if pd.isna(stamp):
+        return str(value)
+    return stamp.strftime("%Y-%m-%d")
+
+
+def _ranked_canonical_sync_status(live_value, ranked_canonical_value) -> str:
+    live_ts = pd.to_datetime(live_value, errors="coerce")
+    ranked_ts = pd.to_datetime(ranked_canonical_value, errors="coerce")
+    if pd.isna(live_ts) and pd.isna(ranked_ts):
+        return "Status unavailable"
+    if pd.isna(live_ts):
+        return "Live snapshot unavailable"
+    if pd.isna(ranked_ts):
+        return "Ranked canonical unavailable"
+
+    day_gap = int((live_ts.normalize() - ranked_ts.normalize()).days)
+    if day_gap == 0:
+        return "In sync"
+    if day_gap > 0:
+        suffix = "day" if day_gap == 1 else "days"
+        return f"Live ahead of ranked canonical by {day_gap} {suffix}"
+
+    day_gap = abs(day_gap)
+    suffix = "day" if day_gap == 1 else "days"
+    return f"Ranked canonical ahead of live by {day_gap} {suffix}"
 
 
 def _theme_option_maps(themes_df: pd.DataFrame) -> tuple[dict[str, int], dict[int, str], dict[str, int]]:
@@ -871,13 +900,6 @@ def _set_theme_selection(theme_id: int, label: str, source: str) -> None:
     set_theme_selection_state(st.session_state, theme_id, label, source)
 
 
-def _apply_dropdown_selection(id_by_label: dict[str, int], widget_key: str) -> None:
-    label = st.session_state.get(widget_key)
-    if label in id_by_label:
-        _set_theme_selection(int(id_by_label[str(label)]), str(label), "manual_dropdown")
-        rotate_replaceable_selectbox_widget(st.session_state, SELECTED_THEME_LABEL_KEY)
-
-
 def _render_leaderboard(
     title: str,
     key_prefix: str,
@@ -1545,17 +1567,112 @@ with explore_tab:
     momentum_1w = load_theme_momentum_cached(db_token, 7, top_n=20)
     momentum_1m = load_theme_momentum_cached(db_token, 30, top_n=20)
     baseline_row = baseline.iloc[0] if not baseline.empty else None
+    canonical_window_row = canonical_window_status.iloc[0] if not canonical_window_status.empty else None
     current_driver_time = pd.to_datetime(current_theme_metrics["snapshot_time"]).dropna().max() if not current_theme_metrics.empty and "snapshot_time" in current_theme_metrics.columns else None
     movement_1w_end = momentum_1w.get("meta", {}).get("window_end")
     movement_1m_end = momentum_1m.get("meta", {}).get("window_end")
-    freshness_c1, freshness_c2, freshness_c3 = st.columns([1.1, 1.1, 1.1])
+    ranked_window_end_candidates = pd.to_datetime(
+        [value for value in [movement_1w_end, movement_1m_end] if value is not None],
+        errors="coerce",
+    )
+    latest_ranked_window_end = ranked_window_end_candidates.max() if len(ranked_window_end_candidates) else None
     current_snapshot_label = short_timestamp(current_driver_time)
     if not current_snapshot_label and baseline_row is not None:
         current_snapshot_label = short_timestamp(baseline_row.get("latest_ticker_snapshot_time"))
-    freshness_c1.metric("Current tables snapshot", current_snapshot_label or "-")
-    freshness_c2.metric("1W movement end", short_timestamp(movement_1w_end) or "-")
-    freshness_c3.metric("1M movement end", short_timestamp(movement_1m_end) or "-")
+    latest_raw_canonical_date = canonical_window_row.get("latest_raw_canonical_date") if canonical_window_row is not None else None
+    latest_ranked_canonical_date = canonical_window_row.get("latest_ranked_canonical_date") if canonical_window_row is not None else None
+    sync_status_label = _ranked_canonical_sync_status(
+        current_driver_time if current_driver_time is not None else (baseline_row.get("latest_ticker_snapshot_time") if baseline_row is not None else None),
+        latest_ranked_canonical_date,
+    )
+    freshness_c1, freshness_c2, freshness_c3, freshness_c4 = st.columns([1.1, 1.0, 1.35, 1.15])
+    freshness_c1.metric("Current live snapshot", current_snapshot_label or "-")
+    freshness_c2.metric("Latest ranked canonical date", _short_date_label(latest_ranked_canonical_date))
+    freshness_c3.metric("Sync status", sync_status_label)
     active_append_runs = _active_daily_historical_append_runs()
+    with freshness_c4:
+        if st.button("Finalize latest market day", type="primary", key="themes_finalize_latest_day"):
+            status_container = st.status("Finalize latest market day: started.", expanded=True)
+            try:
+                status_container.write("Running live refresh, latest-day historical append, and canonical materialization in order.")
+                with get_bootstrap_conn() as conn:
+                    sync_result = run_latest_daily_sync(conn, provider_name="live")
+
+                clear_current_market_view_caches()
+                live_stage = sync_result.get("stages", {}).get("live_refresh", {})
+                append_stage = sync_result.get("stages", {}).get("historical_append", {})
+                canonical_stage = sync_result.get("stages", {}).get("canonical_materialization", {})
+                feedback_level = "success" if str(sync_result.get("status") or "") == "success" else "warning"
+                if any(str(stage.get("status") or "") == "failed" for stage in [live_stage, append_stage, canonical_stage]):
+                    feedback_level = "error"
+
+                status_container.write(
+                    f"Live refresh=`{live_stage.get('status') or 'unknown'}` | "
+                    f"historical append=`{append_stage.get('status') or 'unknown'}` | "
+                    f"canonical=`{canonical_stage.get('status') or 'unknown'}`."
+                )
+                status_container.write("Themes/Historical caches cleared; page rerun is next.")
+
+                feedback_bits = [
+                    f"Latest-day sync finished with overall status=`{sync_result.get('status') or 'unknown'}`.",
+                    (
+                        f"Live snapshot stage=`{live_stage.get('status') or 'unknown'}`"
+                        + (f" | run_id=`{live_stage.get('run_id')}`." if live_stage.get("run_id") else ".")
+                    ),
+                    (
+                        f"Historical append stage=`{append_stage.get('status') or 'unknown'}` | "
+                        f"theme_rows_written=`{int(append_stage.get('snapshot_rows_written') or 0)}` | "
+                        f"ticker_rows_written=`{int(append_stage.get('ticker_history_rows_written') or 0)}`."
+                    ),
+                    (
+                        f"Canonical stage=`{canonical_stage.get('status') or 'unknown'}` | "
+                        f"latest_expected=`{canonical_stage.get('latest_expected_trading_date') or '-'}` | "
+                        f"latest_canonical_after=`{canonical_stage.get('latest_canonical_snapshot_date_after') or '-'}` | "
+                        f"inserted=`{int(canonical_stage.get('inserted_count') or 0)}`."
+                    ),
+                    "Themes/Historical analytics caches were cleared and the page reran against refreshed state.",
+                ]
+                if append_stage.get("failed_tickers"):
+                    failed_tickers = list(append_stage.get("failed_tickers") or [])
+                    feedback_bits.append(
+                        f"Historical append failed for tickers=`{', '.join(failed_tickers[:8])}`"
+                        + (f" +{len(failed_tickers) - 8} more." if len(failed_tickers) > 8 else ".")
+                    )
+                if str(canonical_stage.get("status") or "") == "failed":
+                    feedback_bits.append(f"Canonical materialization error: {canonical_stage.get('error')}")
+                elif str(canonical_stage.get("status") or "") == "already_current":
+                    feedback_bits.append("Canonical latest day was already current, so no duplicate canonical rows were written.")
+
+                status_container.update(
+                    label=f"Finalize latest market day: {sync_result.get('status') or 'complete'}.",
+                    state="error" if feedback_level == "error" else "complete",
+                    expanded=True,
+                )
+                prepare_post_mutation_refresh(
+                    st.session_state,
+                    "themes_refresh_feedback",
+                    level=feedback_level,
+                    message=" ".join(feedback_bits),
+                    clear_market=True,
+                )
+                st.rerun()
+            except Exception as exc:
+                status_container.update(
+                    label="Finalize latest market day: error.",
+                    state="error",
+                    expanded=True,
+                )
+                status_container.write(f"Latest-day sync failed before completion: {exc}")
+                queue_feedback_message(
+                    st.session_state,
+                    "themes_refresh_feedback",
+                    level="error",
+                    message=(
+                        "Finalize latest market day failed before completion. "
+                        f"No full-current guarantee: {exc}"
+                    ),
+                )
+                st.rerun()
     if not active_append_runs.empty and bool(active_append_runs.iloc[0].get("likely_stale")):
         stale_run = active_append_runs.iloc[0]
         st.warning(
@@ -1564,16 +1681,19 @@ with explore_tab:
             f"({float(stale_run.get('age_minutes') or 0):.1f} minutes). "
             "The duplicate-run guard will block new Themes materialization attempts until this stale run is cleaned up manually."
         )
-    st.caption(
-        "Current Market Leadership and Current Top Themes use the latest preferred-source ticker snapshot shown above. "
-        "Theme Movement tables now prefer canonical daily standardized snapshot windows shown above, which can differ from the current snapshot clock."
-    )
-    st.caption(
-        "Default Themes-page `composite_score` now uses the standardized baseline: 30% avg_1w, 70% avg_1m, participation-aware, and 3M-skeptical without weighting 3M directly."
-    )
+    with st.expander("Snapshot details", expanded=False):
+        detail_c1, detail_c2 = st.columns(2)
+        detail_c1.metric("Latest raw canonical date", _short_date_label(latest_raw_canonical_date))
+        detail_c2.metric("Latest ranked canonical window end", short_timestamp(latest_ranked_window_end) or "-")
+        if canonical_window_row is not None and bool(canonical_window_row.get("raw_vs_ranked_date_differs")):
+            st.info(
+                f"Latest canonical rows exist for `{_short_date_label(latest_raw_canonical_date)}`, "
+                f"but movement windows still end on `{_short_date_label(latest_ranked_canonical_date)}` "
+                "because the newer date does not have usable ranked canonical rows yet."
+            )
+
     with st.expander("Advanced refresh controls", expanded=False):
-        st.caption("Use these only when you intentionally want to refresh cached page analytics or advance historical movement history.")
-        refresh_c1, refresh_c2 = st.columns([1.0, 1.25])
+        refresh_c1, refresh_c2, refresh_c3 = st.columns([1.0, 1.25, 1.2])
         with refresh_c1:
             if st.button("Reload latest DB state", key="themes_force_refresh"):
                 clear_current_market_view_caches()
@@ -1587,25 +1707,26 @@ with explore_tab:
                     ),
                 )
                 st.rerun()
+            st.caption("Use when the page looks stale but today's data should already be loaded.")
         with refresh_c2:
-            if st.button("Materialize latest historical day", key="themes_force_latest_day_refresh"):
+            if st.button("Append latest historical day (reconstructed)", key="themes_force_latest_day_refresh"):
                 if not active_append_runs.empty:
                     active_run = active_append_runs.iloc[0]
                     if bool(active_run.get("likely_stale")):
                         st.warning(
-                            "Materialize latest historical day did not start because a daily historical append run looks stale/orphaned. "
+                            "Append latest historical day (reconstructed) did not start because a daily historical append run looks stale/orphaned. "
                             f"Active run_id=`{int(active_run['run_id'])}` started=`{short_timestamp(active_run.get('started_at')) or '-'}` "
                             f"and has been running for about `{float(active_run.get('age_minutes') or 0):.1f}` minutes. "
                             "The duplicate-run guard will continue blocking new materialization attempts until the stale run is cleaned up manually."
                         )
                     else:
                         st.warning(
-                            "Materialize latest historical day did not start because a daily historical append run is already active. "
+                            "Append latest historical day (reconstructed) did not start because a daily historical append run is already active. "
                             f"Active run_id=`{int(active_run['run_id'])}` started=`{short_timestamp(active_run.get('started_at')) or '-'}`. "
                             "Wait for the current append to finish before starting another one from Themes."
                         )
                 else:
-                    status_container = st.status("Materialize latest historical day: started.", expanded=True)
+                    status_container = st.status("Append latest historical day (reconstructed): started.", expanded=True)
                     try:
                         status_container.write("Historical append step running against provider historical data for the latest trading day.")
                         with get_bootstrap_conn() as conn:
@@ -1646,18 +1767,18 @@ with explore_tab:
                                 else "Latest-day historical append did not run."
                             ),
                             (
-                                "Movement-history layers were likely advanced to the latest trading day when provider history was available."
+                            "Reconstructed movement-history layers were likely advanced to the latest trading day when provider history was available."
                                 if movement_likely_advanced
-                                else "Movement-history layers were not clearly advanced; inspect append status and source data availability."
+                                else "Reconstructed movement-history layers were not clearly advanced; inspect append status and source data availability."
                             ),
                             "Themes/Historical analytics caches were cleared and the page reran against refreshed state.",
-                            "Verify next: 1W and 1M movement end should now reflect the latest available historical day if the append materialized successfully.",
+                            "This path appends ticker/day history and reconstructed movement layers only; it does not write canonical daily snapshot rows, so the 1W/1M canonical window end may remain unchanged.",
                         ]
                         if append_failed_tickers:
                             feedback_bits.append(f"Append failed for tickers=`{', '.join(append_failed_tickers[:8])}`" + (f" +{len(append_failed_tickers) - 8} more." if len(append_failed_tickers) > 8 else "."))
 
                         status_container.update(
-                            label=f"Materialize latest historical day: {final_state}.",
+                            label=f"Append latest historical day (reconstructed): {final_state}.",
                             state="error" if feedback_level == "error" else "complete",
                             expanded=True,
                         )
@@ -1671,7 +1792,7 @@ with explore_tab:
                         st.rerun()
                     except Exception as exc:
                         status_container.update(
-                            label="Materialize latest historical day: error.",
+                            label="Append latest historical day (reconstructed): error.",
                             state="error",
                             expanded=True,
                         )
@@ -1681,19 +1802,49 @@ with explore_tab:
                             "themes_refresh_feedback",
                             level="error",
                             message=(
-                                "Materialize latest historical day failed before completion. "
+                                "Append latest historical day (reconstructed) failed before completion. "
                                 f"No refresh guarantee: {exc}"
                             ),
                         )
                         st.rerun()
-        st.caption(
-            "Reload latest DB state clears cached page analytics and rereads the database. "
-            "It does not fetch market data, rerun refresh_runs, or rebuild historical snapshots."
-        )
-        st.caption(
-            "Materialize latest historical day is a heavier movement-history action: it runs the existing one-day historical append path for the latest trading day, then clears analytics caches and reruns the page. "
-            "It does not rerun current/live snapshot refresh and does not intentionally rebuild the full recent window."
-        )
+            st.caption("Use only if today's historical movement context looks missing.")
+        with refresh_c3:
+            if st.button("Materialize latest canonical day", key="themes_force_latest_canonical_day"):
+                status_container = st.status("Materialize latest canonical day: started.", expanded=True)
+                try:
+                    with get_bootstrap_conn() as conn:
+                        canonical_result = materialize_latest_canonical_day(conn, provider_name="live")
+                    clear_current_market_view_caches()
+                    status_container.write(
+                        f"Canonical stage=`{canonical_result.get('status') or 'unknown'}` | "
+                        f"latest_expected=`{canonical_result.get('latest_expected_trading_date') or '-'}` | "
+                        f"latest_canonical_after=`{canonical_result.get('latest_canonical_snapshot_date_after') or '-'}`."
+                    )
+                    status_container.update(label="Materialize latest canonical day: complete.", state="complete", expanded=True)
+                    prepare_post_mutation_refresh(
+                        st.session_state,
+                        "themes_refresh_feedback",
+                        level="success" if str(canonical_result.get("status") or "") not in {"failed", "missing"} else "warning",
+                        message=(
+                            f"Canonical latest-day materialization finished with status=`{canonical_result.get('status') or 'unknown'}` | "
+                            f"latest_expected=`{canonical_result.get('latest_expected_trading_date') or '-'}` | "
+                            f"latest_canonical_after=`{canonical_result.get('latest_canonical_snapshot_date_after') or '-'}` | "
+                            f"inserted=`{int(canonical_result.get('inserted_count') or 0)}`."
+                        ),
+                        clear_market=True,
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    status_container.update(label="Materialize latest canonical day: error.", state="error", expanded=True)
+                    status_container.write(f"Canonical materialization failed before completion: {exc}")
+                    queue_feedback_message(
+                        st.session_state,
+                        "themes_refresh_feedback",
+                        level="error",
+                        message=f"Materialize latest canonical day failed before completion. No canonical guarantee: {exc}",
+                    )
+                    st.rerun()
+            st.caption("Use only if today's ranked canonical date is behind.")
 
     leadership_df = _attach_current_leadership_tickers(build_current_leadership_table(current_rankings, top_k=12))
     current_1w_df = build_current_performance_table(current_theme_metrics, "avg_1w", top_k=10)
