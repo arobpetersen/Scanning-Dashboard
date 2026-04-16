@@ -21,6 +21,7 @@ from src.queries import (
 from src.theme_service import add_ticker
 from src.ticker_history import persist_ticker_daily_history, recompute_ticker_daily_history_atr, ticker_daily_history_rows
 from src.ticker_onboarding import (
+    complete_governed_ticker_onboarding,
     list_governed_ticker_onboarding,
     run_governed_ticker_onboarding_backfill,
     run_governed_ticker_onboarding_theme_reconstruction,
@@ -375,6 +376,8 @@ class TestHistoricalBackfill(unittest.TestCase):
         self.assertEqual(str(onboarding.iloc[0]["ticker"]), "NEWT")
         self.assertEqual(str(onboarding.iloc[0]["onboarding_source"]), "themes_page_manual_add")
         self.assertEqual(str(result["onboarding_state"]["current_snapshot_result"]["status"]), "success")
+        self.assertTrue(bool(onboarding.iloc[0]["has_current_usable_preferred_snapshot"]))
+        self.assertEqual(str(onboarding.iloc[0]["propagation_status"]), "needs_history_backfill")
         self.assertGreater(snapshot_count, 0)
         self.assertEqual(str(ticker_view.iloc[0]["ticker"]), "NEWT")
         self.assertIsNotNone(ticker_view.iloc[0]["price"])
@@ -428,12 +431,15 @@ class TestHistoricalBackfill(unittest.TestCase):
             replace_existing=False,
         )
 
-        add_ticker(conn, 1, "READY", onboarding_source="themes_page_manual_add")
+        with patch("src.ticker_onboarding.DEFAULT_PROVIDER", "mock"):
+            add_ticker(conn, 1, "READY", onboarding_source="themes_page_manual_add")
         onboarding = list_governed_ticker_onboarding(conn)
 
         self.assertEqual(str(onboarding.iloc[0]["history_readiness_status"]), "ready")
         self.assertEqual(str(onboarding.iloc[0]["backfill_status"]), "not_needed")
         self.assertTrue(bool(onboarding.iloc[0]["downstream_refresh_needed"]))
+        self.assertTrue(bool(onboarding.iloc[0]["has_current_usable_preferred_snapshot"]))
+        self.assertEqual(str(onboarding.iloc[0]["propagation_status"]), "needs_theme_reconstruction")
         conn.close()
 
     def test_newly_governed_ticker_without_history_is_marked_as_needing_backfill(self):
@@ -483,6 +489,110 @@ class TestHistoricalBackfill(unittest.TestCase):
 
         self.assertIn(result["status"], {"success", "partial"})
         self.assertFalse(bool(onboarding.iloc[0]["downstream_refresh_needed"]))
+        self.assertEqual(str(onboarding.iloc[0]["propagation_status"]), "ready_for_current_and_history")
+        conn.close()
+
+    def test_complete_governed_ticker_onboarding_runs_remaining_stages_in_order(self):
+        conn = self._conn()
+        stage_calls: list[str] = []
+
+        initial = pd.DataFrame(
+            [
+                {
+                    "ticker": "BOOT",
+                    "has_current_usable_preferred_snapshot": False,
+                    "history_readiness_status": "needs_backfill",
+                    "downstream_refresh_needed": False,
+                    "propagation_status": "needs_current_snapshot",
+                }
+            ]
+        )
+        after_current = pd.DataFrame(
+            [
+                {
+                    "ticker": "BOOT",
+                    "has_current_usable_preferred_snapshot": True,
+                    "history_readiness_status": "needs_backfill",
+                    "downstream_refresh_needed": False,
+                    "propagation_status": "needs_history_backfill",
+                }
+            ]
+        )
+        after_history = pd.DataFrame(
+            [
+                {
+                    "ticker": "BOOT",
+                    "has_current_usable_preferred_snapshot": True,
+                    "history_readiness_status": "ready",
+                    "downstream_refresh_needed": True,
+                    "propagation_status": "needs_theme_reconstruction",
+                }
+            ]
+        )
+        after_reconstruction = pd.DataFrame(
+            [
+                {
+                    "ticker": "BOOT",
+                    "has_current_usable_preferred_snapshot": True,
+                    "history_readiness_status": "ready",
+                    "downstream_refresh_needed": False,
+                    "propagation_status": "ready_for_current_and_history",
+                }
+            ]
+        )
+
+        def fake_current(*args, **kwargs):
+            stage_calls.append("current")
+            return {"status": "success", "tickers": ["BOOT"], "run_id": 101}
+
+        def fake_backfill(*args, **kwargs):
+            stage_calls.append("history")
+            self.assertFalse(bool(kwargs.get("perform_current_snapshot_hydration")))
+            return {
+                "status": "success",
+                "tickers": ["BOOT"],
+                "updated_rows": [{"ticker": "BOOT", "history_readiness_status": "ready", "backfill_status": "completed"}],
+                "current_snapshot_result": {"status": "skipped_by_caller", "run_id": None},
+            }
+
+        def fake_rebuild(*args, **kwargs):
+            stage_calls.append("reconstruction")
+            return {"status": "success", "tickers": ["BOOT"], "updated_rows": [{"ticker": "BOOT"}]}
+
+        with (
+            patch("src.ticker_onboarding.table_exists", return_value=True),
+            patch(
+                "src.ticker_onboarding.list_governed_ticker_onboarding",
+                side_effect=[initial, after_current, after_history, after_reconstruction],
+            ),
+            patch("src.fetch_data.run_targeted_current_snapshot_hydration", side_effect=fake_current),
+            patch("src.ticker_onboarding.run_governed_ticker_onboarding_backfill", side_effect=fake_backfill),
+            patch("src.ticker_onboarding.run_governed_ticker_onboarding_theme_reconstruction", side_effect=fake_rebuild),
+        ):
+            result = complete_governed_ticker_onboarding(conn, ["BOOT"], provider_name="mock")
+
+        self.assertEqual(stage_calls, ["current", "history", "reconstruction"])
+        self.assertEqual(str(result["status"]), "completed")
+        self.assertEqual(int(result["completed_count"]), 1)
+        self.assertEqual(str(result["results"][0]["status"]), "completed")
+        self.assertEqual(str(result["results"][0]["final_propagation_status"]), "ready_for_current_and_history")
+        conn.close()
+
+    def test_complete_governed_ticker_onboarding_is_idempotent_for_already_complete_ticker(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'AI', 'Tech', true)")
+        add_ticker(conn, 1, "BOOT", onboarding_source="themes_page_manual_add")
+        run_governed_ticker_onboarding_backfill(conn, ["BOOT"], provider_name="mock")
+        run_governed_ticker_onboarding_theme_reconstruction(conn, ["BOOT"], provider_name="mock")
+
+        result = complete_governed_ticker_onboarding(conn, ["BOOT"], provider_name="mock")
+
+        self.assertEqual(str(result["status"]), "no_change")
+        self.assertEqual(int(result["completed_count"]), 1)
+        self.assertEqual(str(result["results"][0]["status"]), "already_complete")
+        self.assertEqual(str(result["results"][0]["current_hydration"]["status"]), "already_current")
+        self.assertEqual(str(result["results"][0]["history_backfill"]["status"]), "already_sufficient")
+        self.assertEqual(str(result["results"][0]["theme_reconstruction"]["status"]), "already_current")
         conn.close()
 
     def test_theme_history_window_uses_mixed_captured_and_reconstructed_history(self):

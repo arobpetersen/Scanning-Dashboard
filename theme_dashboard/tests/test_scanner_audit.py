@@ -307,6 +307,101 @@ class TestScannerAudit(unittest.TestCase):
         self.assertIn("date from modified timestamp fallback", str(row["metadata_basis"]))
         conn.close()
 
+    def test_deferred_candidate_stays_out_of_default_active_state_until_evidence_improves(self):
+        conn = self._conn()
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'FUSE', 'FUSE', '2026-03-10', '2026-03-10 08:00:00', 'f1.csv', 'tc2000', 'Scanner A', 'fuse-1'),
+            (1, 'tc2000', 'FUSE', 'FUSE', '2026-03-11', '2026-03-11 08:00:00', 'f2.csv', 'tc2000', 'Scanner A', 'fuse-2')
+            """
+        )
+
+        result = set_scanner_candidate_review_state(conn, "FUSE", "deferred", "hide for now")
+        out = scanner_candidate_summary(conn)
+        row = out[out["ticker"] == "FUSE"].iloc[0]
+
+        self.assertEqual(result["review_state"], "deferred")
+        self.assertIsNotNone(result["review_context_json"])
+        self.assertEqual(str(row["stored_review_state"]), "deferred")
+        self.assertEqual(str(row["review_state"]), "deferred")
+        self.assertFalse(bool(row["resurfaced_from_deferred"]))
+        self.assertEqual(len(out[out["review_state"] == "active"]), 0)
+        conn.close()
+
+    def test_deferred_candidate_resurfaces_when_recommendation_strengthens(self):
+        conn = self._conn()
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'SKLZ', 'SKLZ', '2026-03-10', '2026-03-10 08:00:00', 'f1.csv', 'tc2000', 'Scanner A', 'sklz-1'),
+            (1, 'tc2000', 'SKLZ', 'SKLZ', '2026-03-11', '2026-03-11 08:00:00', 'f2.csv', 'tc2000', 'Scanner A', 'sklz-2')
+            """
+        )
+        set_scanner_candidate_review_state(conn, "SKLZ", "deferred", "wait for stronger recurrence")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (2, 'tc2000', 'SKLZ', 'SKLZ', '2026-03-12', '2026-03-12 08:00:00', 'f3.csv', 'tc2000', 'Scanner B', 'sklz-3'),
+            (2, 'tc2000', 'SKLZ', 'SKLZ', '2026-03-13', '2026-03-13 08:00:00', 'f4.csv', 'tc2000', 'Scanner B', 'sklz-4'),
+            (2, 'tc2000', 'SKLZ', 'SKLZ', '2026-03-14', '2026-03-14 08:00:00', 'f5.csv', 'tc2000', 'Scanner B', 'sklz-5')
+            """
+        )
+
+        out = scanner_candidate_summary(conn)
+        row = out[out["ticker"] == "SKLZ"].iloc[0]
+
+        self.assertEqual(str(row["stored_review_state"]), "deferred")
+        self.assertEqual(str(row["review_state"]), "active")
+        self.assertTrue(bool(row["resurfaced_from_deferred"]))
+        self.assertIn("recommendation strengthened", str(row["resurfaced_reason"]))
+        self.assertGreaterEqual(int(row["observations_last_10d"]), 5)
+        conn.close()
+
+    def test_ignored_candidate_does_not_resurface_on_stronger_evidence(self):
+        conn = self._conn()
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'FUSE', 'FUSE', '2026-03-10', '2026-03-10 08:00:00', 'f1.csv', 'tc2000', 'Scanner A', 'fuse-ignore-1'),
+            (1, 'tc2000', 'FUSE', 'FUSE', '2026-03-11', '2026-03-11 08:00:00', 'f2.csv', 'tc2000', 'Scanner A', 'fuse-ignore-2')
+            """
+        )
+        set_scanner_candidate_review_state(conn, "FUSE", "ignored", "not actionable")
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (2, 'tc2000', 'FUSE', 'FUSE', '2026-03-12', '2026-03-12 08:00:00', 'f3.csv', 'tc2000', 'Scanner B', 'fuse-ignore-3'),
+            (2, 'tc2000', 'FUSE', 'FUSE', '2026-03-13', '2026-03-13 08:00:00', 'f4.csv', 'tc2000', 'Scanner B', 'fuse-ignore-4'),
+            (2, 'tc2000', 'FUSE', 'FUSE', '2026-03-14', '2026-03-14 08:00:00', 'f5.csv', 'tc2000', 'Scanner B', 'fuse-ignore-5')
+            """
+        )
+
+        out = scanner_candidate_summary(conn)
+        row = out[out["ticker"] == "FUSE"].iloc[0]
+
+        self.assertEqual(str(row["review_state"]), "ignored")
+        self.assertFalse(bool(row.get("resurfaced_from_deferred")))
+        self.assertTrue(
+            conn.execute("select count(*) from theme_suggestions").fetchone()[0] == 0
+        )
+        conn.close()
+
     def test_import_historical_dated_exports_do_not_inflate_distinct_scanner_count(self):
         conn = self._conn()
         tmp = self._tmpdir()

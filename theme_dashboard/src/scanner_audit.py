@@ -710,6 +710,54 @@ def _current_streak(global_dates: list[pd.Timestamp], ticker_dates: set[pd.Times
     return streak
 
 
+def _recommendation_rank(value: object) -> int:
+    normalized = str(value or "").strip().lower()
+    if normalized == "high-persistence uncovered":
+        return 2
+    if normalized == "review for addition":
+        return 1
+    return 0
+
+
+def _scanner_candidate_review_context(row: pd.Series) -> str:
+    payload = {
+        "recommendation": str(row.get("recommendation") or ""),
+        "persistence_score": int(row.get("persistence_score") or 0),
+        "observations_last_10d": int(row.get("observations_last_10d") or 0),
+        "current_streak": int(row.get("current_streak") or 0),
+        "last_seen": str(pd.to_datetime(row.get("last_seen"), errors="coerce").date()) if pd.notna(pd.to_datetime(row.get("last_seen"), errors="coerce")) else None,
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
+def _deferred_resurfacing_reason(row: pd.Series) -> str | None:
+    if str(row.get("stored_review_state") or "") != "deferred":
+        return None
+    context = parse_json_object(row.get("review_context_json"))
+    if not context:
+        return None
+
+    prior_recommendation = str(context.get("recommendation") or "").strip()
+    prior_persistence = int(context.get("persistence_score") or 0)
+    prior_last_10 = int(context.get("observations_last_10d") or 0)
+
+    current_recommendation = str(row.get("recommendation") or "").strip()
+    current_persistence = int(row.get("persistence_score") or 0)
+    current_last_10 = int(row.get("observations_last_10d") or 0)
+
+    if _recommendation_rank(current_recommendation) > _recommendation_rank(prior_recommendation):
+        return (
+            f"recommendation strengthened from `{prior_recommendation or 'monitor'}` "
+            f"to `{current_recommendation or 'monitor'}`"
+        )
+    if current_persistence >= prior_persistence + 4 and current_last_10 >= prior_last_10 + 2:
+        return (
+            f"persistence strengthened from score `{prior_persistence}` / last-10d `{prior_last_10}` "
+            f"to score `{current_persistence}` / last-10d `{current_last_10}`"
+        )
+    return None
+
+
 def scanner_candidate_summary(conn) -> pd.DataFrame:
     hits = conn.execute(
         """
@@ -799,15 +847,22 @@ def scanner_candidate_summary(conn) -> pd.DataFrame:
 
     review_state = conn.execute(
         """
-        SELECT normalized_ticker, review_state, review_note, updated_at
+        SELECT normalized_ticker, review_state, review_note, review_context_json, updated_at
         FROM scanner_candidate_review_state
         """
     ).df()
     if review_state.empty:
-        review_state = pd.DataFrame(columns=["normalized_ticker", "review_state", "review_note", "updated_at"])
+        review_state = pd.DataFrame(columns=["normalized_ticker", "review_state", "review_note", "review_context_json", "updated_at"])
     out = out.merge(review_state, on="normalized_ticker", how="left")
-    out["review_state"] = out["review_state"].fillna("active")
+    out["stored_review_state"] = out["review_state"].fillna("active")
+    out["review_state"] = out["stored_review_state"]
     out["review_note"] = out["review_note"].fillna("")
+    out["resurfaced_reason"] = out.apply(_deferred_resurfacing_reason, axis=1)
+    out["resurfaced_from_deferred"] = out["resurfaced_reason"].notna()
+    out["review_state"] = out.apply(
+        lambda row: "active" if bool(row.get("resurfaced_from_deferred")) else str(row.get("stored_review_state") or "active"),
+        axis=1,
+    )
 
     out["recommendation_reason"] = out.apply(
         lambda row: (
@@ -873,20 +928,32 @@ def set_scanner_candidate_review_state(
     if not normalized:
         raise ValueError("Ticker cannot be blank.")
     state = str(review_state or "active").strip().lower()
-    if state not in {"active", "ignored", "reviewed"}:
+    if state not in {"active", "deferred", "ignored", "reviewed"}:
         raise ValueError(f"Invalid scanner candidate review state: {review_state}")
+    review_context_json = None
+    if state == "deferred":
+        current_summary = scanner_candidate_summary(conn)
+        current_row = current_summary[current_summary["ticker"] == normalized]
+        if not current_row.empty:
+            review_context_json = _scanner_candidate_review_context(current_row.iloc[0])
     conn.execute(
         """
-        INSERT INTO scanner_candidate_review_state(normalized_ticker, review_state, review_note, updated_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO scanner_candidate_review_state(normalized_ticker, review_state, review_note, review_context_json, updated_at)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(normalized_ticker) DO UPDATE
         SET review_state = excluded.review_state,
             review_note = excluded.review_note,
+            review_context_json = excluded.review_context_json,
             updated_at = excluded.updated_at
         """,
-        [normalized, state, review_note.strip(), datetime.now(UTC).replace(tzinfo=None)],
+        [normalized, state, review_note.strip(), review_context_json, datetime.now(UTC).replace(tzinfo=None)],
     )
-    return {"ticker": normalized, "review_state": state, "review_note": review_note.strip()}
+    return {
+        "ticker": normalized,
+        "review_state": state,
+        "review_note": review_note.strip(),
+        "review_context_json": review_context_json,
+    }
 
 
 def _scanner_audit_priority(recommendation: str) -> str:

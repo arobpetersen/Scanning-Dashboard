@@ -429,9 +429,10 @@ CREATE TABLE IF NOT EXISTS scanner_candidate_review_state (
     normalized_ticker VARCHAR PRIMARY KEY,
     review_state VARCHAR NOT NULL DEFAULT 'active',
     review_note VARCHAR,
+    review_context_json VARCHAR,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK (length(trim(normalized_ticker)) > 0),
-    CHECK (review_state IN ('active','ignored','reviewed'))
+    CHECK (review_state IN ('active','deferred','ignored','reviewed'))
 );
 
 CREATE TABLE IF NOT EXISTS scanner_research_reviews (
@@ -588,6 +589,43 @@ def _rebuild_theme_suggestions(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_theme_suggestions_type ON theme_suggestions(suggestion_type)")
 
 
+def _rebuild_scanner_candidate_review_state(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE scanner_candidate_review_state_migrated (
+            normalized_ticker VARCHAR PRIMARY KEY,
+            review_state VARCHAR NOT NULL DEFAULT 'active',
+            review_note VARCHAR,
+            review_context_json VARCHAR,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK (length(trim(normalized_ticker)) > 0),
+            CHECK (review_state IN ('active','deferred','ignored','reviewed'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO scanner_candidate_review_state_migrated(
+            normalized_ticker, review_state, review_note, review_context_json, updated_at
+        )
+        SELECT
+            normalized_ticker,
+            CASE
+                WHEN lower(trim(review_state)) IN ('active', 'deferred', 'ignored', 'reviewed')
+                    THEN lower(trim(review_state))
+                ELSE 'active'
+            END,
+            review_note,
+            NULL,
+            updated_at
+        FROM scanner_candidate_review_state
+        """
+    )
+    conn.execute("DROP TABLE scanner_candidate_review_state")
+    conn.execute("ALTER TABLE scanner_candidate_review_state_migrated RENAME TO scanner_candidate_review_state")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_scanner_candidate_review_state_state ON scanner_candidate_review_state(review_state)")
+
+
 def init_db() -> None:
     with get_bootstrap_conn() as conn:
         conn.execute(SCHEMA_SQL)
@@ -696,6 +734,7 @@ def init_db() -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scanner_imported_files_status ON scanner_imported_files(import_status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_governed_ticker_onboarding_status ON governed_ticker_onboarding(history_readiness_status, backfill_status)")
+        conn.execute("ALTER TABLE scanner_candidate_review_state ADD COLUMN IF NOT EXISTS review_context_json VARCHAR")
         _best_effort_init_update(
             conn,
             "UPDATE ticker_snapshots ts SET snapshot_source = COALESCE((SELECT rr.provider FROM refresh_runs rr WHERE rr.run_id = ts.run_id), 'live') WHERE snapshot_source IS NULL OR trim(snapshot_source)=''",
@@ -733,6 +772,15 @@ def init_db() -> None:
         )
         if needs_rebuild:
             _rebuild_theme_suggestions(conn)
+
+        scanner_review_ddl = conn.execute("SELECT sql FROM duckdb_tables() WHERE table_name='scanner_candidate_review_state' LIMIT 1").fetchone()
+        scanner_review_ddl_text = scanner_review_ddl[0].lower() if scanner_review_ddl and scanner_review_ddl[0] else ""
+        scanner_review_needs_rebuild = any(
+            token not in scanner_review_ddl_text
+            for token in ["deferred", "review_context_json"]
+        )
+        if scanner_review_needs_rebuild:
+            _rebuild_scanner_candidate_review_state(conn)
 
         from .theme_service import seed_if_needed
 

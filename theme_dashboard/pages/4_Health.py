@@ -6,9 +6,6 @@ import streamlit as st
 
 from src.config import (
     DEFAULT_PROVIDER,
-    LIVE_HISTORICAL_SOURCE,
-    LIVE_QUOTE_PROFILE_SOURCE,
-    MASSIVE_API_KEY_ENV,
     REFRESH_STALE_TIMEOUT_MINUTES,
     RULE_LIVE_FAILURE_WINDOW_DAYS,
     RULE_LOW_CONSTITUENT_THRESHOLD,
@@ -16,8 +13,7 @@ from src.config import (
     massive_api_key,
 )
 from src.database import get_conn, get_fresh_read_conn, init_db
-from src.failure_classification import categorize_failure_message
-from src.fetch_data import mark_refresh_run_interrupted, mark_stale_running_runs
+from src.fetch_data import mark_stale_running_runs
 from src.historical_backfill import (
     SUPPRESSION_REBUILD_LOOKBACK_DAYS,
     reconstruct_theme_history_range,
@@ -25,15 +21,8 @@ from src.historical_backfill import (
 )
 from src.metric_formatting import short_timestamp
 from src.queries import (
-    baseline_status,
     canonical_daily_health_status,
     canonical_daily_recent_coverage,
-    historical_reconstruction_runs,
-    last_refresh_run,
-    refresh_history,
-    row_counts,
-    snapshot_counts,
-    source_audit_status,
     ticker_history_readiness,
     theme_member_hygiene_context,
 )
@@ -61,7 +50,6 @@ from src.theme_health_audit import (
     theme_health_action_eligibility,
     theme_health_audit_counts,
 )
-from src.suggestions_service import suggestion_status_counts
 from src.symbol_hygiene import (
     OVERRIDE_ACTIONS,
     STAGED_ACTIONS,
@@ -78,6 +66,7 @@ from src.symbol_hygiene import (
 from src.theme_selection import set_theme_selection_state
 from src.theme_service import get_theme_members, replace_ticker_in_theme, seed_if_needed, theme_membership_export, update_theme
 from src.ticker_onboarding import (
+    complete_governed_ticker_onboarding,
     governed_ticker_onboarding_counts,
     list_governed_ticker_onboarding,
     run_governed_ticker_onboarding_backfill,
@@ -160,12 +149,7 @@ try:
     init_db()
     with get_conn() as conn:
         seed_if_needed(conn)
-        stale_marked = mark_stale_running_runs(conn)
-        last_run = last_refresh_run(conn)
-        history = refresh_history(conn, limit=30)
-        counts = row_counts(conn)
-        snaps = snapshot_counts(conn)
-        baseline = baseline_status(conn)
+        mark_stale_running_runs(conn)
         canonical_daily_recent = canonical_daily_recent_coverage(conn, trading_day_limit=30)
         canonical_daily_health = canonical_daily_health_status(
             conn,
@@ -173,9 +157,7 @@ try:
             reconciliation_top_n=10,
             coverage=canonical_daily_recent,
         )
-        source_audit = source_audit_status(conn)
         ticker_history_ready = ticker_history_readiness(conn, target_trading_days=30)
-        sugg_counts = suggestion_status_counts(conn)
         governed_onboarding = list_governed_ticker_onboarding(conn, limit=100)
         governed_onboarding_counts_df = governed_ticker_onboarding_counts(conn)
 except Exception as exc:
@@ -187,64 +169,6 @@ ops_tab, themes_tab = st.tabs(["Operations", "Theme Health"])
 
 with ops_tab:
     render_feedback_message(st.session_state, "refresh_recovery_feedback")
-
-    st.write(f"Default provider: `{DEFAULT_PROVIDER}`")
-    st.write(f"Massive configured: `{bool(massive_api_key())}` ({MASSIVE_API_KEY_ENV})")
-    st.write(f"Live sources: quote/profile=`{LIVE_QUOTE_PROFILE_SOURCE}`, historical=`{LIVE_HISTORICAL_SOURCE}`")
-    st.caption("Current dashboard views resolve against live-preferred data only; mock fallback is no longer used in app workflows.")
-    st.write(f"Stale timeout: `{REFRESH_STALE_TIMEOUT_MINUTES}` minutes")
-    if stale_marked:
-        st.warning(f"Marked {stale_marked} stale run(s) failed on page load.")
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ticker snapshots", _first_metric_value(snaps, "ticker_snapshot_rows"))
-    c2.metric("Theme snapshots", _first_metric_value(snaps, "theme_snapshot_rows"))
-    c3.metric("Runs w/theme snapshots", _first_metric_value(snaps, "runs_with_theme_snapshots"))
-    c4.metric("Pending suggestions", int(sugg_counts[sugg_counts["status"] == "pending"]["cnt"].sum()) if not sugg_counts.empty else 0)
-
-    if not baseline.empty:
-        state = baseline.iloc[0]
-        st.subheader("Current data state")
-        st.caption(
-            f"Latest refresh #{int(state['latest_run_id']) if state['latest_run_id'] is not None else 'n/a'} | "
-            f"status=`{state.get('latest_run_status') or 'n/a'}` | provider=`{state.get('latest_run_provider') or 'n/a'}` | "
-            f"finished_at=`{state.get('latest_run_finished_at') or 'n/a'}`"
-        )
-        d1, d2 = st.columns(2)
-        with d1:
-            st.write(f"Latest theme snapshot: `{short_timestamp(state.get('latest_theme_snapshot_time')) or '-'}`")
-            st.write(f"Recent theme sources: `{state.get('recent_theme_sources') or 'none'}`")
-        with d2:
-            st.write(f"Latest ticker snapshot: `{short_timestamp(state.get('latest_ticker_snapshot_time')) or '-'}`")
-            st.write(f"Recent ticker sources: `{state.get('recent_ticker_sources') or 'none'}`")
-
-        theme_sets = int(state.get("theme_snapshot_sets") or 0)
-        ticker_sets = int(state.get("ticker_snapshot_sets") or 0)
-        if theme_sets <= 1 or ticker_sets <= 1:
-            st.warning(
-                f"History is still shallow: theme snapshot sets={theme_sets}, ticker snapshot sets={ticker_sets}. "
-                "At least 2 boundary snapshots are needed for reliable comparisons."
-            )
-    if not source_audit.empty:
-        audit = source_audit.iloc[0]
-        st.subheader("Source audit")
-        st.caption(
-            f"Preferred current sources: theme=`{audit.get('preferred_theme_source') or 'none'}` | "
-            f"ticker=`{audit.get('preferred_ticker_source') or 'none'}`"
-        )
-        a1, a2 = st.columns(2)
-        with a1:
-            st.write(f"Current theme view sources: `{audit.get('latest_theme_view_sources') or 'none'}`")
-            st.write(f"Recent theme history sources: `{audit.get('recent_theme_sources') or 'none'}`")
-        with a2:
-            st.write(f"Current ticker view sources: `{audit.get('latest_ticker_view_sources') or 'none'}`")
-            st.write(f"Recent ticker history sources: `{audit.get('recent_ticker_sources') or 'none'}`")
-        if bool(audit.get("active_contamination")):
-            st.error("Active source contamination detected: current live-facing views are mixed.")
-        elif bool(audit.get("historical_residue_only")):
-            st.info("Mixed source history exists as residue, but current live-facing views are using live-preferred data.")
-        else:
-            st.success("Current live-facing views are source-pure under live-preferred selection.")
 
     if not ticker_history_ready.empty:
         readiness = ticker_history_ready.iloc[0]
@@ -345,6 +269,10 @@ with ops_tab:
         "Tracks post-addition history readiness for newly governed tickers. "
         "This does not run on advisory review actions; it starts only when governed membership is actually written."
     )
+    st.caption(
+        "This is the ticker-level propagation surface for current live hydration plus recent-history readiness. "
+        "Canonical daily inclusion remains a separate day-finalized system and is guarded above."
+    )
     render_feedback_message(st.session_state, "governed_onboarding_feedback")
     if governed_onboarding.empty:
         st.success("No newly governed tickers are currently being tracked for onboarding.")
@@ -359,11 +287,13 @@ with ops_tab:
         )
         ready_count = int(len(governed_onboarding[governed_onboarding["history_readiness_status"] == "ready"]))
         downstream_needed = int(len(governed_onboarding[governed_onboarding["downstream_refresh_needed"] == True]))
-        o1, o2, o3, o4 = st.columns(4)
+        current_live_ready = int(len(governed_onboarding[governed_onboarding["has_current_usable_preferred_snapshot"] == True]))
+        o1, o2, o3, o4, o5 = st.columns(5)
         o1.metric("Tracked tickers", onboarding_count)
-        o2.metric("History ready", ready_count)
-        o3.metric("Needs backfill", needs_backfill)
-        o4.metric("Downstream refresh needed", downstream_needed)
+        o2.metric("Current live ready", current_live_ready)
+        o3.metric("History ready", ready_count)
+        o4.metric("Needs backfill", needs_backfill)
+        o5.metric("Downstream refresh needed", downstream_needed)
         if not governed_onboarding_counts_df.empty:
             st.caption(
                 "Status mix: "
@@ -372,62 +302,74 @@ with ops_tab:
                     for _, row in governed_onboarding_counts_df.iterrows()
                 )
             )
-        pending_backfill_options = (
+        incomplete_onboarding_options = (
             governed_onboarding[
-                governed_onboarding["backfill_status"].isin(["needed", "failed", "insufficient_after_attempt"])
+                governed_onboarding["propagation_status"].astype(str) != "ready_for_current_and_history"
             ]["ticker"]
             .astype(str)
             .tolist()
         )
-        selected_onboarding_tickers = sync_valid_multiselect_state(
+        sync_valid_multiselect_state(
             st.session_state,
-            "governed_onboarding_tickers",
-            pending_backfill_options,
-            default=pending_backfill_options[:5],
-        )
-        st.multiselect(
-            "Tickers for onboarding history hydration",
-            options=pending_backfill_options,
-            key="governed_onboarding_tickers",
-            help="Fetches and persists ticker daily history only for newly governed tickers that still need stored history depth.",
+            "governed_onboarding_completion_tickers",
+            incomplete_onboarding_options,
+            default=incomplete_onboarding_options[:5],
         )
         st.caption(
-            f"Hydration scope: selected=`{len(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_tickers'))}` | "
-            f"eligible now=`{len(pending_backfill_options)}` | tickers=`{_scope_preview(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_tickers'))}`"
+            "Use this for normal onboarding completion. It tries current/live hydration, history backfill, and affected-theme reconstruction in order."
+        )
+        st.multiselect(
+            "Tickers for one-click onboarding completion",
+            options=incomplete_onboarding_options,
+            key="governed_onboarding_completion_tickers",
+            help="Attempts current hydration, history backfill, and affected-theme reconstruction in order for newly governed tickers that are not fully propagated yet.",
+        )
+        st.caption(
+            f"Completion scope: selected=`{len(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_completion_tickers'))}` | "
+            f"eligible now=`{len(incomplete_onboarding_options)}` | tickers=`{_scope_preview(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_completion_tickers'))}`"
         )
         if st.button(
-            "Hydrate ticker history for onboarding",
+            "Complete selected onboarding",
             type="primary",
-            disabled=not bool(get_canonical_multiselect_values(st.session_state, "governed_onboarding_tickers")),
-            key="run_governed_onboarding_backfill",
+            disabled=not bool(get_canonical_multiselect_values(st.session_state, "governed_onboarding_completion_tickers")),
+            key="run_governed_onboarding_completion",
         ):
             try:
-                selected_onboarding_tickers = get_canonical_multiselect_values(st.session_state, "governed_onboarding_tickers")
+                selected_completion_tickers = get_canonical_multiselect_values(
+                    st.session_state,
+                    "governed_onboarding_completion_tickers",
+                )
                 started = time.perf_counter()
                 with get_conn() as conn:
-                    result = run_governed_ticker_onboarding_backfill(conn, selected_onboarding_tickers)
-                updated_rows = result.get("updated_rows") or []
-                ready_rows = [row for row in updated_rows if str(row.get("history_readiness_status") or "") == "ready"]
-                pending_rows = [row for row in updated_rows if str(row.get("history_readiness_status") or "") != "ready"]
-                current_snapshot_result = result.get("current_snapshot_result") or {}
+                    result = complete_governed_ticker_onboarding(conn, selected_completion_tickers)
+                result_rows = list(result.get("results") or [])
+                completed_rows = [row for row in result_rows if bool(row.get("completed"))]
+                incomplete_rows = [row for row in result_rows if not bool(row.get("completed"))]
+                stage_summary = _scope_preview(
+                    [
+                        (
+                            f"{row.get('ticker')}:"
+                            f"current={row.get('current_hydration', {}).get('status')},"
+                            f"history={row.get('history_backfill', {}).get('status')},"
+                            f"rebuild={row.get('theme_reconstruction', {}).get('status')}"
+                        )
+                        for row in result_rows
+                    ],
+                    limit=4,
+                )
                 feedback_bits = [
-                    f"Onboarding history hydration finished with status `{result.get('status')}` for {len(result.get('tickers') or [])} ticker(s).",
-                    f"Ready now=`{len(ready_rows)}` | still pending=`{len(pending_rows)}`.",
-                    f"Backfill states: `{_scope_preview([f'{row['ticker']}={row['backfill_status']}' for row in updated_rows])}`.",
-                    (
-                        "Targeted current snapshot hydration: "
-                        f"status=`{current_snapshot_result.get('status') or 'unknown'}` | "
-                        f"run_id=`{current_snapshot_result.get('run_id') or 'n/a'}`."
-                    ),
+                    f"Onboarding completion finished with status `{result.get('status')}` for {len(result.get('tickers') or [])} ticker(s).",
+                    f"Completed now=`{len(completed_rows)}` | still incomplete=`{len(incomplete_rows)}`.",
+                    f"Stages: `{stage_summary}`.",
                 ]
-                if pending_rows:
+                if incomplete_rows:
                     feedback_bits.append(
-                        f"Next step: remaining tickers still need history depth before downstream reconstruction. Pending=`{_scope_preview([str(row.get('ticker')) for row in pending_rows])}`."
+                        f"Remaining gaps: `{_scope_preview([f'{row.get('ticker')}={row.get('final_propagation_status') or 'unknown'}' for row in incomplete_rows])}`."
                     )
-                else:
-                    feedback_bits.append("Next step: any ready tickers with downstream refresh still flagged can move to affected-theme reconstruction.")
+                feedback_bits.append(
+                    "This action completes current/live hydration, history readiness, and affected-theme reconstruction only. It does not finalize canonical daily inclusion."
+                )
                 feedback_bits.append("Current market/scanner caches were cleared; the onboarding table below reruns against refreshed state.")
-                current_snapshot_result = result.get("current_snapshot_result") or {}
                 prepare_post_mutation_refresh(
                     st.session_state,
                     "governed_onboarding_feedback",
@@ -442,76 +384,151 @@ with ops_tab:
                     st.session_state,
                     "governed_onboarding_feedback",
                     level="error",
-                    message=f"Onboarding history hydration failed: {exc}",
-                )
-                st.rerun()
-        downstream_options = (
-            governed_onboarding[governed_onboarding["downstream_refresh_needed"] == True]["ticker"]
-            .astype(str)
-            .tolist()
-        )
-        selected_reconstruction_tickers = sync_valid_multiselect_state(
-            st.session_state,
-            "governed_onboarding_reconstruction_tickers",
-            downstream_options,
-            default=downstream_options[:5],
-        )
-        st.multiselect(
-            "Tickers for affected-theme reconstruction",
-            options=downstream_options,
-            key="governed_onboarding_reconstruction_tickers",
-            help="Rebuilds reconstructed theme history for themes affected by these newly governed tickers after ticker history is ready.",
-        )
-        st.caption(
-            f"Reconstruction scope: selected=`{len(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_reconstruction_tickers'))}` | "
-            f"eligible now=`{len(downstream_options)}` | tickers=`{_scope_preview(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_reconstruction_tickers'))}`"
-        )
-        if st.button(
-            "Run affected-theme reconstruction",
-            disabled=not bool(get_canonical_multiselect_values(st.session_state, "governed_onboarding_reconstruction_tickers")),
-            key="run_governed_onboarding_theme_reconstruction",
-        ):
-            try:
-                selected_reconstruction_tickers = get_canonical_multiselect_values(
-                    st.session_state,
-                    "governed_onboarding_reconstruction_tickers",
-                )
-                started = time.perf_counter()
-                with get_conn() as conn:
-                    result = run_governed_ticker_onboarding_theme_reconstruction(conn, selected_reconstruction_tickers)
-                reconstruction_result = result.get("reconstruction_result") or {}
-                snapshot_rows_written = int(reconstruction_result.get("snapshot_rows_written") or 0)
-                snapshot_rows_skipped = int(reconstruction_result.get("snapshot_rows_skipped") or 0)
-                failed_tickers = list(reconstruction_result.get("failed_tickers") or [])
-                detail_parts = [f"snapshot rows written={snapshot_rows_written}", f"skipped={snapshot_rows_skipped}"]
-                if failed_tickers:
-                    detail_parts.append("failed tickers=" + ", ".join(failed_tickers))
-                prepare_post_mutation_refresh(
-                    st.session_state,
-                    "governed_onboarding_feedback",
-                    level=_feedback_level_for_status(result.get("status")),
-                    message=(
-                        f"Affected-theme reconstruction finished with status `{result.get('status')}` for "
-                        f"{len(result.get('tickers') or [])} ticker(s): " + "; ".join(detail_parts) + ". "
-                        f"Downstream refresh cleared for `{len(result.get('updated_rows') or [])}` ticker(s). "
-                        "Current market/scanner caches were cleared; the onboarding table below reruns against refreshed state. "
-                        f"Completed in {time.perf_counter() - started:.1f}s."
-                    ),
-                    clear_market=True,
-                    clear_scanner_summary=True,
-                )
-                st.rerun()
-            except Exception as exc:
-                queue_feedback_message(
-                    st.session_state,
-                    "governed_onboarding_feedback",
-                    level="error",
-                    message=f"Affected-theme reconstruction failed: {exc}",
+                    message=f"Onboarding completion failed: {exc}",
                 )
                 st.rerun()
         st.caption(
-            "History hydration is ticker-scoped. Affected-theme reconstruction is a separate explicit step once ticker history is ready."
+            "This onboarding flow completes current/live hydration, history readiness, and affected-theme reconstruction. It does not finalize canonical daily inclusion."
         )
+        with st.expander("Recovery tools", expanded=False):
+            st.caption("Use these only when the normal onboarding completion action does not finish the job.")
+            pending_backfill_options = (
+                governed_onboarding[
+                    governed_onboarding["backfill_status"].isin(["needed", "failed", "insufficient_after_attempt"])
+                ]["ticker"]
+                .astype(str)
+                .tolist()
+            )
+            selected_onboarding_tickers = sync_valid_multiselect_state(
+                st.session_state,
+                "governed_onboarding_tickers",
+                pending_backfill_options,
+                default=pending_backfill_options[:5],
+            )
+            st.caption("Use only if a ticker still needs more history after the normal onboarding action.")
+            st.multiselect(
+                "Tickers for onboarding history hydration",
+                options=pending_backfill_options,
+                key="governed_onboarding_tickers",
+                help="Use only if a ticker still needs more history after the normal onboarding action.",
+            )
+            st.caption(
+                f"Hydration scope: selected=`{len(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_tickers'))}` | "
+                f"eligible now=`{len(pending_backfill_options)}` | tickers=`{_scope_preview(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_tickers'))}`"
+            )
+            if st.button(
+                "Hydrate ticker history for onboarding",
+                disabled=not bool(get_canonical_multiselect_values(st.session_state, "governed_onboarding_tickers")),
+                key="run_governed_onboarding_backfill",
+            ):
+                try:
+                    selected_onboarding_tickers = get_canonical_multiselect_values(st.session_state, "governed_onboarding_tickers")
+                    started = time.perf_counter()
+                    with get_conn() as conn:
+                        result = run_governed_ticker_onboarding_backfill(conn, selected_onboarding_tickers)
+                    updated_rows = result.get("updated_rows") or []
+                    ready_rows = [row for row in updated_rows if str(row.get("history_readiness_status") or "") == "ready"]
+                    pending_rows = [row for row in updated_rows if str(row.get("history_readiness_status") or "") != "ready"]
+                    current_snapshot_result = result.get("current_snapshot_result") or {}
+                    feedback_bits = [
+                        f"Onboarding history hydration finished with status `{result.get('status')}` for {len(result.get('tickers') or [])} ticker(s).",
+                        f"Ready now=`{len(ready_rows)}` | still pending=`{len(pending_rows)}`.",
+                        f"Backfill states: `{_scope_preview([f'{row['ticker']}={row['backfill_status']}' for row in updated_rows])}`.",
+                        (
+                            "Targeted current snapshot hydration: "
+                            f"status=`{current_snapshot_result.get('status') or 'unknown'}` | "
+                            f"run_id=`{current_snapshot_result.get('run_id') or 'n/a'}`."
+                        ),
+                    ]
+                    if pending_rows:
+                        feedback_bits.append(
+                            f"Next step: remaining tickers still need history depth before downstream reconstruction. Pending=`{_scope_preview([str(row.get('ticker')) for row in pending_rows])}`."
+                        )
+                    else:
+                        feedback_bits.append("Next step: any ready tickers with downstream refresh still flagged can move to affected-theme reconstruction.")
+                    feedback_bits.append("Current market/scanner caches were cleared; the onboarding table below reruns against refreshed state.")
+                    prepare_post_mutation_refresh(
+                        st.session_state,
+                        "governed_onboarding_feedback",
+                        level=_feedback_level_for_status(result.get("status")),
+                        message=" ".join(feedback_bits) + f" Completed in {time.perf_counter() - started:.1f}s.",
+                        clear_market=True,
+                        clear_scanner_summary=True,
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    queue_feedback_message(
+                        st.session_state,
+                        "governed_onboarding_feedback",
+                        level="error",
+                        message=f"Onboarding history hydration failed: {exc}",
+                    )
+                    st.rerun()
+            downstream_options = (
+                governed_onboarding[governed_onboarding["downstream_refresh_needed"] == True]["ticker"]
+                .astype(str)
+                .tolist()
+            )
+            selected_reconstruction_tickers = sync_valid_multiselect_state(
+                st.session_state,
+                "governed_onboarding_reconstruction_tickers",
+                downstream_options,
+                default=downstream_options[:5],
+            )
+            st.caption("Use only if history is ready but affected themes still have not refreshed.")
+            st.multiselect(
+                "Tickers for affected-theme reconstruction",
+                options=downstream_options,
+                key="governed_onboarding_reconstruction_tickers",
+                help="Use only if history is ready but affected themes still have not refreshed.",
+            )
+            st.caption(
+                f"Reconstruction scope: selected=`{len(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_reconstruction_tickers'))}` | "
+                f"eligible now=`{len(downstream_options)}` | tickers=`{_scope_preview(get_canonical_multiselect_values(st.session_state, 'governed_onboarding_reconstruction_tickers'))}`"
+            )
+            if st.button(
+                "Run affected-theme reconstruction",
+                disabled=not bool(get_canonical_multiselect_values(st.session_state, "governed_onboarding_reconstruction_tickers")),
+                key="run_governed_onboarding_theme_reconstruction",
+            ):
+                try:
+                    selected_reconstruction_tickers = get_canonical_multiselect_values(
+                        st.session_state,
+                        "governed_onboarding_reconstruction_tickers",
+                    )
+                    started = time.perf_counter()
+                    with get_conn() as conn:
+                        result = run_governed_ticker_onboarding_theme_reconstruction(conn, selected_reconstruction_tickers)
+                    reconstruction_result = result.get("reconstruction_result") or {}
+                    snapshot_rows_written = int(reconstruction_result.get("snapshot_rows_written") or 0)
+                    snapshot_rows_skipped = int(reconstruction_result.get("snapshot_rows_skipped") or 0)
+                    failed_tickers = list(reconstruction_result.get("failed_tickers") or [])
+                    detail_parts = [f"snapshot rows written={snapshot_rows_written}", f"skipped={snapshot_rows_skipped}"]
+                    if failed_tickers:
+                        detail_parts.append("failed tickers=" + ", ".join(failed_tickers))
+                    prepare_post_mutation_refresh(
+                        st.session_state,
+                        "governed_onboarding_feedback",
+                        level=_feedback_level_for_status(result.get("status")),
+                        message=(
+                            f"Affected-theme reconstruction finished with status `{result.get('status')}` for "
+                            f"{len(result.get('tickers') or [])} ticker(s): " + "; ".join(detail_parts) + ". "
+                            f"Downstream refresh cleared for `{len(result.get('updated_rows') or [])}` ticker(s). "
+                            "Current market/scanner caches were cleared; the onboarding table below reruns against refreshed state. "
+                            f"Completed in {time.perf_counter() - started:.1f}s."
+                        ),
+                        clear_market=True,
+                        clear_scanner_summary=True,
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    queue_feedback_message(
+                        st.session_state,
+                        "governed_onboarding_feedback",
+                        level="error",
+                        message=f"Affected-theme reconstruction failed: {exc}",
+                    )
+                    st.rerun()
         render_dataframe(
             "governed_ticker_onboarding",
             governed_onboarding[
@@ -525,6 +542,10 @@ with ops_tab:
                     "history_target_days",
                     "history_market_data_source",
                     "history_latest_trading_date",
+                    "latest_current_snapshot_time",
+                    "current_snapshot_source",
+                    "has_current_usable_preferred_snapshot",
+                    "propagation_status",
                     "downstream_refresh_needed",
                     "last_backfill_attempt_at",
                     "last_backfill_error",
@@ -535,57 +556,6 @@ with ops_tab:
             width="stretch",
             hide_index=True,
         )
-
-    with get_conn() as conn:
-        reconstruction_runs = historical_reconstruction_runs(conn, limit=10)
-    if not reconstruction_runs.empty:
-        st.subheader("Historical reconstruction runs")
-        st.caption(
-            "Reconstructed history runs now log both stored ticker-day history and downstream reconstructed theme refresh results. "
-            "This layer is additive, used for deeper movement analysis only, and never treated as true captured point-in-time composition."
-        )
-        render_dataframe("health_reconstruction_runs", reconstruction_runs, width="stretch", hide_index=True)
-
-    if not last_run.empty:
-        run = last_run.iloc[0]
-        st.info(
-            f"Last run #{int(run['run_id'])} provider={run['provider']} status={run['status']} "
-            f"success={int(run['success_count'])} fail={int(run['failure_count'])} "
-            f"flagged={int(run.get('flagged_symbol_count') or 0)} suppressed={int(run.get('suppressed_symbol_count') or 0)}"
-        )
-        if run.get("failure_category_counts"):
-            st.caption(f"Failure categories: {run.get('failure_category_counts')}")
-        finished_at = run["finished_at"]
-        if finished_at is not None:
-            if finished_at.tzinfo is None:
-                finished_at = finished_at.replace(tzinfo=timezone.utc)
-            age_hours = (datetime.now(timezone.utc) - finished_at).total_seconds() / 3600
-            if age_hours > STALE_DATA_HOURS:
-                st.warning(f"Data appears stale: {age_hours:.1f} hours since last refresh.")
-
-    st.subheader("Recent failure categories (latest run)")
-    if last_run.empty:
-        st.info("No runs yet.")
-    else:
-        run_id = int(last_run.iloc[0]["run_id"])
-        with get_conn() as conn:
-            recent_failures = conn.execute(
-                "SELECT ticker, error_message, failure_category, created_at FROM refresh_failures WHERE run_id=? ORDER BY created_at DESC LIMIT 200",
-                [run_id],
-            ).df()
-        if recent_failures.empty:
-            st.success("No failures in latest run.")
-        else:
-            if "failure_category" not in recent_failures.columns or recent_failures["failure_category"].isna().any():
-                recent_failures["failure_category"] = recent_failures["error_message"].apply(categorize_failure_message)
-            cats = (
-                recent_failures.groupby("failure_category", as_index=False)
-                .size()
-                .rename(columns={"size": "cnt"})
-                .sort_values("cnt", ascending=False)
-            )
-            render_dataframe("health_failure_categories", cats, width="stretch")
-            render_dataframe("health_recent_failures", recent_failures, width="stretch")
 
     st.subheader("Symbol hygiene review queue")
     render_feedback_message(st.session_state, "symbol_hygiene_feedback")
@@ -776,78 +746,6 @@ with ops_tab:
                         on_change=sync_symbol_hygiene_staged_action,
                         args=(st.session_state, ticker),
                     )
-
-    st.subheader("Refresh history")
-    refresh_event = render_dataframe(
-        "health_refresh_history",
-        history,
-        width="stretch",
-        on_select="rerun",
-        selection_mode="single-row",
-        key="health_refresh_history_table",
-    )
-    selected_refresh_row = extract_selected_row(refresh_event)
-    selected_refresh = None
-    if selected_refresh_row is not None and 0 <= selected_refresh_row < len(history):
-        selected_refresh = history.reset_index(drop=True).iloc[int(selected_refresh_row)]
-        selected_run_id = int(selected_refresh["run_id"])
-        st.session_state["health_selected_refresh_run_id"] = selected_run_id
-    else:
-        selected_run_id = st.session_state.get("health_selected_refresh_run_id")
-        if selected_run_id is not None:
-            matching_refresh = history[history["run_id"] == int(selected_run_id)]
-            if not matching_refresh.empty:
-                selected_refresh = matching_refresh.reset_index(drop=True).iloc[0]
-
-    if selected_refresh is not None:
-        selected_run_id = int(selected_refresh["run_id"])
-        selected_status = str(selected_refresh.get("status") or "")
-        started_at = pd.to_datetime(selected_refresh.get("started_at"), errors="coerce")
-        age_minutes = None
-        if pd.notna(started_at):
-            age_minutes = (datetime.now(timezone.utc).replace(tzinfo=None) - started_at.to_pydatetime()).total_seconds() / 60.0
-        stale_hint = age_minutes is not None and age_minutes >= REFRESH_STALE_TIMEOUT_MINUTES
-        st.caption(
-            f"Selected run #{selected_run_id} | status=`{selected_status or 'n/a'}`"
-            + (f" | age_minutes=`{age_minutes:.1f}`" if age_minutes is not None else "")
-        )
-        if selected_status == "running":
-            if stale_hint:
-                st.warning(
-                    f"Run #{selected_run_id} looks stale based on the `{REFRESH_STALE_TIMEOUT_MINUTES}` minute timeout. "
-                    "Use the recovery action below only if you know the process is no longer active."
-                )
-            if st.button(
-                "Mark selected running run interrupted",
-                key="mark_selected_refresh_run_interrupted",
-                type="secondary",
-            ):
-                try:
-                    with get_conn() as conn:
-                        changed = mark_refresh_run_interrupted(
-                            conn,
-                            selected_run_id,
-                            note="Run manually marked interrupted from Refresh history.",
-                        )
-                    if changed:
-                        queue_feedback_message(
-                            st.session_state,
-                            "refresh_recovery_feedback",
-                            level="success",
-                            message=f"Marked refresh run #{selected_run_id} interrupted. New refreshes are unblocked.",
-                        )
-                    else:
-                        queue_feedback_message(
-                            st.session_state,
-                            "refresh_recovery_feedback",
-                            level="warning",
-                            message=f"Refresh run #{selected_run_id} was no longer running, so nothing was changed.",
-                        )
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Failed to mark run interrupted: {exc}")
-    st.subheader("Table row counts")
-    render_dataframe("health_row_counts", counts, width="stretch")
 
 with themes_tab:
     render_feedback_message(st.session_state, THEME_HEALTH_FEEDBACK_KEY)

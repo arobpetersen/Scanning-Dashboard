@@ -793,7 +793,11 @@ if active_suggestions_tab == "Scanner Audit":
         with fc2:
             coverage_filter = st.selectbox("Coverage filter", ["all", "uncovered", "already governed"], index=1)
         with fc3:
-            review_state_filter = st.selectbox("Review state", ["active only", "all", "ignored", "reviewed"], index=0)
+            review_state_filter = st.selectbox(
+                "Review state",
+                ["active only", "all", "deferred", "ignored", "reviewed"],
+                index=0,
+            )
         with fc4:
             scanner_filter = st.selectbox(
                 "Scanner/source",
@@ -837,6 +841,8 @@ if active_suggestions_tab == "Scanner Audit":
             view = view[view["is_governed"] == True]
         if review_state_filter == "active only":
             view = view[view["review_state"] == "active"]
+        elif review_state_filter == "deferred":
+            view = view[view["review_state"] == "deferred"]
         elif review_state_filter == "ignored":
             view = view[view["review_state"] == "ignored"]
         elif review_state_filter == "reviewed":
@@ -855,7 +861,7 @@ if active_suggestions_tab == "Scanner Audit":
         m1.metric("Observed tickers", int(view.shape[0]))
         m2.metric("High-persistence uncovered", int((view["recommendation"] == "high-persistence uncovered").sum()))
         m3.metric("Review for addition", int((view["recommendation"] == "review for addition").sum()))
-        m4.metric("Ignored in view", int((view["review_state"] == "ignored").sum()))
+        m4.metric("Deferred in view", int((view["stored_review_state"] == "deferred").sum()))
 
         display = view[
             [
@@ -924,12 +930,21 @@ if active_suggestions_tab == "Scanner Audit":
                 f"days={int(selected_audit_row['observed_days'])}, last10={int(selected_audit_row['observations_last_10d'])}, "
                 f"streak={int(selected_audit_row['current_streak'])}, scanners=`{selected_audit_row['scanners']}`"
             )
+            st.caption(
+                "Use `deferred` to hide a reviewed candidate for now and let it come back automatically if the scanner evidence materially strengthens later."
+            )
+            if bool(selected_audit_row.get("resurfaced_from_deferred")):
+                st.info(
+                    "Resurfaced from deferred: "
+                    + str(selected_audit_row.get("resurfaced_reason") or "evidence materially improved")
+                )
             rs1, rs2 = st.columns(2)
             with rs1:
+                review_state_options = ["active", "deferred", "ignored", "reviewed"]
                 review_action = st.selectbox(
                     "Candidate review state",
-                    ["active", "ignored", "reviewed"],
-                    index=["active", "ignored", "reviewed"].index(str(selected_audit_row["review_state"])),
+                    review_state_options,
+                    index=review_state_options.index(str(selected_audit_row["stored_review_state"])),
                 )
             with rs2:
                 review_note = st.text_input("Review note", value=str(selected_audit_row.get("review_note") or ""))
