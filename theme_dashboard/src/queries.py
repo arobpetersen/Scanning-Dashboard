@@ -587,6 +587,7 @@ def theme_ticker_metrics(conn, theme_id: int, *, include_suppressed: bool = Fals
     preferred_source = preferred_ticker_snapshot_source(conn)
     manual_filter = "" if include_suppressed else _manual_suppression_filter_sql(conn, "m.ticker")
     suppression_table_exists = table_exists(conn, "symbol_refresh_status")
+    has_manual_suppressed_col = suppression_table_exists and table_has_column(conn, "symbol_refresh_status", "manual_suppressed")
     suppression_join_membership = (
         "LEFT JOIN symbol_refresh_status sr ON upper(trim(sr.ticker)) = upper(trim(m.ticker))"
         if suppression_table_exists
@@ -599,7 +600,7 @@ def theme_ticker_metrics(conn, theme_id: int, *, include_suppressed: bool = Fals
     )
     suppression_select = (
         "COALESCE(sr.status, 'active') AS status,\n            COALESCE(sr.manual_suppressed, FALSE) AS manual_suppressed,"
-        if table_has_column(conn, "symbol_refresh_status", "manual_suppressed")
+        if has_manual_suppressed_col
         else "'active' AS status,\n            FALSE AS manual_suppressed,"
     )
     if not preferred_source:
@@ -701,6 +702,136 @@ def theme_ticker_metrics(conn, theme_id: int, *, include_suppressed: bool = Fals
         ORDER BY gm.ticker
         """,
         [int(theme_id), int(theme_id), preferred_source, preferred_source, latest_refresh_time],
+    ).df()
+
+
+def theme_ticker_metrics_for_theme_ids(conn, theme_ids: list[int], *, include_suppressed: bool = False) -> pd.DataFrame:
+    normalized_theme_ids = sorted({int(theme_id) for theme_id in theme_ids if theme_id is not None})
+    if not normalized_theme_ids:
+        return pd.DataFrame()
+
+    preferred_source = preferred_ticker_snapshot_source(conn)
+    manual_filter = "" if include_suppressed else _manual_suppression_filter_sql(conn, "m.ticker")
+    suppression_table_exists = table_exists(conn, "symbol_refresh_status")
+    has_manual_suppressed_col = suppression_table_exists and table_has_column(conn, "symbol_refresh_status", "manual_suppressed")
+    placeholders = ", ".join(["?"] * len(normalized_theme_ids))
+    suppression_join_membership = (
+        "LEFT JOIN symbol_refresh_status sr ON upper(trim(sr.ticker)) = upper(trim(m.ticker))"
+        if suppression_table_exists
+        else ""
+    )
+    suppression_join_governed = (
+        "LEFT JOIN symbol_refresh_status sr ON upper(trim(sr.ticker)) = gm.ticker"
+        if suppression_table_exists
+        else ""
+    )
+    suppression_select = (
+        "COALESCE(sr.status, 'active') AS status,\n            COALESCE(sr.manual_suppressed, FALSE) AS manual_suppressed,"
+        if has_manual_suppressed_col
+        else "'active' AS status,\n            FALSE AS manual_suppressed,"
+    )
+    if not preferred_source:
+        return conn.execute(
+            f"""
+            SELECT
+                   m.theme_id,
+                   upper(trim(m.ticker)) AS ticker,
+                   {suppression_select}
+            FROM theme_membership m
+            {suppression_join_membership}
+            WHERE m.theme_id IN ({placeholders})
+            {manual_filter}
+            GROUP BY m.theme_id, upper(trim(m.ticker)), status, manual_suppressed
+            ORDER BY m.theme_id, upper(trim(m.ticker))
+            """,
+            normalized_theme_ids,
+        ).df()
+
+    if table_has_column(conn, "ticker_snapshots", "snapshot_source"):
+        ticker_source_expr = "s.snapshot_source"
+    elif table_has_column(conn, "refresh_runs", "provider"):
+        ticker_source_expr = "COALESCE(r.provider, 'live')"
+    else:
+        ticker_source_expr = "'live'"
+
+    latest_refresh_time = conn.execute(
+        f"""
+        SELECT MAX(r.finished_at)
+        FROM ticker_snapshots s
+        JOIN refresh_runs r ON r.run_id = s.run_id
+        WHERE r.status IN ('success', 'partial')
+          AND {ticker_source_expr} = ?
+        """,
+        [preferred_source],
+    ).fetchone()[0]
+
+    return conn.execute(
+        f"""
+        WITH governed_members AS (
+            SELECT
+                m.theme_id,
+                upper(trim(ticker)) AS ticker
+            FROM theme_membership m
+            WHERE m.theme_id IN ({placeholders})
+            {manual_filter}
+            GROUP BY m.theme_id, upper(trim(ticker))
+        ),
+        completed_snapshots AS (
+            SELECT
+                upper(trim(s.ticker)) AS ticker,
+                s.price,
+                s.perf_1w,
+                s.perf_1m,
+                s.perf_3m,
+                s.market_cap,
+                s.avg_volume,
+                s.short_interest_pct,
+                s.float_shares,
+                s.adr_pct,
+                s.last_updated,
+                r.finished_at AS snapshot_time,
+                ROW_NUMBER() OVER (PARTITION BY s.ticker ORDER BY s.run_id DESC) AS rn
+            FROM ticker_snapshots s
+            JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE r.status IN ('success', 'partial')
+              AND {ticker_source_expr} = ?
+        ),
+        latest_nonnull_market_caps AS (
+            SELECT
+                upper(trim(s.ticker)) AS ticker,
+                s.market_cap,
+                ROW_NUMBER() OVER (PARTITION BY upper(trim(s.ticker)) ORDER BY s.run_id DESC) AS rn
+            FROM ticker_snapshots s
+            JOIN refresh_runs r ON r.run_id = s.run_id
+            WHERE r.status IN ('success', 'partial')
+              AND {ticker_source_expr} = ?
+              AND s.market_cap IS NOT NULL
+        )
+        SELECT
+            gm.theme_id,
+            gm.ticker,
+            {suppression_select}
+            cs.price,
+            cs.perf_1w,
+            cs.perf_1m,
+            cs.perf_3m,
+            COALESCE(cs.market_cap, lmc.market_cap) AS market_cap,
+            cs.avg_volume,
+            cs.short_interest_pct,
+            cs.float_shares,
+            cs.adr_pct,
+            cs.last_updated,
+            cs.snapshot_time,
+            ? AS latest_refresh_time
+        FROM governed_members gm
+        {suppression_join_governed}
+        LEFT JOIN completed_snapshots cs
+          ON gm.ticker = cs.ticker AND cs.rn = 1
+        LEFT JOIN latest_nonnull_market_caps lmc
+          ON gm.ticker = lmc.ticker AND lmc.rn = 1
+        ORDER BY gm.theme_id, gm.ticker
+        """,
+        [*normalized_theme_ids, preferred_source, preferred_source, latest_refresh_time],
     ).df()
 
 
@@ -1939,7 +2070,13 @@ def canonical_daily_recent_coverage(conn, trading_day_limit: int = 30) -> pd.Dat
     return _with_bootstrap_recovery(_load)
 
 
-def canonical_daily_health_status(conn, trading_day_limit: int = 30, reconciliation_top_n: int = 10) -> pd.DataFrame:
+def canonical_daily_health_status(
+    conn,
+    trading_day_limit: int = 30,
+    reconciliation_top_n: int = 10,
+    *,
+    coverage: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     empty = pd.DataFrame(
         [
             {
@@ -1969,13 +2106,13 @@ def canonical_daily_health_status(conn, trading_day_limit: int = 30, reconciliat
     )
 
     def _load(active_conn=conn) -> pd.DataFrame:
-        coverage = canonical_daily_recent_coverage(active_conn, trading_day_limit=trading_day_limit)
-        if coverage.empty:
+        coverage_df = coverage.copy() if coverage is not None else canonical_daily_recent_coverage(active_conn, trading_day_limit=trading_day_limit)
+        if coverage_df.empty:
             return empty.copy()
 
-        preferred_source = str(coverage.iloc[0].get("market_data_source") or "") or None
-        latest_expected_date = coverage.iloc[0]["expected_trading_date"]
-        latest_expected_covered = bool(coverage.iloc[0]["has_canonical_coverage"])
+        preferred_source = str(coverage_df.iloc[0].get("market_data_source") or "") or None
+        latest_expected_date = coverage_df.iloc[0]["expected_trading_date"]
+        latest_expected_covered = bool(coverage_df.iloc[0]["has_canonical_coverage"])
         latest_canonical_row = active_conn.execute(
             """
             SELECT MAX(snapshot_date) AS latest_canonical_snapshot_date
@@ -2028,8 +2165,8 @@ def canonical_daily_health_status(conn, trading_day_limit: int = 30, reconciliat
 
         latest_canonical_date_value = pd.Timestamp(latest_canonical_date).date() if latest_canonical_date is not None else None
         canonical_gap_count = int(
-            (pd.to_datetime(coverage["expected_trading_date"], errors="coerce").dt.date > latest_canonical_date_value).sum()
-        ) if latest_canonical_date_value is not None else int(len(coverage))
+            (pd.to_datetime(coverage_df["expected_trading_date"], errors="coerce").dt.date > latest_canonical_date_value).sum()
+        ) if latest_canonical_date_value is not None else int(len(coverage_df))
 
         reference_date = latest_expected_date if latest_expected_covered else latest_canonical_date
         reference_is_latest_expected = bool(reference_date is not None and reference_date == latest_expected_date)
@@ -2086,10 +2223,10 @@ def canonical_daily_health_status(conn, trading_day_limit: int = 30, reconciliat
             else:
                 reconciliation_status = "mismatch"
 
-        recent_expected_count = int(len(coverage))
-        recent_covered_dates = int(coverage["has_canonical_coverage"].fillna(False).sum()) if not coverage.empty else 0
-        recent_missing_dates = int((~coverage["has_canonical_coverage"].fillna(False)).sum()) if not coverage.empty else 0
-        recent_repair_involved_dates = int((coverage["repair_row_count"].fillna(0) > 0).sum()) if not coverage.empty else 0
+        recent_expected_count = int(len(coverage_df))
+        recent_covered_dates = int(coverage_df["has_canonical_coverage"].fillna(False).sum()) if not coverage_df.empty else 0
+        recent_missing_dates = int((~coverage_df["has_canonical_coverage"].fillna(False)).sum()) if not coverage_df.empty else 0
+        recent_repair_involved_dates = int((coverage_df["repair_row_count"].fillna(0) > 0).sum()) if not coverage_df.empty else 0
 
         latest_counts_row = latest_counts.iloc[0] if not latest_counts.empty else {}
         return pd.DataFrame(

@@ -166,8 +166,13 @@ try:
         counts = row_counts(conn)
         snaps = snapshot_counts(conn)
         baseline = baseline_status(conn)
-        canonical_daily_health = canonical_daily_health_status(conn, trading_day_limit=30, reconciliation_top_n=10)
         canonical_daily_recent = canonical_daily_recent_coverage(conn, trading_day_limit=30)
+        canonical_daily_health = canonical_daily_health_status(
+            conn,
+            trading_day_limit=30,
+            reconciliation_top_n=10,
+            coverage=canonical_daily_recent,
+        )
         source_audit = source_audit_status(conn)
         ticker_history_ready = ticker_history_readiness(conn, target_trading_days=30)
         sugg_counts = suggestion_status_counts(conn)

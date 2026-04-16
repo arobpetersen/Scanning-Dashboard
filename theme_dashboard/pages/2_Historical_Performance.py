@@ -9,12 +9,11 @@ from src.leaderboard_utils import (
 )
 from src.queries import (
     canonical_theme_snapshot_counts,
-    theme_ticker_metrics,
+    theme_ticker_metrics_for_theme_ids,
 )
 from src.rankings import ticker_standardized_composite_score
 from src.streamlit_utils import (
     db_cache_token,
-    extract_selected_row,
     load_current_ranking_snapshot_cached,
     load_theme_momentum_cached,
     render_dataframe,
@@ -31,7 +30,6 @@ from src.theme_service import list_themes, seed_if_needed
 TABLE_HELP = {
     "theme": "Theme name.",
     "category": "Theme category from the registry.",
-    "active_status": "Whether the theme is currently active in the registry.",
     "ticker_count": "Governed member count in the current view.",
     "eligible_contributor_count": "Current eligible preferred-source contributors supporting the theme metrics.",
     "participation_ratio": "Eligible contributors divided by governed ticker count.",
@@ -42,7 +40,7 @@ TABLE_HELP = {
     "perf_1m": "Current average 1-month return snapshot value for this theme.",
     "perf_3m": "Current average 3-month return snapshot value for this theme.",
     "breadth_1m": "Current positive 1M breadth across eligible contributors.",
-    "leadership_quality": "Compact current-state label based on contributor count, participation, and breadth.",
+    "leadership_quality": "Current-state leadership quality label aligned to Themes using current eligible contributor count, participation, and breadth.",
     "start_rank": "Theme rank at the start of the selected lookback window.",
     "end_rank": "Theme rank at the end of the selected lookback window.",
     "start_composite": "Composite score at the beginning of the selected window.",
@@ -180,6 +178,7 @@ def _build_master_research_grid(
     current_cols = [
         "theme_id",
         "ticker_count",
+        "eligible_standardized_count",
         "eligible_contributor_count",
         "eligible_breadth_pct",
         "avg_1w",
@@ -197,11 +196,23 @@ def _build_master_research_grid(
 
     latest_movement_context = pd.DataFrame(columns=["theme_id", "covered_eligible_constituent_count"])
     if not history.empty:
+        covered_count_col = next(
+            (
+                col
+                for col in ["covered_eligible_constituent_count", "covered_eligible_contributor_count"]
+                if col in history.columns
+            ),
+            None,
+        )
         latest_movement_context = (
             history.sort_values(["snapshot_time", "theme"])
             .groupby("theme_id", as_index=False)
-            .tail(1)[["theme_id", "covered_eligible_constituent_count"]]
+            .tail(1)[["theme_id", covered_count_col]].rename(
+                columns={covered_count_col: "covered_eligible_constituent_count"}
+            )
             .copy()
+            if covered_count_col is not None
+            else pd.DataFrame(columns=["theme_id", "covered_eligible_constituent_count"])
         )
 
     grid = summary_base.merge(theme_registry, on="theme_id", how="outer", suffixes=("", "_registry"))
@@ -217,11 +228,24 @@ def _build_master_research_grid(
     if "category_current" in grid.columns:
         grid["category"] = grid["category"].where(grid["category"].notna(), grid["category_current"])
 
-    grid["is_active"] = grid["is_active_registry"].fillna(True)
-    grid["active_status"] = grid["is_active"].map(lambda value: "Active" if bool(value) else "Inactive")
+    grid["is_active"] = (
+        grid["is_active_registry"]
+        .astype("boolean")
+        .fillna(True)
+        .astype(bool)
+    )
+    grid = grid[grid["is_active"]].copy()
+    grid["eligible_standardized_count"] = pd.to_numeric(grid.get("eligible_standardized_count"), errors="coerce")
     grid["eligible_contributor_count"] = pd.to_numeric(grid.get("eligible_contributor_count"), errors="coerce")
     covered_counts = pd.to_numeric(grid.get("covered_eligible_constituent_count"), errors="coerce")
-    grid["eligible_contributor_count"] = grid["eligible_contributor_count"].where(grid["eligible_contributor_count"].notna(), covered_counts)
+    grid["eligible_contributor_count"] = (
+        grid["eligible_contributor_count"]
+        .where(grid["eligible_contributor_count"].notna(), grid["eligible_standardized_count"])
+        .where(
+            grid["eligible_contributor_count"].notna() | grid["eligible_standardized_count"].notna(),
+            covered_counts,
+        )
+    )
     grid["ticker_count"] = pd.to_numeric(grid.get("ticker_count"), errors="coerce")
     grid["eligible_contributor_count"] = grid["eligible_contributor_count"].fillna(0)
     grid["ticker_count"] = grid["ticker_count"].fillna(0)
@@ -249,7 +273,6 @@ def _build_master_research_grid(
         "theme_id",
         "theme",
         "category",
-        "active_status",
         "ticker_count",
         "eligible_contributor_count",
         "participation_ratio",
@@ -286,22 +309,28 @@ def _attach_grid_top_tickers(grid: pd.DataFrame, *, top_k: int = 4) -> pd.DataFr
         return out
 
     out = grid.copy()
+    theme_ids = sorted({int(value) for value in out["theme_id"].dropna().astype(int).tolist()})
+    if not theme_ids:
+        out["leaders"] = ""
+        return out
+
     leaders_by_theme_id: dict[int, str] = {}
     with get_conn() as conn:
-        for theme_id in out["theme_id"].dropna().astype(int).tolist():
-            ticker_df = theme_ticker_metrics(conn, int(theme_id))
-            if ticker_df.empty:
-                leaders_by_theme_id[int(theme_id)] = ""
-                continue
-            scored = ticker_df.copy()
-            scored["perf_1w"] = pd.to_numeric(scored.get("perf_1w"), errors="coerce")
-            scored["perf_1m"] = pd.to_numeric(scored.get("perf_1m"), errors="coerce")
-            scored["perf_3m"] = pd.to_numeric(scored.get("perf_3m"), errors="coerce")
-            scored["ticker_composite_score"] = scored.apply(
-                lambda row: ticker_standardized_composite_score(row.get("perf_1w"), row.get("perf_1m"), row.get("perf_3m")),
-                axis=1,
-            )
-            leaders_by_theme_id[int(theme_id)] = format_top_ticker_leaders(scored, top_k=top_k)
+        ticker_df = theme_ticker_metrics_for_theme_ids(conn, theme_ids)
+    if ticker_df.empty:
+        out["leaders"] = ""
+        return out
+
+    scored = ticker_df.copy()
+    scored["perf_1w"] = pd.to_numeric(scored.get("perf_1w"), errors="coerce")
+    scored["perf_1m"] = pd.to_numeric(scored.get("perf_1m"), errors="coerce")
+    scored["perf_3m"] = pd.to_numeric(scored.get("perf_3m"), errors="coerce")
+    scored["ticker_composite_score"] = scored.apply(
+        lambda row: ticker_standardized_composite_score(row.get("perf_1w"), row.get("perf_1m"), row.get("perf_3m")),
+        axis=1,
+    )
+    for theme_id, theme_rows in scored.groupby("theme_id", sort=False):
+        leaders_by_theme_id[int(theme_id)] = format_top_ticker_leaders(theme_rows, top_k=top_k)
 
     out["leaders"] = out["theme_id"].map(lambda value: leaders_by_theme_id.get(int(value), "") if pd.notna(value) else "")
     return out
@@ -330,7 +359,7 @@ render_feedback_message(st.session_state, "historical_refresh_feedback")
 
 current_snapshot = load_current_ranking_snapshot_cached(db_token)
 lookback_days = 30
-analysis_top_n = max(20, len(themes))
+analysis_top_n = 20
 momentum = load_theme_momentum_cached(db_token, int(lookback_days), top_n=analysis_top_n)
 with get_conn() as conn:
     canonical_counts = canonical_theme_snapshot_counts(conn)
@@ -364,9 +393,10 @@ using_canonical_primary = "canonical_daily" in window_provenance_mix
 
 master_grid = _build_master_research_grid(themes, summary, history, current_snapshot)
 master_grid = _attach_grid_top_tickers(master_grid, top_k=4)
+master_grid = master_grid.reset_index(drop=True)
 st.subheader("Master Theme Research Grid")
 st.caption(
-    "Primary research surface: one row per theme combining current ranking context, ATR companion comparison, and historical start-to-end movement. "
+    "Primary research surface: active themes only, combining current ranking context, ATR companion comparison, and historical start-to-end movement. "
     "This workflow now prefers canonical daily standardized history when available."
 )
 if using_canonical_primary:
@@ -382,7 +412,7 @@ st.caption(
     "Lineage/debug tools are intentionally outside the main workflow. Treat the grid and summary tables above as the primary view; "
     "use audit helpers only when you need to inspect winner selection or provenance edge cases."
 )
-fg1, fg2, fg3 = st.columns(3)
+fg1, fg3 = st.columns(2)
 with fg1:
     category_options = sorted(master_grid["category"].dropna().astype(str).unique().tolist()) if not master_grid.empty else []
     grid_category_filter = st.multiselect(
@@ -392,8 +422,6 @@ with fg1:
         key="historical_grid_category",
         placeholder="All categories",
     )
-with fg2:
-    active_filter = st.selectbox("Active state", ["all", "active only", "inactive only"], index=0, key="historical_grid_active")
 with fg3:
     quality_options = sorted(master_grid["leadership_quality"].dropna().astype(str).unique().tolist()) if not master_grid.empty else []
     leadership_quality_filter = st.multiselect(
@@ -473,10 +501,6 @@ if grid_category_filter:
     filtered_grid = filtered_grid[filtered_grid["category"].astype(str).isin([str(value) for value in grid_category_filter])]
 if exclude_category_filter:
     filtered_grid = filtered_grid[~filtered_grid["category"].astype(str).isin([str(value) for value in exclude_category_filter])]
-if active_filter == "active only":
-    filtered_grid = filtered_grid[filtered_grid["active_status"] == "Active"]
-elif active_filter == "inactive only":
-    filtered_grid = filtered_grid[filtered_grid["active_status"] == "Inactive"]
 if leadership_quality_filter:
     filtered_grid = filtered_grid[filtered_grid["leadership_quality"].astype(str).isin([str(value) for value in leadership_quality_filter])]
 if exclude_quality_filter:
@@ -522,11 +546,12 @@ master_grid_cols = [
 master_display = disambiguate_theme_labels(filtered_grid)
 if "theme_display" in master_display.columns:
     master_display["theme"] = master_display["theme_display"]
-master_event = render_dataframe(
+master_grid_height = max(120, 35 * (len(master_display) + 1) + 2)
+render_dataframe(
     "historical_master_research_grid",
     master_display[master_grid_cols],
     width="stretch",
-    height=1200,
+    height=master_grid_height,
     hide_index=True,
     column_config=_config_for_columns(master_grid_cols) | {
         "leaders": st.column_config.TextColumn("Top Tickers", width="medium"),
@@ -535,15 +560,32 @@ master_event = render_dataframe(
         "perf_3m": st.column_config.NumberColumn("Perf 3M", format="%.1f%%"),
         "breadth_1m": st.column_config.NumberColumn("Breadth 1M", format="%.1f%%"),
     },
-    on_select="rerun",
-    selection_mode="single-row",
     key="historical_master_research_grid",
 )
-master_idx = extract_selected_row(master_event)
-if master_idx is not None and 0 <= master_idx < len(filtered_grid):
-    picked_row = filtered_grid.iloc[int(master_idx)]
-    st.session_state["historical_selected_theme_id"] = _normalize_theme_identifier(picked_row.get("theme_id"))
-    st.session_state["historical_selected_theme_name"] = str(picked_row.get("theme") or "")
-    picked_theme = _display_theme_name_from_row(picked_row, theme_label_by_id, theme_ids_by_name)
-    if st.button(f"Open grid-selected theme `{picked_theme}` in Themes detail", key="open_historical_grid_theme"):
-        _open_theme_in_themes(picked_row.get("theme_id"), picked_theme, theme_label_by_id, theme_ids_by_name, "historical_grid")
+if not filtered_grid.empty:
+    open_theme_options = (
+        filtered_grid[["theme_id", "theme"]]
+        .dropna(subset=["theme_id"])
+        .drop_duplicates(subset=["theme_id"])
+        .copy()
+    )
+    open_theme_options["theme_label"] = open_theme_options.apply(
+        lambda row: _display_theme_name_from_row(row, theme_label_by_id, theme_ids_by_name),
+        axis=1,
+    )
+    open_theme_options = open_theme_options.sort_values("theme_label", kind="stable").reset_index(drop=True)
+    selected_theme_label = st.selectbox(
+        "Open theme in Themes detail",
+        options=open_theme_options["theme_label"].tolist(),
+        index=0,
+        key="historical_open_theme_label",
+    )
+    if st.button(f"Open `{selected_theme_label}` in Themes detail", key="open_historical_grid_theme"):
+        selected_theme_row = open_theme_options.loc[open_theme_options["theme_label"] == selected_theme_label].iloc[0]
+        _open_theme_in_themes(
+            selected_theme_row.get("theme_id"),
+            selected_theme_row.get("theme"),
+            theme_label_by_id,
+            theme_ids_by_name,
+            "historical_grid",
+        )

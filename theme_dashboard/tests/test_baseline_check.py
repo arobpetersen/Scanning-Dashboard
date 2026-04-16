@@ -5,8 +5,17 @@ from unittest.mock import patch
 import duckdb
 
 from run_baseline_check import collect_baseline_check, format_baseline_check
-from src.queries import baseline_status, core_table_status, preferred_theme_snapshot_source, preferred_ticker_snapshot_source, source_audit_status, theme_ticker_metrics
-from src.rankings import compute_theme_rankings
+from src.leaderboard_utils import format_top_ticker_leaders
+from src.queries import (
+    baseline_status,
+    core_table_status,
+    preferred_theme_snapshot_source,
+    preferred_ticker_snapshot_source,
+    source_audit_status,
+    theme_ticker_metrics,
+    theme_ticker_metrics_for_theme_ids,
+)
+from src.rankings import compute_theme_rankings, ticker_standardized_composite_score
 
 
 class TestBaselineQueries(unittest.TestCase):
@@ -270,6 +279,69 @@ class TestLivePreferredSourceSelection(unittest.TestCase):
         self.assertEqual(audit["latest_ticker_view_sources"], "live")
         self.assertTrue(bool(audit["historical_residue_only"]))
         self.assertFalse(bool(audit["active_contamination"]))
+        conn.close()
+
+    def test_batched_theme_ticker_metrics_matches_single_theme_helper(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("create table themes(id bigint, name varchar, category varchar, is_active boolean)")
+        conn.execute("create table theme_membership(theme_id bigint, ticker varchar)")
+        conn.execute(
+            """
+            create table refresh_runs(
+                run_id bigint,
+                provider varchar,
+                started_at timestamp,
+                finished_at timestamp,
+                status varchar,
+                ticker_count bigint,
+                success_count bigint,
+                failure_count bigint
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table ticker_snapshots(
+                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
+                last_updated timestamp, snapshot_source varchar
+            )
+            """
+        )
+
+        conn.execute("insert into themes values (1, 'AI', 'Tech', true), (2, 'Power', 'Infra', true)")
+        conn.execute("insert into theme_membership values (1, 'NVDA'), (1, 'MSFT'), (2, 'VRT')")
+        conn.execute("insert into refresh_runs values (1, 'live', '2026-03-10 20:00:00', '2026-03-10 22:00:00', 'success', 3, 3, 0)")
+        conn.execute(
+            """
+            insert into ticker_snapshots values
+            (1, 'NVDA', 100, 1, 2, 3, 1000, 200000, null, null, null, '2026-03-10 21:00:00', 'live'),
+            (1, 'MSFT', 101, 2, 3, 4, 1001, 200001, null, null, null, '2026-03-10 21:00:00', 'live'),
+            (1, 'VRT', 102, 3, 4, 5, 1002, 200002, null, null, null, '2026-03-10 21:00:00', 'live')
+            """
+        )
+
+        single_theme = theme_ticker_metrics(conn, 1).sort_values("ticker").reset_index(drop=True)
+        batched = theme_ticker_metrics_for_theme_ids(conn, [1, 2]).sort_values(["theme_id", "ticker"]).reset_index(drop=True)
+
+        self.assertEqual(sorted(batched["theme_id"].unique().tolist()), [1, 2])
+        batched_theme_one = batched[batched["theme_id"] == 1].drop(columns=["theme_id"]).reset_index(drop=True)
+        self.assertTrue(single_theme.equals(batched_theme_one))
+        single_scored = single_theme.copy()
+        single_scored["ticker_composite_score"] = single_scored.apply(
+            lambda row: ticker_standardized_composite_score(row.get("perf_1w"), row.get("perf_1m"), row.get("perf_3m")),
+            axis=1,
+        )
+        batched_scored = batched_theme_one.copy()
+        batched_scored["ticker_composite_score"] = batched_scored.apply(
+            lambda row: ticker_standardized_composite_score(row.get("perf_1w"), row.get("perf_1m"), row.get("perf_3m")),
+            axis=1,
+        )
+        self.assertEqual(
+            format_top_ticker_leaders(single_scored, top_k=3),
+            format_top_ticker_leaders(batched_scored, top_k=3),
+        )
+        self.assertEqual(format_top_ticker_leaders(single_scored, top_k=2), "MSFT, NVDA")
         conn.close()
 
 

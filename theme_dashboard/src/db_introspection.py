@@ -31,7 +31,15 @@ def _should_retry_with_bootstrap(exc: Exception) -> bool:
 
 
 def _fetch_exists_row(conn, sql: str, params: list[str]) -> bool:
-    row = conn.execute(sql, params).fetchone()
+    try:
+        row = conn.execute(sql, params).fetchone()
+    except (duckdb.InvalidInputException, duckdb.InternalException) as exc:
+        if not _should_retry_with_bootstrap(exc):
+            raise
+        from .database import get_bootstrap_conn
+
+        with get_bootstrap_conn() as bootstrap_conn:
+            row = bootstrap_conn.execute(sql, params).fetchone()
     return bool(row)
 
 

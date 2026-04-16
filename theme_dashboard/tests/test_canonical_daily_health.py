@@ -279,3 +279,41 @@ class TestCanonicalDailyHealth(unittest.TestCase):
             self.assertTrue(bool(status["raw_vs_ranked_date_differs"]))
         finally:
             conn.close()
+
+    def test_canonical_daily_health_status_matches_when_reusing_precomputed_coverage(self):
+        conn = self._build_conn()
+        try:
+            self._seed_current_snapshot_state(conn)
+            self._seed_expected_trading_dates(conn)
+            self._insert_canonical_row(
+                conn,
+                snapshot_date="2026-04-14",
+                run_id=8,
+                theme_id=1,
+                theme="Alpha",
+                snapshot_source="live",
+                extract_session="after_hours_official",
+                canonical_reason="official_daily_refresh",
+                standardized_score=15.0,
+                canonical_rank=1,
+            )
+            self._insert_canonical_row(
+                conn,
+                snapshot_date="2026-04-14",
+                run_id=8,
+                theme_id=2,
+                theme="Beta",
+                snapshot_source="live",
+                extract_session="after_hours_official",
+                canonical_reason="official_daily_refresh",
+                standardized_score=9.0,
+                canonical_rank=2,
+            )
+
+            coverage = canonical_daily_recent_coverage(conn, trading_day_limit=3)
+            direct = canonical_daily_health_status(conn, trading_day_limit=3, reconciliation_top_n=2)
+            reused = canonical_daily_health_status(conn, trading_day_limit=3, reconciliation_top_n=2, coverage=coverage)
+
+            self.assertTrue(direct.equals(reused))
+        finally:
+            conn.close()
