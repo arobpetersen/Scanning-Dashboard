@@ -18,6 +18,7 @@ from .config import DB_PATH
 
 DB_CONNECT_RETRY_ATTEMPTS = 3
 DB_CONNECT_RETRY_SLEEP_SECONDS = 0.15
+_LAST_RECOVERY_NOTE: str | None = None
 
 
 class DatabaseLockedError(RuntimeError):
@@ -51,6 +52,25 @@ def _database_locked_message(db_path: str) -> str:
     )
 
 
+def latest_database_recovery_note() -> str | None:
+    return _LAST_RECOVERY_NOTE
+
+
+def _is_wal_replay_internal_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return "failure while replaying wal file" in message and "getdefaultdatabase" in message
+
+
+def _quarantine_unreplayable_wal(db_path: str) -> str | None:
+    wal_path = Path(f"{db_path}.wal")
+    if not wal_path.exists():
+        return None
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    quarantine_path = wal_path.with_name(f"{wal_path.name}.unreplayable_{stamp}.bak")
+    wal_path.replace(quarantine_path)
+    return str(quarantine_path)
+
+
 def _is_transaction_conflict_error(exc: Exception) -> bool:
     return "conflict on update" in str(exc or "").lower()
 
@@ -66,8 +86,10 @@ def _best_effort_init_update(conn, sql: str, params: list[object] | None = None)
 
 
 def _connect_with_retry(db_path: str):
+    global _LAST_RECOVERY_NOTE
     conn = None
     last_exc: Exception | None = None
+    recovered_from_wal = False
     for attempt in range(DB_CONNECT_RETRY_ATTEMPTS):
         try:
             conn = duckdb.connect(db_path)
@@ -80,6 +102,19 @@ def _connect_with_retry(db_path: str):
                 time.sleep(DB_CONNECT_RETRY_SLEEP_SECONDS)
                 continue
             raise DatabaseLockedError(_database_locked_message(db_path)) from exc
+        except duckdb.InternalException as exc:
+            if recovered_from_wal or not _is_wal_replay_internal_error(exc):
+                raise
+            quarantined_path = _quarantine_unreplayable_wal(db_path)
+            if not quarantined_path:
+                raise
+            _LAST_RECOVERY_NOTE = (
+                "Recovered local DuckDB access by quarantining an unreplayable WAL file. "
+                f"Original DB: {db_path} | Quarantined WAL backup: {quarantined_path}"
+            )
+            recovered_from_wal = True
+            last_exc = exc
+            continue
     if conn is None:
         raise DatabaseLockedError(_database_locked_message(db_path)) from last_exc
     return conn
@@ -196,6 +231,7 @@ CREATE TABLE IF NOT EXISTS ticker_snapshots (
     run_id BIGINT NOT NULL,
     ticker VARCHAR NOT NULL,
     price DOUBLE,
+    perf_1d DOUBLE,
     perf_1w DOUBLE,
     perf_1m DOUBLE,
     perf_3m DOUBLE,
@@ -664,6 +700,7 @@ def init_db() -> None:
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS source_updated_at TIMESTAMP")
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS proposed_theme_category VARCHAR")
         conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
+        conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS perf_1d DOUBLE")
         conn.execute("ALTER TABLE theme_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
         conn.execute("ALTER TABLE ticker_daily_history ADD COLUMN IF NOT EXISTS atr_14 DOUBLE")
         conn.execute("ALTER TABLE ticker_daily_history ADD COLUMN IF NOT EXISTS atr_pct_14 DOUBLE")

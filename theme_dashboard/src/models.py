@@ -16,6 +16,7 @@ class Theme:
 class TickerSnapshot:
     ticker: str
     price: float
+    perf_1d: float
     perf_1w: float
     perf_1m: float
     perf_3m: float

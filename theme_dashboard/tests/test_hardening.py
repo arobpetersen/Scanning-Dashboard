@@ -16,12 +16,14 @@ from src.db_introspection import table_exists, table_has_column
 from src.failure_classification import categorize_failure_message
 from src.inflection_engine import compute_theme_inflections
 from src.leaderboard_utils import (
+    annotate_current_leadership_quality,
     build_category_leaderboard,
     build_category_theme_breakdown,
     build_current_leadership_table,
     build_current_performance_table,
     build_current_rank_movers_table,
     build_window_leaderboard,
+    current_leadership_quality_label,
     disambiguate_theme_labels,
     format_rank_history_delta,
     format_top_ticker_leaders,
@@ -1050,9 +1052,92 @@ class TestSuggestionsPageState(unittest.TestCase):
         self.assertEqual(out["theme"].tolist(), ["Broad Tech", "Narrow Spike", "Turning Up", "Small But Broad"])
         self.assertEqual(out.iloc[0]["leadership_quality"], "Broad leader")
         self.assertEqual(out.iloc[1]["leadership_quality"], "Thin / filtered")
-        self.assertEqual(out.iloc[2]["leadership_quality"], "Narrow leader")
-        self.assertEqual(out.iloc[3]["leadership_quality"], "Broad leader")
+        self.assertEqual(out.iloc[2]["leadership_quality"], "Narrow strength")
+        self.assertEqual(out.iloc[3]["leadership_quality"], "")
         self.assertEqual(int(out.iloc[0]["eligible_contributor_count"]), 6)
+
+    def test_current_leadership_quality_uses_leader_gate_and_concentration_labels(self):
+        self.assertEqual(
+            current_leadership_quality_label(
+                pd.Series(
+                    {
+                        "leader_cohort_eligible": False,
+                        "ticker_count": 8,
+                        "eligible_contributor_count": 5,
+                        "eligible_breadth_pct": 72.0,
+                    }
+                )
+            ),
+            "",
+        )
+        self.assertEqual(
+            current_leadership_quality_label(
+                pd.Series(
+                    {
+                        "leader_cohort_eligible": True,
+                        "ticker_count": 7,
+                        "eligible_contributor_count": 5,
+                        "eligible_breadth_pct": 74.0,
+                    }
+                )
+            ),
+            "Broad leader",
+        )
+        self.assertEqual(
+            current_leadership_quality_label(
+                pd.Series(
+                    {
+                        "leader_cohort_eligible": True,
+                        "ticker_count": 6,
+                        "eligible_contributor_count": 3,
+                        "eligible_breadth_pct": 50.0,
+                    }
+                )
+            ),
+            "Narrow leader",
+        )
+        self.assertEqual(
+            current_leadership_quality_label(
+                pd.Series(
+                    {
+                        "leader_cohort_eligible": False,
+                        "ticker_count": 6,
+                        "eligible_contributor_count": 3,
+                        "eligible_breadth_pct": 83.0,
+                    }
+                )
+            ),
+            "Narrow strength",
+        )
+        self.assertEqual(
+            current_leadership_quality_label(
+                pd.Series(
+                    {
+                        "leader_cohort_eligible": False,
+                        "ticker_count": 6,
+                        "eligible_contributor_count": 4,
+                        "eligible_breadth_pct": 62.0,
+                    }
+                )
+            ),
+            "",
+        )
+
+    def test_annotate_current_leadership_quality_uses_top_eight_percent_gate(self):
+        df = pd.DataFrame(
+            [
+                {"theme": f"Theme {idx}", "rank": idx, "is_active": True, "ticker_count": 6, "eligible_contributor_count": 5, "eligible_breadth_pct": 75.0}
+                for idx in range(1, 26)
+            ]
+        )
+
+        out = annotate_current_leadership_quality(df)
+
+        self.assertEqual(int(out["leader_cohort_cutoff_rank"].iloc[0]), 2)
+        self.assertEqual(int(out["leader_cohort_eligible"].sum()), 2)
+        self.assertEqual(out.iloc[0]["leadership_quality"], "Broad leader")
+        self.assertEqual(out.iloc[1]["leadership_quality"], "Broad leader")
+        self.assertEqual(out.iloc[2]["leadership_quality"], "")
 
     def test_rank_history_delta_helper_formats_compact_table_text(self):
         self.assertEqual(
@@ -1198,8 +1283,8 @@ class TestStandardizedCompositeScore(unittest.TestCase):
         self.assertEqual(float(current_momentum_quality_factor(5.0)), 0.60)
 
     def test_ticker_standardized_composite_score_uses_same_baseline_strength_philosophy(self):
-        self.assertAlmostEqual(float(ticker_standardized_composite_score(10.0, 20.0, 5.0)), 17.0, places=6)
-        self.assertLess(float(ticker_standardized_composite_score(10.0, 20.0, -25.0)), 17.0)
+        self.assertAlmostEqual(float(ticker_standardized_composite_score(10.0, 20.0, 5.0)), 14.25, places=6)
+        self.assertLess(float(ticker_standardized_composite_score(10.0, 20.0, -25.0)), 14.25)
 
     def test_ticker_current_momentum_score_uses_composite_quality_check(self):
         stronger = float(ticker_current_momentum_score(16.0, 14.0, -8.0))
@@ -1406,10 +1491,10 @@ class TestStandardizedCompositeScore(unittest.TestCase):
         out = _build_current_ranking_metrics(raw).sort_values("standardized_composite_score", ascending=False).reset_index(drop=True)
 
         self.assertEqual(out.iloc[0]["theme"], "Weak 3M But Standout")
-        self.assertEqual(float(out[out["theme"] == "Weak 3M But Standout"]["standardized_recovery_factor"].iloc[0]), 1.0)
+        self.assertEqual(float(out[out["theme"] == "Weak 3M But Standout"]["standardized_recovery_factor"].iloc[0]), 0.5)
         self.assertAlmostEqual(
             float(out[out["theme"] == "Weak 3M And Middling"]["standardized_recovery_factor"].iloc[0]),
-            0.69,
+            0.50,
             places=2,
         )
         self.assertGreater(
@@ -1490,7 +1575,7 @@ class TestStandardizedCompositeScore(unittest.TestCase):
 
         self.assertGreater(float(low_quality["avg_1w"]), float(credible["avg_1w"]))
         self.assertLess(float(low_quality["current_momentum_quality_factor"]), 1.0)
-        self.assertEqual(float(credible["current_momentum_quality_factor"]), 1.0)
+        self.assertAlmostEqual(float(credible["current_momentum_quality_factor"]), 0.87, places=2)
         self.assertGreater(float(credible["current_momentum_score"]), float(low_quality["current_momentum_score"]))
 
     def test_standardized_composite_stays_null_when_no_pairwise_1w_1m_inputs_exist(self):
@@ -4156,9 +4241,8 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn("turn on `Include suppressed tickers` to inspect them", content)
         self.assertIn("No preferred-source theme history rows are available yet for this selected theme.", content)
         self.assertIn('render_feedback_message(st.session_state, "themes_refresh_feedback")', content)
-        self.assertIn('freshness_c1.metric("Current tables snapshot"', content)
-        self.assertIn('freshness_c2.metric("1W movement end"', content)
-        self.assertIn("DAILY_HISTORICAL_APPEND_STALE_MINUTES = 45", content)
+        self.assertIn('freshness_c1.metric("Current live snapshot"', content)
+        self.assertIn('freshness_c2.metric("Latest ranked canonical date"', content)
         self.assertIn('show_leadership_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_leadership")', content)
         self.assertIn('show_current_1w_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_current_1w")', content)
         self.assertIn('show_current_1m_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_current_1m")', content)
@@ -4188,7 +4272,8 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('"composite_score": "composite"', content)
         self.assertIn('"eligible_breadth_pct": "eligible %"', content)
         self.assertIn('"leadership_quality": "quality"', content)
-        self.assertIn('visible_cols = [\n        "rank",\n        "theme",\n        "category",\n        "current_momentum_score",', content)
+        self.assertIn('visible_cols = [\n        "rank",\n        "theme",\n        "category",\n        "leaders",\n        "current_momentum_score",', content)
+        self.assertIn('"avg_1d",', content)
         self.assertIn('"avg_3m",', content)
         self.assertIn('visible_cols = [', content)
         self.assertIn('"category",', content)
@@ -4247,18 +4332,18 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('st.caption("Current theme")', content)
         self.assertIn('st.markdown("### Search and select a theme to view detail.")', content)
         self.assertNotIn('st.info("Search and select a theme to view detail.")', content)
-        self.assertIn('theme_search_widget_key = f"theme_detail_view_search__{int(st.session_state.get(\'theme_detail_view_search__widget_version\', 0))}"', content)
+        self.assertIn('theme_search_widget_key = prepare_replaceable_selectbox_widget_key(', content)
         self.assertIn('selected_search = st.selectbox(', content)
         self.assertIn('index=None,', content)
         self.assertIn('placeholder="Type to search and select a different theme"', content)
         self.assertIn('_set_theme_selection(int(options[selection]), selection, "manual_dropdown")', content)
-        self.assertIn('rotate_replaceable_selectbox_widget(st.session_state, "theme_detail_view_search")', content)
+        self.assertIn('prepare_replaceable_selectbox_widget_key(', content)
         self.assertIn('with st.container(border=True):', content)
         self.assertIn("unsafe_allow_html=True", content)
         self.assertIn("color:var(--text-color)", content)
         self.assertIn('st.markdown("<div style=\'height:0.25rem;\'></div>", unsafe_allow_html=True)', content)
         self.assertIn('explore_tab, manage_tab = st.tabs(["Explore Themes", "Manage & Ops"])', content)
-        self.assertIn("Start here: review current leadership or current top themes, then click any theme row to open detail below.", content)
+        self.assertIn("Use Themes for review and drilldown. Run daily sync/finalization from the Apps page", content)
         self.assertIn('with st.expander("Internal testing quick guide", expanded=False):', content)
         self.assertIn("Most useful feedback: confusing labels/states, drilldown or selection bugs, trust/reconciliation issues", content)
         self.assertIn('selected_theme_id = st.session_state.get(SELECTED_THEME_ID_KEY)', content)
@@ -4289,50 +4374,33 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('with st.expander("Standardized Composite Validation", expanded=False):', content)
         self.assertIn('with st.expander("Current Momentum Validation", expanded=False):', content)
         self.assertIn("Themes page above now uses the standardized composite as its default baseline", content)
+        self.assertIn("The standardized score uses 20% avg_1w, 55% avg_1m, 25% avg_3m", content)
         self.assertIn('current_snapshot.get("standardized_rankings", pd.DataFrame())', content)
-        self.assertIn('current_snapshot.get("standardized_comparison", pd.DataFrame())', content)
-        self.assertIn('current_snapshot.get("current_momentum_rankings", pd.DataFrame())', content)
-        self.assertIn('current_snapshot.get("current_momentum_comparison", pd.DataFrame())', content)
+        self.assertIn('validation_snapshot.get("standardized_comparison", pd.DataFrame())', content)
+        self.assertIn('validation_snapshot.get("current_momentum_rankings", pd.DataFrame())', content)
+        self.assertIn('validation_snapshot.get("current_momentum_comparison", pd.DataFrame())', content)
         self.assertIn('"standardized_recovery_factor"', content)
         self.assertIn('"recovery_factor"', content)
         self.assertIn('"current_momentum_quality_factor"', content)
         self.assertIn('"quality_factor"', content)
         self.assertIn('st.caption("Current theme")', content)
-        self.assertIn('theme_search_widget_key = f"theme_detail_view_search__{int(st.session_state.get(\'theme_detail_view_search__widget_version\', 0))}"', content)
+        self.assertIn('theme_search_widget_key = prepare_replaceable_selectbox_widget_key(', content)
         self.assertIn('selected_search = st.selectbox(', content)
         self.assertIn('index=None,', content)
         self.assertIn('placeholder="Type to search and select a different theme"', content)
-        self.assertIn('rotate_replaceable_selectbox_widget(st.session_state, "theme_detail_view_search")', content)
+        self.assertIn('prepare_replaceable_selectbox_widget_key(', content)
         self.assertIn('_set_theme_selection(int(options[selection]), selection, "manual_dropdown")', content)
         self.assertIn('if col not in standardized_rankings.columns:', content)
         self.assertIn('if col not in comparison.columns:', content)
         self.assertIn('if st.button("Reload latest DB state", key="themes_force_refresh")', content)
-        self.assertIn('if st.button("Materialize latest historical day", key="themes_force_latest_day_refresh")', content)
-        self.assertIn('with st.expander("Advanced refresh controls", expanded=False):', content)
-        self.assertIn("Use these only when you intentionally want to refresh cached page analytics or advance historical movement history.", content)
-        self.assertIn("def _active_daily_historical_append_runs() -> pd.DataFrame:", content)
-        self.assertIn("AND run_kind = 'daily_historical_append'", content)
-        self.assertIn('active["likely_stale"] = age_minutes >= float(DAILY_HISTORICAL_APPEND_STALE_MINUTES)', content)
-        self.assertIn("Materialize latest historical day did not start because a daily historical append run is already active.", content)
-        self.assertIn("A daily historical append run appears likely stale/orphaned.", content)
-        self.assertIn("Materialize latest historical day did not start because a daily historical append run looks stale/orphaned.", content)
-        self.assertIn("The duplicate-run guard will block new Themes materialization attempts until this stale run is cleaned up manually.", content)
-        self.assertIn('status_container = st.status("Materialize latest historical day: started.", expanded=True)', content)
-        self.assertIn('status_container.write("Historical append step running against provider historical data for the latest trading day.")', content)
-        self.assertIn('status_container.write("Cache clear and rerun preparation running.")', content)
-        self.assertIn('label=f"Materialize latest historical day: {final_state}."', content)
-        self.assertIn('label="Materialize latest historical day: error."', content)
-        self.assertIn("from src.database import get_bootstrap_conn, get_conn, init_db", content)
-        self.assertIn("with get_bootstrap_conn() as conn:", content)
-        self.assertIn('run_scheduled_historical_append(conn, provider_name="live", force=True)', content)
-        self.assertNotIn('run_scheduled_eod_refresh(conn, provider_name="live", force=True)', content)
-        self.assertIn("Movement-history layers were likely advanced to the latest trading day when provider history was available.", content)
-        self.assertIn("Verify next: 1W and 1M movement end should now reflect the latest available historical day", content)
-        self.assertIn("Materialize latest historical day failed before completion.", content)
-        self.assertIn("This recomputes current ranking and movement tables in-memory from stored data only", content)
-        self.assertIn("It does not fetch market data, rerun refresh_runs, or rebuild historical snapshots.", content)
-        self.assertIn("it runs the existing one-day historical append path for the latest trading day", content)
-        self.assertIn("It does not rerun current/live snapshot refresh", content)
+        self.assertIn('with st.expander("Refresh guidance", expanded=False):', content)
+        self.assertIn("Themes reads stored state only. Use `Apps` for daily sync/finalization", content)
+        self.assertIn("Light reload only. Use Apps for daily sync/finalization.", content)
+        self.assertNotIn("Finalize latest market day", content)
+        self.assertNotIn("Materialize latest canonical day", content)
+        self.assertNotIn("Append latest historical day (reconstructed)", content)
+        self.assertNotIn("def _active_daily_historical_append_runs() -> pd.DataFrame:", content)
+        self.assertNotIn("from src.database import get_bootstrap_conn, get_conn, init_db", content)
         self.assertIn("This is a historical end-of-window table", content)
         self.assertIn("top_themes` previews the strongest underlying themes in that category for the same window, with a minimal suffix only when duplicate names would otherwise look collapsed.", content)
 
@@ -4342,6 +4410,24 @@ class TestManualTickerSuppression(unittest.TestCase):
 
         self.assertIn('quality_label = "n/a (inactive theme)" if not bool(current_row.get("is_active")) else current_leadership_quality_label(current_row)', content)
         self.assertNotIn('build_current_leadership_table(theme_current_row, top_k=1).iloc[0]["leadership_quality"]', content)
+
+    def test_apps_page_source_uses_operational_daily_sync_status_panel(self):
+        page_source = Path(__file__).resolve().parents[1] / "app.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn("def _render_daily_sync_status(container, sync_result: dict[str, object]) -> None:", content)
+        self.assertIn('container.markdown("**Latest daily sync/finalize status**")', content)
+        self.assertIn('st.markdown("**Live refresh**")', content)
+        self.assertIn('st.markdown("**Historical append**")', content)
+        self.assertIn('st.markdown("**Canonical**")', content)
+        self.assertIn('with container.expander("Failure detail", expanded=False):', content)
+        self.assertIn("Apps owns daily sync/finalization. Run the authoritative refresh here, review the status, then use the rest of the app against the refreshed DB state.", content)
+        self.assertIn('with st.expander("Recent run note", expanded=False):', content)
+        self.assertNotIn('st.sidebar.radio("Refresh scope"', content)
+        self.assertNotIn('if st.button("Run refresh now", disabled=not live_configured):', content)
+        self.assertNotIn('st.subheader("Current Rankings")', content)
+        self.assertNotIn('with st.expander("Resolved ticker universe"):', content)
+        self.assertNotIn("Daily sync/finalization finished with overall status", content)
 
     def test_historical_backfill_source_updates_running_append_progress(self):
         source = Path(__file__).resolve().parents[1] / "src" / "historical_backfill.py"
@@ -4395,6 +4481,7 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn("Secondary workflow: audit historical theme movement, leadership rotation, and provenance-aware change across resolved boundary windows.", content)
         self.assertIn("Start in Themes for current leadership and live drilldown.", content)
         self.assertIn("Historical Performance tables are driven by the resolved boundary window shown above", content)
+        self.assertIn("Current-context columns in the master grid are `Rank`, `Composite Score`, `Comp ATR`, and `Perf 1D/1W/1M/3M`.", content)
         self.assertIn('sel = st.selectbox(', content)
         self.assertIn('index=default_index,', content)
         self.assertIn('default_index = None', content)
@@ -4409,6 +4496,28 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('leaders_cols.extend(["concentration", "delta_avg_1m", "delta_breadth"])', content)
         self.assertIn('"eligible_contributor_count"', content)
         self.assertIn('"covered_eligible_constituent_count"', content)
+        self.assertIn('with st.expander("Advanced filters", expanded=False):', content)
+        self.assertIn('"perf_1d",', content)
+        self.assertIn('st.column_config.NumberColumn("Perf 1D", format="%.1f%%")', content)
+        self.assertIn('def _render_gain_filter(', content)
+        self.assertIn('label_visibility="collapsed"', content)
+
+    def test_historical_performance_page_source_uses_compact_filters_and_perf_1d_master_grid(self):
+        page_source = Path(__file__).resolve().parents[1] / "pages" / "2_Historical_Performance.py"
+        content = page_source.read_text(encoding="utf-8")
+
+        self.assertIn('fg1, fg2, fg3 = st.columns([1.2, 1.2, 1.6])', content)
+        self.assertIn('gain_c1, gain_c2, gain_c3 = st.columns(3)', content)
+        self.assertIn('with st.expander("Advanced filters", expanded=False):', content)
+        self.assertIn('st.caption("Exclude category, theme, or leadership-quality slices here without cluttering the main filter row.")', content)
+        self.assertIn('def _render_gain_filter(', content)
+        self.assertIn('"avg_1d",', content)
+        self.assertIn('grid["perf_1d"] = pd.to_numeric(grid.get("avg_1d"), errors="coerce")', content)
+        self.assertIn('"perf_1d",', content)
+        self.assertIn('st.column_config.NumberColumn("Perf 1D", format="%.1f%%")', content)
+        self.assertIn('master_grid_cols = [', content)
+        self.assertIn('    "leadership_quality",\n    "ticker_count",', content)
+        self.assertNotIn('    "start_rank",\n    "end_rank",', content)
 
     def test_theme_selection_source_labels_cover_current_and_historical_click_paths(self):
         self.assertEqual(describe_selection_source("current_leadership"), "Current Market Leadership")

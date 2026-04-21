@@ -29,6 +29,7 @@ class MockProvider(ProviderBase):
             seed = self._rng_from_ticker(ticker)
 
             price = 5 + (seed % 45000) / 100
+            perf_1d = ((seed // 2) % 1600) / 100 - 8
             perf_1w = ((seed // 3) % 4000) / 100 - 20
             perf_1m = ((seed // 5) % 6000) / 100 - 30
             perf_3m = ((seed // 7) % 12000) / 100 - 60
@@ -42,6 +43,7 @@ class MockProvider(ProviderBase):
                 {
                     "ticker": ticker,
                     "price": round(price, 2),
+                    "perf_1d": round(perf_1d, 2),
                     "perf_1w": round(perf_1w, 2),
                     "perf_1m": round(perf_1m, 2),
                     "perf_3m": round(perf_3m, 2),

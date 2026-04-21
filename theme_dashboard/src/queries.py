@@ -651,6 +651,7 @@ def theme_ticker_metrics(conn, theme_id: int, *, include_suppressed: bool = Fals
             SELECT
                 upper(trim(s.ticker)) AS ticker,
                 s.price,
+                s.perf_1d,
                 s.perf_1w,
                 s.perf_1m,
                 s.perf_3m,
@@ -682,6 +683,7 @@ def theme_ticker_metrics(conn, theme_id: int, *, include_suppressed: bool = Fals
             gm.ticker,
             {suppression_select}
             cs.price,
+            cs.perf_1d,
             cs.perf_1w,
             cs.perf_1m,
             cs.perf_3m,
@@ -780,6 +782,7 @@ def theme_ticker_metrics_for_theme_ids(conn, theme_ids: list[int], *, include_su
             SELECT
                 upper(trim(s.ticker)) AS ticker,
                 s.price,
+                s.perf_1d,
                 s.perf_1w,
                 s.perf_1m,
                 s.perf_3m,
@@ -812,6 +815,7 @@ def theme_ticker_metrics_for_theme_ids(conn, theme_ids: list[int], *, include_su
             gm.ticker,
             {suppression_select}
             cs.price,
+            cs.perf_1d,
             cs.perf_1w,
             cs.perf_1m,
             cs.perf_3m,
@@ -1928,6 +1932,7 @@ def canonical_daily_window_status(conn) -> pd.DataFrame:
     empty = pd.DataFrame(
         [
             {
+                "latest_expected_trading_date": None,
                 "latest_raw_canonical_date": None,
                 "latest_ranked_canonical_date": None,
                 "raw_vs_ranked_date_differs": False,
@@ -1937,7 +1942,27 @@ def canonical_daily_window_status(conn) -> pd.DataFrame:
 
     def _load(active_conn=conn) -> pd.DataFrame:
         if not table_exists(active_conn, "canonical_theme_daily_snapshots"):
-            return empty.copy()
+            if not table_exists(active_conn, "ticker_daily_history"):
+                return empty.copy()
+
+        preferred_source = _preferred_ticker_history_source(active_conn)
+        latest_expected = None
+        if preferred_source and table_exists(active_conn, "ticker_daily_history"):
+            expected_row = active_conn.execute(
+                """
+                SELECT MAX(trading_date) AS latest_expected_trading_date
+                FROM ticker_daily_history
+                WHERE market_data_source = ?
+                """,
+                [preferred_source],
+            ).df()
+            if not expected_row.empty:
+                latest_expected = expected_row.iloc[0].get("latest_expected_trading_date")
+
+        if not table_exists(active_conn, "canonical_theme_daily_snapshots"):
+            empty_row = empty.copy()
+            empty_row.loc[:, "latest_expected_trading_date"] = latest_expected
+            return empty_row
 
         dates = active_conn.execute(
             """
@@ -1948,7 +1973,9 @@ def canonical_daily_window_status(conn) -> pd.DataFrame:
             """
         ).df()
         if dates.empty:
-            return empty.copy()
+            empty_row = empty.copy()
+            empty_row.loc[:, "latest_expected_trading_date"] = latest_expected
+            return empty_row
 
         row = dates.iloc[0]
         latest_raw = row.get("latest_raw_canonical_date")
@@ -1956,6 +1983,7 @@ def canonical_daily_window_status(conn) -> pd.DataFrame:
         return pd.DataFrame(
             [
                 {
+                    "latest_expected_trading_date": latest_expected,
                     "latest_raw_canonical_date": latest_raw,
                     "latest_ranked_canonical_date": latest_ranked,
                     "raw_vs_ranked_date_differs": bool(
@@ -2178,9 +2206,31 @@ def canonical_daily_health_status(
         leaders_match = False
 
         if reference_date is not None:
-            from .rankings import compute_current_ranking_snapshot
+            from .rankings import compute_current_ranking_snapshot, compute_current_ranking_snapshot_for_run
 
-            current_snapshot = compute_current_ranking_snapshot(active_conn)
+            reference_run_id = None
+            if latest_canonical_date is not None and reference_date == latest_canonical_date:
+                reference_run_id_row = active_conn.execute(
+                    """
+                    SELECT run_id
+                    FROM canonical_theme_daily_snapshots
+                    WHERE snapshot_date = ?
+                      AND canonical_rank IS NOT NULL
+                      AND run_id IS NOT NULL
+                    GROUP BY run_id
+                    ORDER BY COUNT(*) DESC, run_id DESC
+                    LIMIT 1
+                    """,
+                    [reference_date],
+                ).fetchone()
+                if reference_run_id_row is not None and reference_run_id_row[0] is not None:
+                    reference_run_id = int(reference_run_id_row[0])
+
+            current_snapshot = (
+                compute_current_ranking_snapshot_for_run(active_conn, reference_run_id)
+                if reference_run_id is not None
+                else compute_current_ranking_snapshot(active_conn)
+            )
             standardized_rankings = current_snapshot.get("standardized_rankings", pd.DataFrame())
             if not standardized_rankings.empty and "theme_id" in standardized_rankings.columns:
                 current_leaders = standardized_rankings["theme_id"].dropna().astype(int).tolist()
@@ -2260,6 +2310,74 @@ def canonical_daily_health_status(
     return _with_bootstrap_recovery(_load)
 
 
+def latest_ticker_history_atr_companion_fields(conn) -> pd.DataFrame:
+    preferred_source = _preferred_ticker_history_source(conn)
+    if (
+        not preferred_source
+        or not table_exists(conn, "ticker_daily_history")
+        or not table_has_column(conn, "ticker_daily_history", "atr_14")
+    ):
+        return pd.DataFrame(
+            columns=[
+                "ticker",
+                "perf_1w_atr_units",
+                "perf_1m_atr_units",
+            ]
+        )
+    return conn.execute(
+        """
+        WITH deduped AS (
+            SELECT
+                upper(trim(ticker)) AS ticker,
+                trading_date,
+                close,
+                atr_14,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ticker, trading_date
+                    ORDER BY updated_at DESC, provenance_source_label DESC
+                ) AS rn
+            FROM ticker_daily_history
+            WHERE market_data_source = ?
+        ),
+        ordered AS (
+            SELECT
+                ticker,
+                trading_date,
+                close,
+                atr_14,
+                ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) AS recency_rank
+            FROM deduped
+            WHERE rn = 1
+        )
+        SELECT
+            ticker,
+            CASE
+              WHEN MAX(CASE WHEN recency_rank = 1 THEN atr_14 END) IS NOT NULL
+               AND MAX(CASE WHEN recency_rank = 1 THEN atr_14 END) <> 0
+               AND MAX(CASE WHEN recency_rank = 6 THEN close END) IS NOT NULL THEN (
+                MAX(CASE WHEN recency_rank = 1 THEN close END)
+                - MAX(CASE WHEN recency_rank = 6 THEN close END)
+              ) / MAX(CASE WHEN recency_rank = 1 THEN atr_14 END)
+              ELSE NULL
+            END AS perf_1w_atr_units,
+            CASE
+              WHEN MAX(CASE WHEN recency_rank = 1 THEN atr_14 END) IS NOT NULL
+               AND MAX(CASE WHEN recency_rank = 1 THEN atr_14 END) <> 0
+               AND MAX(CASE WHEN recency_rank = 22 THEN close END) IS NOT NULL THEN (
+                MAX(CASE WHEN recency_rank = 1 THEN close END)
+                - MAX(CASE WHEN recency_rank = 22 THEN close END)
+              ) / MAX(CASE WHEN recency_rank = 1 THEN atr_14 END)
+              ELSE NULL
+            END AS perf_1m_atr_units
+        FROM ordered
+        WHERE recency_rank <= 22
+        GROUP BY ticker
+        ORDER BY ticker
+        """,
+        [preferred_source],
+    ).df()
+
+
 def latest_ticker_history_research_fields(conn) -> pd.DataFrame:
     preferred_source = _preferred_ticker_history_source(conn)
     if (
@@ -2277,12 +2395,11 @@ def latest_ticker_history_research_fields(conn) -> pd.DataFrame:
                 "perf_1m_atr_units",
             ]
         )
-
     return conn.execute(
         """
         WITH deduped AS (
             SELECT
-                ticker,
+                upper(trim(ticker)) AS ticker,
                 trading_date,
                 close,
                 atr_14,
@@ -2294,34 +2411,43 @@ def latest_ticker_history_research_fields(conn) -> pd.DataFrame:
             FROM ticker_daily_history
             WHERE market_data_source = ?
         ),
-        history AS (
+        ordered AS (
             SELECT
                 ticker,
                 trading_date,
                 close,
                 atr_14,
                 atr_pct_14,
-                LAG(close, 5) OVER (PARTITION BY ticker ORDER BY trading_date) AS close_5d_ago,
-                LAG(close, 21) OVER (PARTITION BY ticker ORDER BY trading_date) AS close_21d_ago,
-                ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) AS latest_rn
+                ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) AS recency_rank
             FROM deduped
             WHERE rn = 1
         )
         SELECT
             ticker,
-            trading_date AS latest_history_date,
-            atr_14,
-            atr_pct_14,
+            MAX(CASE WHEN recency_rank = 1 THEN trading_date END) AS latest_history_date,
+            MAX(CASE WHEN recency_rank = 1 THEN atr_14 END) AS atr_14,
+            MAX(CASE WHEN recency_rank = 1 THEN atr_pct_14 END) AS atr_pct_14,
             CASE
-              WHEN atr_14 IS NOT NULL AND atr_14 <> 0 AND close_5d_ago IS NOT NULL THEN (close - close_5d_ago) / atr_14
+              WHEN MAX(CASE WHEN recency_rank = 1 THEN atr_14 END) IS NOT NULL
+               AND MAX(CASE WHEN recency_rank = 1 THEN atr_14 END) <> 0
+               AND MAX(CASE WHEN recency_rank = 6 THEN close END) IS NOT NULL THEN (
+                MAX(CASE WHEN recency_rank = 1 THEN close END)
+                - MAX(CASE WHEN recency_rank = 6 THEN close END)
+              ) / MAX(CASE WHEN recency_rank = 1 THEN atr_14 END)
               ELSE NULL
             END AS perf_1w_atr_units,
             CASE
-              WHEN atr_14 IS NOT NULL AND atr_14 <> 0 AND close_21d_ago IS NOT NULL THEN (close - close_21d_ago) / atr_14
+              WHEN MAX(CASE WHEN recency_rank = 1 THEN atr_14 END) IS NOT NULL
+               AND MAX(CASE WHEN recency_rank = 1 THEN atr_14 END) <> 0
+               AND MAX(CASE WHEN recency_rank = 22 THEN close END) IS NOT NULL THEN (
+                MAX(CASE WHEN recency_rank = 1 THEN close END)
+                - MAX(CASE WHEN recency_rank = 22 THEN close END)
+              ) / MAX(CASE WHEN recency_rank = 1 THEN atr_14 END)
               ELSE NULL
             END AS perf_1m_atr_units
-        FROM history
-        WHERE latest_rn = 1
+        FROM ordered
+        WHERE recency_rank <= 22
+        GROUP BY ticker
         ORDER BY ticker
         """,
         [preferred_source],

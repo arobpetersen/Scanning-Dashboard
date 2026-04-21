@@ -5,6 +5,17 @@ import numpy as np
 
 from .config import CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS
 
+LEADERSHIP_QUALITY_LEADER_TOP_PCT = 0.08
+LEADERSHIP_QUALITY_THIN_MAX_ELIGIBLE = 2
+LEADERSHIP_QUALITY_THIN_BORDERLINE_MAX_ELIGIBLE = 3
+LEADERSHIP_QUALITY_THIN_BORDERLINE_MIN_PARTICIPATION = 0.40
+LEADERSHIP_QUALITY_BROAD_MIN_ELIGIBLE = 5
+LEADERSHIP_QUALITY_BROAD_MIN_PARTICIPATION = 0.65
+LEADERSHIP_QUALITY_BROAD_MIN_BREADTH = 70.0
+LEADERSHIP_QUALITY_NARROW_STRENGTH_MAX_ELIGIBLE = 3
+LEADERSHIP_QUALITY_NARROW_STRENGTH_MIN_PARTICIPATION = 0.40
+LEADERSHIP_QUALITY_NARROW_STRENGTH_MIN_BREADTH = 60.0
+
 def disambiguate_theme_labels(
     df: pd.DataFrame,
     *,
@@ -45,6 +56,44 @@ def disambiguate_theme_labels(
     return out
 
 
+def leadership_cohort_cutoff_rank(active_theme_count: int | float) -> int:
+    if pd.isna(active_theme_count) or float(active_theme_count) <= 0:
+        return 0
+    return int(max(1, np.ceil(float(active_theme_count) * LEADERSHIP_QUALITY_LEADER_TOP_PCT)))
+
+
+def annotate_current_leadership_quality(
+    df: pd.DataFrame,
+    *,
+    rank_col: str = "rank",
+    active_col: str = "is_active",
+) -> pd.DataFrame:
+    if df.empty:
+        out = df.copy()
+        if "leader_cohort_eligible" not in out.columns:
+            out["leader_cohort_eligible"] = pd.Series(dtype="boolean")
+        if "leadership_quality" not in out.columns:
+            out["leadership_quality"] = pd.Series(dtype="object")
+        return out
+
+    out = df.copy()
+    if active_col in out.columns:
+        active_mask = out[active_col].astype("boolean").fillna(True).astype(bool)
+    else:
+        active_mask = pd.Series(True, index=out.index, dtype=bool)
+    active_theme_count = int(active_mask.sum())
+    cutoff_rank = leadership_cohort_cutoff_rank(active_theme_count)
+    if rank_col in out.columns:
+        ranks = pd.to_numeric(out[rank_col], errors="coerce")
+        out["leader_cohort_eligible"] = active_mask & ranks.notna() & (ranks <= cutoff_rank)
+    else:
+        out["leader_cohort_eligible"] = False
+    out["leader_cohort_cutoff_rank"] = cutoff_rank
+    out["active_theme_count"] = active_theme_count
+    out["leadership_quality"] = out.apply(current_leadership_quality_label, axis=1)
+    return out
+
+
 def current_leadership_quality_label(row: pd.Series) -> str:
     breadth = row.get("eligible_breadth_pct", row.get("positive_1m_breadth_pct"))
     breadth_value = float(breadth) if breadth is not None and not pd.isna(breadth) else None
@@ -57,12 +106,31 @@ def current_leadership_quality_label(row: pd.Series) -> str:
         if eligible_contributor_count > 0
         else 0.0
     )
+    leader_cohort_eligible = bool(row.get("leader_cohort_eligible"))
 
-    if eligible_contributor_count <= 2 or (eligible_contributor_count <= 3 and participation_ratio < 0.40):
+    if eligible_contributor_count <= LEADERSHIP_QUALITY_THIN_MAX_ELIGIBLE or (
+        eligible_contributor_count <= LEADERSHIP_QUALITY_THIN_BORDERLINE_MAX_ELIGIBLE
+        and participation_ratio < LEADERSHIP_QUALITY_THIN_BORDERLINE_MIN_PARTICIPATION
+    ):
         return "Thin / filtered"
-    if eligible_contributor_count >= 4 and participation_ratio >= 0.50 and breadth_value is not None and breadth_value >= 60:
+    if leader_cohort_eligible and (
+        eligible_contributor_count >= LEADERSHIP_QUALITY_BROAD_MIN_ELIGIBLE
+        and participation_ratio >= LEADERSHIP_QUALITY_BROAD_MIN_PARTICIPATION
+        and breadth_value is not None
+        and breadth_value >= LEADERSHIP_QUALITY_BROAD_MIN_BREADTH
+    ):
         return "Broad leader"
-    return "Narrow leader"
+    if leader_cohort_eligible:
+        return "Narrow leader"
+    if (
+        not leader_cohort_eligible
+        and eligible_contributor_count <= LEADERSHIP_QUALITY_NARROW_STRENGTH_MAX_ELIGIBLE
+        and participation_ratio >= LEADERSHIP_QUALITY_NARROW_STRENGTH_MIN_PARTICIPATION
+        and breadth_value is not None
+        and breadth_value >= LEADERSHIP_QUALITY_NARROW_STRENGTH_MIN_BREADTH
+    ):
+        return "Narrow strength"
+    return ""
 
 
 def historical_concentration_label(row: pd.Series) -> str:
@@ -186,10 +254,11 @@ def build_current_leadership_table(
     leadership = leadership.sort_values(
         [score_col, "positive_1m_breadth_pct", eligible_count_col, "ticker_count", "theme"],
         ascending=[False, False, False, False, True],
-    ).head(top_k).reset_index(drop=True)
+    ).reset_index(drop=True)
     leadership["rank"] = leadership.index + 1
     leadership["eligible_contributor_count"] = leadership[eligible_count_col]
-    leadership["leadership_quality"] = leadership.apply(current_leadership_quality_label, axis=1)
+    leadership = annotate_current_leadership_quality(leadership)
+    leadership = leadership.head(top_k).reset_index(drop=True)
     if "current_momentum_score" not in leadership.columns:
         leadership["current_momentum_score"] = np.nan
     if "eligible_standardized_count" not in leadership.columns:
@@ -216,6 +285,7 @@ def build_current_leadership_table(
         "current_momentum_score",
         output_score_col,
         "composite_atr_score",
+        "avg_1d",
         "avg_1w",
         "avg_1m",
         "avg_3m",
@@ -375,7 +445,8 @@ def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k
         ascending=[False, False, False, False, True],
     ).head(top_k).reset_index(drop=True)
     current["rank"] = current.index + 1
-    current["leadership_quality"] = current.apply(current_leadership_quality_label, axis=1)
+    leadership_rank_col = "current_rank" if "current_rank" in current.columns else "rank"
+    current = annotate_current_leadership_quality(current, rank_col=leadership_rank_col)
     if "current_momentum_score" not in current.columns:
         current["current_momentum_score"] = np.nan
     if "composite_atr_score" not in current.columns:
@@ -393,6 +464,7 @@ def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k
             "category",
             "composite_atr_rank",
             "performance",
+            "avg_1d",
             "avg_1w",
             "avg_1m",
             "avg_3m",

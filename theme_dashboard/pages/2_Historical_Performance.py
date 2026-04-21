@@ -3,6 +3,7 @@ import streamlit as st
 
 from src.database import get_conn, init_db
 from src.leaderboard_utils import (
+    annotate_current_leadership_quality,
     current_leadership_quality_label,
     disambiguate_theme_labels,
     format_top_ticker_leaders,
@@ -14,7 +15,7 @@ from src.queries import (
 from src.rankings import ticker_standardized_composite_score
 from src.streamlit_utils import (
     db_cache_token,
-    load_current_ranking_snapshot_cached,
+    load_current_ranking_operating_snapshot_cached,
     load_theme_momentum_cached,
     render_dataframe,
     render_feedback_message,
@@ -36,6 +37,7 @@ TABLE_HELP = {
     "rank": "Current rank in the selected snapshot (1 is strongest).",
     "composite_score": "Current standardized composite score used on the Themes page.",
     "comp_atr": "ATR-standardized companion composite score for research comparison.",
+    "perf_1d": "Current average 1-day return snapshot value for this theme.",
     "perf_1w": "Current average 1-week return snapshot value for this theme.",
     "perf_1m": "Current average 1-month return snapshot value for this theme.",
     "perf_3m": "Current average 3-month return snapshot value for this theme.",
@@ -144,6 +146,19 @@ def _theme_label_for_display(theme_id, fallback_theme_name: str | None, label_by
     return str(fallback_theme_name or resolved_id or "Unknown theme")
 
 
+def _render_gain_filter(label: str, *, min_value: float, max_value: float, default: tuple[float, float], key: str) -> tuple[float, float]:
+    st.caption(label)
+    return st.slider(
+        label,
+        min_value=min_value,
+        max_value=max_value,
+        value=default,
+        step=1.0,
+        key=key,
+        label_visibility="collapsed",
+    )
+
+
 def _build_master_research_grid(
     themes: pd.DataFrame,
     summary: pd.DataFrame,
@@ -181,6 +196,7 @@ def _build_master_research_grid(
         "eligible_standardized_count",
         "eligible_contributor_count",
         "eligible_breadth_pct",
+        "avg_1d",
         "avg_1w",
         "avg_1m",
         "avg_3m",
@@ -254,6 +270,7 @@ def _build_master_research_grid(
     )
     grid["composite_score"] = pd.to_numeric(grid.get("composite_score"), errors="coerce")
     grid["comp_atr"] = pd.to_numeric(grid.get("composite_atr_score"), errors="coerce")
+    grid["perf_1d"] = pd.to_numeric(grid.get("avg_1d"), errors="coerce")
     grid["perf_1w"] = pd.to_numeric(grid.get("avg_1w"), errors="coerce")
     grid["perf_1m"] = pd.to_numeric(grid.get("avg_1m"), errors="coerce")
     grid["perf_3m"] = pd.to_numeric(grid.get("avg_3m"), errors="coerce")
@@ -266,7 +283,7 @@ def _build_master_research_grid(
     grid["delta_breadth"] = pd.to_numeric(grid.get("delta_breadth"), errors="coerce")
     grid["momentum_score"] = pd.to_numeric(grid.get("momentum_score"), errors="coerce")
     grid["rank"] = pd.to_numeric(grid.get("rank"), errors="coerce")
-    grid["leadership_quality"] = grid.apply(current_leadership_quality_label, axis=1)
+    grid = annotate_current_leadership_quality(grid)
     grid["atr_ready"] = grid["comp_atr"].notna()
 
     ordered_cols = [
@@ -282,6 +299,7 @@ def _build_master_research_grid(
         "perf_1w",
         "perf_1m",
         "perf_3m",
+        "perf_1d",
         "breadth_1m",
         "leadership_quality",
         "start_rank",
@@ -357,7 +375,7 @@ theme_label_by_id, theme_ids_by_name = _theme_option_maps(themes)
 
 render_feedback_message(st.session_state, "historical_refresh_feedback")
 
-current_snapshot = load_current_ranking_snapshot_cached(db_token)
+current_snapshot = load_current_ranking_operating_snapshot_cached(db_token)
 lookback_days = 30
 analysis_top_n = 20
 momentum = load_theme_momentum_cached(db_token, int(lookback_days), top_n=analysis_top_n)
@@ -412,7 +430,8 @@ st.caption(
     "Lineage/debug tools are intentionally outside the main workflow. Treat the grid and summary tables above as the primary view; "
     "use audit helpers only when you need to inspect winner selection or provenance edge cases."
 )
-fg1, fg3 = st.columns(2)
+st.caption("Current-context columns in the master grid are `Rank`, `Composite Score`, `Comp ATR`, and `Perf 1D/1W/1M/3M`. Historical-window movement fields remain separate to the right.")
+fg1, fg2, fg3 = st.columns([1.2, 1.2, 1.6])
 with fg1:
     category_options = sorted(master_grid["category"].dropna().astype(str).unique().tolist()) if not master_grid.empty else []
     grid_category_filter = st.multiselect(
@@ -421,6 +440,15 @@ with fg1:
         default=[],
         key="historical_grid_category",
         placeholder="All categories",
+    )
+with fg2:
+    theme_options = sorted(master_grid["theme"].dropna().astype(str).unique().tolist()) if not master_grid.empty else []
+    theme_filter = st.multiselect(
+        "Include Theme",
+        options=theme_options,
+        default=[],
+        key="historical_grid_theme",
+        placeholder="All themes",
     )
 with fg3:
     quality_options = sorted(master_grid["leadership_quality"].dropna().astype(str).unique().tolist()) if not master_grid.empty else []
@@ -432,69 +460,59 @@ with fg3:
         placeholder="All quality labels",
     )
 
-fg4, fg5, fg6 = st.columns(3)
-with fg4:
-    exclude_category_filter = st.multiselect(
-        "Exclude Category",
-        options=category_options,
-        default=[],
-        key="historical_grid_exclude_category",
-        placeholder="Exclude none",
-    )
-with fg5:
-    theme_options = sorted(master_grid["theme"].dropna().astype(str).unique().tolist()) if not master_grid.empty else []
-    theme_filter = st.multiselect(
-        "Include Theme",
-        options=theme_options,
-        default=[],
-        key="historical_grid_theme",
-        placeholder="All themes",
-    )
-with fg6:
-    exclude_theme_filter = st.multiselect(
-        "Exclude Theme",
-        options=theme_options,
-        default=[],
-        key="historical_grid_exclude_theme",
-        placeholder="Exclude none",
-    )
-
-fg7, fg8, fg9, fg10 = st.columns(4)
-with fg7:
-    exclude_quality_filter = st.multiselect(
-        "Exclude Leadership Quality",
-        options=quality_options,
-        default=[],
-        key="historical_grid_exclude_quality",
-        placeholder="Exclude none",
-    )
-with fg8:
-    perf_1w_range = st.slider(
-        "1W gain",
+gain_c1, gain_c2, gain_c3 = st.columns(3)
+with gain_c1:
+    perf_1w_range = _render_gain_filter(
+        "1W gain filter",
         min_value=-100.0,
         max_value=100.0,
-        value=(-100.0, 100.0),
-        step=1.0,
+        default=(-100.0, 100.0),
         key="historical_grid_perf_1w",
     )
-with fg9:
-    perf_1m_range = st.slider(
-        "1M gain",
+with gain_c2:
+    perf_1m_range = _render_gain_filter(
+        "1M gain filter",
         min_value=-100.0,
         max_value=200.0,
-        value=(-100.0, 200.0),
-        step=1.0,
+        default=(-100.0, 200.0),
         key="historical_grid_perf_1m",
     )
-with fg10:
-    perf_3m_range = st.slider(
-        "3M gain",
+with gain_c3:
+    perf_3m_range = _render_gain_filter(
+        "3M gain filter",
         min_value=-100.0,
         max_value=300.0,
-        value=(-100.0, 300.0),
-        step=1.0,
+        default=(-100.0, 300.0),
         key="historical_grid_perf_3m",
     )
+
+with st.expander("Advanced filters", expanded=False):
+    st.caption("Exclude category, theme, or leadership-quality slices here without cluttering the main filter row.")
+    advanced_c1, advanced_c2, advanced_c3 = st.columns(3)
+    with advanced_c1:
+        exclude_category_filter = st.multiselect(
+            "Exclude Category",
+            options=category_options,
+            default=[],
+            key="historical_grid_exclude_category",
+            placeholder="Exclude none",
+        )
+    with advanced_c2:
+        exclude_theme_filter = st.multiselect(
+            "Exclude Theme",
+            options=theme_options,
+            default=[],
+            key="historical_grid_exclude_theme",
+            placeholder="Exclude none",
+        )
+    with advanced_c3:
+        exclude_quality_filter = st.multiselect(
+            "Exclude Leadership Quality",
+            options=quality_options,
+            default=[],
+            key="historical_grid_exclude_quality",
+            placeholder="Exclude none",
+        )
 
 filtered_grid = master_grid.copy()
 if grid_category_filter:
@@ -530,18 +548,17 @@ master_grid_cols = [
     "theme",
     "category",
     "leaders",
-    "ticker_count",
     "rank",
     "composite_score",
     "comp_atr",
     "momentum_score",
+    "perf_1d",
     "perf_1w",
     "perf_1m",
     "perf_3m",
     "breadth_1m",
     "leadership_quality",
-    "start_rank",
-    "end_rank",
+    "ticker_count",
 ]
 master_display = disambiguate_theme_labels(filtered_grid)
 if "theme_display" in master_display.columns:
@@ -555,6 +572,7 @@ render_dataframe(
     hide_index=True,
     column_config=_config_for_columns(master_grid_cols) | {
         "leaders": st.column_config.TextColumn("Top Tickers", width="medium"),
+        "perf_1d": st.column_config.NumberColumn("Perf 1D", format="%.1f%%"),
         "perf_1w": st.column_config.NumberColumn("Perf 1W", format="%.1f%%"),
         "perf_1m": st.column_config.NumberColumn("Perf 1M", format="%.1f%%"),
         "perf_3m": st.column_config.NumberColumn("Perf 3M", format="%.1f%%"),

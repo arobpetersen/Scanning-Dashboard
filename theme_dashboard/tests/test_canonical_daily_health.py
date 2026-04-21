@@ -247,6 +247,7 @@ class TestCanonicalDailyHealth(unittest.TestCase):
     def test_canonical_daily_window_status_distinguishes_raw_vs_ranked_latest_dates(self):
         conn = self._build_conn()
         try:
+            self._seed_expected_trading_dates(conn)
             self._insert_canonical_row(
                 conn,
                 snapshot_date="2026-04-14",
@@ -274,9 +275,44 @@ class TestCanonicalDailyHealth(unittest.TestCase):
 
             status = canonical_daily_window_status(conn).iloc[0]
 
+            self.assertTrue(str(status["latest_expected_trading_date"]).startswith("2026-04-14"))
             self.assertTrue(str(status["latest_raw_canonical_date"]).startswith("2026-04-15"))
             self.assertTrue(str(status["latest_ranked_canonical_date"]).startswith("2026-04-14"))
             self.assertTrue(bool(status["raw_vs_ranked_date_differs"]))
+        finally:
+            conn.close()
+
+    def test_canonical_daily_window_status_uses_latest_trading_date_not_wall_clock_day(self):
+        conn = self._build_conn()
+        try:
+            conn.execute(
+                """
+                insert into ticker_daily_history(
+                    ticker, trading_date, open, high, low, close, volume,
+                    market_data_source, provenance_source_label, created_at, updated_at
+                ) values
+                ('AAA', '2026-04-16', 10, 10, 10, 10, 1000, 'live', 'seed', current_timestamp, current_timestamp),
+                ('AAA', '2026-04-17', 10, 10, 10, 10, 1000, 'live', 'seed', current_timestamp, current_timestamp)
+                """
+            )
+            self._insert_canonical_row(
+                conn,
+                snapshot_date="2026-04-17",
+                run_id=9,
+                theme_id=1,
+                theme="Alpha",
+                snapshot_source="live",
+                extract_session="after_hours_official",
+                canonical_reason="official_daily_refresh",
+                standardized_score=11.0,
+                canonical_rank=1,
+            )
+
+            status = canonical_daily_window_status(conn).iloc[0]
+
+            self.assertTrue(str(status["latest_expected_trading_date"]).startswith("2026-04-17"))
+            self.assertTrue(str(status["latest_ranked_canonical_date"]).startswith("2026-04-17"))
+            self.assertFalse(bool(status["raw_vs_ranked_date_differs"]))
         finally:
             conn.close()
 
@@ -315,5 +351,98 @@ class TestCanonicalDailyHealth(unittest.TestCase):
             reused = canonical_daily_health_status(conn, trading_day_limit=3, reconciliation_top_n=2, coverage=coverage)
 
             self.assertTrue(direct.equals(reused))
+        finally:
+            conn.close()
+
+    def test_canonical_daily_health_uses_canonical_run_basis_over_newer_live_hydration(self):
+        conn = self._build_conn()
+        try:
+            self._seed_expected_trading_dates(conn)
+            conn.execute("delete from theme_membership")
+            conn.execute("delete from refresh_runs")
+            conn.execute("delete from ticker_snapshots")
+            conn.execute(
+                """
+                insert into themes(id, name, category, is_active)
+                values (3, 'Gamma', 'Compute', true)
+                on conflict do nothing
+                """
+            )
+            conn.execute(
+                """
+                insert into theme_membership(theme_id, ticker) values
+                (1, 'AAA'), (1, 'AAB'), (1, 'AAC'),
+                (2, 'BBB'), (2, 'BBC'), (2, 'BBD'),
+                (3, 'CCC'), (3, 'CCD'), (3, 'CCE')
+                """
+            )
+            conn.execute(
+                """
+                insert into refresh_runs(run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count, scope_type)
+                values
+                (8, 'live', '2026-04-14 20:00:00', '2026-04-14 22:05:00', 'success', 9, 9, 0, 'scheduled_eod'),
+                (9, 'live', '2026-04-14 22:06:00', '2026-04-14 22:07:00', 'success', 1, 1, 0, 'governed_ticker_current_hydration')
+                """
+            )
+            conn.execute(
+                """
+                insert into ticker_snapshots(
+                    run_id, ticker, price, perf_1w, perf_1m, perf_3m,
+                    market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated, snapshot_source
+                ) values
+                (8, 'AAA', 10, 14, 20, -8, null, 2000000, null, null, null, '2026-04-14 22:00:00', 'live'),
+                (8, 'AAB', 11, 13, 19, -8, null, 2000000, null, null, null, '2026-04-14 22:00:00', 'live'),
+                (8, 'AAC', 12, 12, 18, -8, null, 2000000, null, null, null, '2026-04-14 22:00:00', 'live'),
+                (8, 'BBB', 10, 8, 10, 12, null, 2000000, null, null, null, '2026-04-14 22:00:00', 'live'),
+                (8, 'BBC', 10, 7, 9, 12, null, 2000000, null, null, null, '2026-04-14 22:00:00', 'live'),
+                (8, 'BBD', 10, 6, 8, 12, null, 2000000, null, null, null, '2026-04-14 22:00:00', 'live'),
+                (8, 'CCC', 10, 9, 11, 10, null, 2000000, null, null, null, '2026-04-14 22:00:00', 'live'),
+                (8, 'CCD', 10, 9, 11, 10, null, 2000000, null, null, null, '2026-04-14 22:00:00', 'live'),
+                (8, 'CCE', 10, 9, 11, 10, null, 2000000, null, null, null, '2026-04-14 22:00:00', 'live'),
+                (9, 'BBB', 10, 30, 30, 12, null, 2000000, null, null, null, '2026-04-14 22:06:30', 'live')
+                """
+            )
+            self._insert_canonical_row(
+                conn,
+                snapshot_date="2026-04-14",
+                run_id=8,
+                theme_id=1,
+                theme="Alpha",
+                snapshot_source="live",
+                extract_session="after_hours_official",
+                canonical_reason="official_daily_refresh",
+                standardized_score=15.0,
+                canonical_rank=1,
+            )
+            self._insert_canonical_row(
+                conn,
+                snapshot_date="2026-04-14",
+                run_id=8,
+                theme_id=3,
+                theme="Gamma",
+                snapshot_source="live",
+                extract_session="after_hours_official",
+                canonical_reason="official_daily_refresh",
+                standardized_score=10.6,
+                canonical_rank=2,
+            )
+            self._insert_canonical_row(
+                conn,
+                snapshot_date="2026-04-14",
+                run_id=8,
+                theme_id=2,
+                theme="Beta",
+                snapshot_source="live",
+                extract_session="after_hours_official",
+                canonical_reason="official_daily_refresh",
+                standardized_score=9.0,
+                canonical_rank=3,
+            )
+
+            status = canonical_daily_health_status(conn, trading_day_limit=1, reconciliation_top_n=3).iloc[0]
+
+            self.assertEqual(int(status["top_n_mismatch_count"]), 0)
+            self.assertTrue(bool(status["latest_day_leaders_match_current_standardized"]))
+            self.assertEqual(str(status["reconciliation_status"]), "matched")
         finally:
             conn.close()

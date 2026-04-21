@@ -14,7 +14,7 @@ from .config import (
     THEME_CONFIDENCE_FULL_COUNT,
 )
 from .db_introspection import table_exists, table_has_column
-from .queries import latest_ticker_history_research_fields, latest_ticker_snapshots, preferred_theme_snapshot_source
+from .queries import latest_ticker_history_atr_companion_fields, latest_ticker_snapshots, preferred_theme_snapshot_source
 
 
 METRIC_COLUMNS = [
@@ -29,6 +29,11 @@ METRIC_COLUMNS = [
 ]
 
 STANDARDIZED_COMPOSITE_WEIGHTS = {
+    "perf_1w": 0.20,
+    "perf_1m": 0.55,
+    "perf_3m": 0.25,
+}
+COMPOSITE_ATR_BASE_WEIGHTS = {
     "perf_1w": 0.30,
     "perf_1m": 0.70,
 }
@@ -62,6 +67,7 @@ CURRENT_RANKING_COLUMNS = [
     "eligible_standardized_count",
     "eligible_momentum_count",
     "eligible_breadth_pct",
+    "avg_1d",
     "avg_1w",
     "avg_1m",
     "avg_1w_atr_units",
@@ -172,6 +178,21 @@ def standardized_recovery_factor(base_strength_score: int | float, avg_3m: int |
     return float(np.clip(float(base_strength_score) / STANDARDIZED_COMPOSITE_RECOVERY_BASE_SCORE, 0.5, 1.0))
 
 
+def standardized_base_strength_score(
+    perf_1w: int | float,
+    perf_1m: int | float,
+    perf_3m: int | float,
+) -> float:
+    if pd.isna(perf_1w) or pd.isna(perf_1m):
+        return float("nan")
+    perf_3m_value = 0.0 if pd.isna(perf_3m) else float(perf_3m)
+    return float(
+        STANDARDIZED_COMPOSITE_WEIGHTS["perf_1w"] * float(perf_1w)
+        + STANDARDIZED_COMPOSITE_WEIGHTS["perf_1m"] * float(perf_1m)
+        + STANDARDIZED_COMPOSITE_WEIGHTS["perf_3m"] * perf_3m_value
+    )
+
+
 def current_momentum_quality_factor(standardized_composite_score: int | float) -> float:
     if pd.isna(standardized_composite_score):
         return CURRENT_MOMENTUM_QUALITY_FACTOR_FLOOR
@@ -234,9 +255,9 @@ def ticker_standardized_composite_score(
     perf_1m: int | float,
     perf_3m: int | float,
 ) -> float:
-    if pd.isna(perf_1w) or pd.isna(perf_1m):
+    base_strength_score = standardized_base_strength_score(perf_1w, perf_1m, perf_3m)
+    if pd.isna(base_strength_score):
         return float("nan")
-    base_strength_score = 0.30 * float(perf_1w) + 0.70 * float(perf_1m)
     guardrail_factor = standardized_three_month_guardrail_factor(perf_3m)
     recovery_factor = standardized_recovery_factor(base_strength_score, perf_3m)
     return float(base_strength_score * guardrail_factor * recovery_factor)
@@ -397,6 +418,50 @@ def _load_ranking_constituents_for_run(conn, run_id: int) -> pd.DataFrame:
 
 def compute_current_ranking_metrics_for_run(conn, run_id: int) -> pd.DataFrame:
     return _build_current_ranking_metrics(_load_ranking_constituents_for_run(conn, run_id))
+
+
+def compute_current_ranking_snapshot_for_run(conn, run_id: int) -> dict[str, pd.DataFrame]:
+    current = compute_current_ranking_metrics_for_run(conn, run_id)
+    if current.empty:
+        return _empty_current_ranking_snapshot(include_validation=True)
+
+    legacy_rankings = _finalize_current_rankings(
+        current,
+        score_col="legacy_composite_score",
+        eligible_count_col="eligible_composite_count",
+    )
+    standardized_rankings = _finalize_current_rankings(
+        current,
+        score_col="standardized_composite_score",
+        eligible_count_col="eligible_standardized_count",
+    )
+    atr_rankings = _finalize_current_rankings(
+        current,
+        score_col="composite_atr_score",
+        eligible_count_col="eligible_atr_count",
+    )
+    if not atr_rankings.empty:
+        atr_rankings = atr_rankings.copy()
+        atr_rankings["composite_atr_rank"] = range(1, len(atr_rankings) + 1)
+        atr_rank_lookup = atr_rankings.set_index("theme_id")["composite_atr_rank"].to_dict()
+        current = current.copy()
+        current["composite_atr_rank"] = current["theme_id"].map(atr_rank_lookup)
+        standardized_rankings = standardized_rankings.copy()
+        standardized_rankings["composite_atr_rank"] = standardized_rankings["theme_id"].map(atr_rank_lookup)
+        legacy_rankings = legacy_rankings.copy()
+        legacy_rankings["composite_atr_rank"] = legacy_rankings["theme_id"].map(atr_rank_lookup)
+
+    validation_snapshot = _build_current_ranking_validation_snapshot_from_base(
+        current,
+        legacy_rankings,
+        standardized_rankings,
+    )
+    return {
+        "theme_metrics": current,
+        "rankings": legacy_rankings,
+        "standardized_rankings": standardized_rankings,
+        **validation_snapshot,
+    }
 
 
 def _load_ranking_constituents_for_trading_date(
@@ -645,6 +710,37 @@ def build_canonical_theme_daily_rows_for_trading_date(
     return canonical[CANONICAL_THEME_DAILY_COLUMNS].copy()
 
 
+def _deduplicate_canonical_rows(canonical_rows: pd.DataFrame) -> pd.DataFrame:
+    if canonical_rows.empty or "theme_id" not in canonical_rows.columns or "snapshot_date" not in canonical_rows.columns:
+        return canonical_rows
+
+    working = canonical_rows.copy()
+    if "canonical_rank" in working.columns:
+        working["_canonical_rank_missing"] = working["canonical_rank"].isna()
+    else:
+        working["_canonical_rank_missing"] = True
+    if "snapshot_time" in working.columns:
+        working["_snapshot_time_sort"] = pd.to_datetime(working["snapshot_time"], errors="coerce")
+    else:
+        working["_snapshot_time_sort"] = pd.NaT
+    if "run_id" in working.columns:
+        working["_run_id_sort"] = pd.to_numeric(working["run_id"], errors="coerce")
+    else:
+        working["_run_id_sort"] = pd.NA
+
+    working = (
+        working.sort_values(
+            ["snapshot_date", "theme_id", "_canonical_rank_missing", "canonical_rank", "_snapshot_time_sort", "_run_id_sort"],
+            ascending=[True, True, True, True, False, False],
+            na_position="last",
+        )
+        .drop_duplicates(subset=["snapshot_date", "theme_id"], keep="first")
+        .drop(columns=["_canonical_rank_missing", "_snapshot_time_sort", "_run_id_sort"], errors="ignore")
+        .reset_index(drop=True)
+    )
+    return working[CANONICAL_THEME_DAILY_COLUMNS].copy()
+
+
 def persist_canonical_theme_daily_snapshot_for_trading_date(
     conn,
     snapshot_date: date | str,
@@ -691,6 +787,7 @@ def persist_canonical_theme_daily_snapshot_for_trading_date(
             "inserted_count": 0,
             "status": "no_history_rows_for_date",
         }
+    canonical_rows = _deduplicate_canonical_rows(canonical_rows)
 
     if overwrite_existing:
         conn.execute(
@@ -822,6 +919,7 @@ def persist_canonical_theme_daily_snapshot_for_run(
     )
     if canonical_rows.empty:
         return {"run_id": int(run_id), "snapshot_date": "", "row_count": 0, "inserted_count": 0, "status": "no_rows"}
+    canonical_rows = _deduplicate_canonical_rows(canonical_rows)
 
     rankable_row_count = int(canonical_rows["canonical_rank"].notna().sum()) if "canonical_rank" in canonical_rows.columns else 0
     if rankable_row_count <= 0:
@@ -1154,13 +1252,13 @@ def _load_current_ranking_constituents(conn) -> pd.DataFrame:
 
     latest = latest_ticker_snapshots(conn)
     if latest.empty:
-        for col in ("run_id", "snapshot_time", "price", "avg_volume", "perf_1w", "perf_1m", "perf_3m"):
+        for col in ("run_id", "snapshot_time", "price", "avg_volume", "perf_1d", "perf_1w", "perf_1m", "perf_3m"):
             membership[col] = np.nan
         membership["status"] = None
         return membership
 
     latest = latest.copy()
-    for col in ("price", "avg_volume", "perf_1w", "perf_1m", "perf_3m"):
+    for col in ("price", "avg_volume", "perf_1d", "perf_1w", "perf_1m", "perf_3m"):
         if col not in latest.columns:
             latest[col] = np.nan
 
@@ -1176,7 +1274,7 @@ def _load_current_ranking_constituents(conn) -> pd.DataFrame:
 
     raw = membership.merge(latest, on="ticker", how="left")
     raw = raw.merge(statuses[["ticker", "status"]], on="ticker", how="left", suffixes=("", "_symbol"))
-    atr_research = latest_ticker_history_research_fields(conn)
+    atr_research = latest_ticker_history_atr_companion_fields(conn)
     if not atr_research.empty:
         raw = raw.merge(atr_research, on="ticker", how="left")
     return raw
@@ -1187,7 +1285,7 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=CURRENT_RANKING_COLUMNS)
 
     prepared = raw.copy()
-    for col in ("price", "avg_volume", "perf_1w", "perf_1m", "perf_3m", "perf_1w_atr_units", "perf_1m_atr_units", "atr_14", "atr_pct_14"):
+    for col in ("price", "avg_volume", "perf_1d", "perf_1w", "perf_1m", "perf_3m", "perf_1w_atr_units", "perf_1m_atr_units"):
         if col in prepared.columns:
             prepared[col] = _safe_numeric(prepared[col])
         else:
@@ -1211,6 +1309,7 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         & prepared["not_refresh_suppressed"]
     )
 
+    prepared["perf_1d_eligible"] = prepared["eligible_ticker"] & prepared["perf_1d"].notna()
     capped_return_cols: dict[str, str] = {}
     for perf_col in ("perf_1w", "perf_1m", "perf_3m"):
         eligible_col = f"{perf_col}_eligible"
@@ -1239,6 +1338,10 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
     prepared["atr_metric_eligible"] = prepared["perf_1w_atr_units_eligible"] & prepared["perf_1m_atr_units_eligible"]
 
     prepared["ticker_present"] = prepared["ticker"].notna().astype(int)
+    prepared["perf_1d_capped_for_agg"] = prepared["perf_1d"].clip(
+        lower=-CURRENT_RANKING_RETURN_CAP_PCT,
+        upper=CURRENT_RANKING_RETURN_CAP_PCT,
+    ).where(prepared["perf_1d_eligible"])
     prepared["perf_1w_capped_for_agg"] = prepared[capped_return_cols["perf_1w"]].where(prepared["perf_1w_eligible"])
     prepared["perf_1m_capped_for_agg"] = prepared[capped_return_cols["perf_1m"]].where(prepared["perf_1m_eligible"])
     prepared["perf_3m_capped_for_agg"] = prepared[capped_return_cols["perf_3m"]].where(prepared["perf_3m_eligible"])
@@ -1254,6 +1357,7 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         snapshot_time=("snapshot_time", "max"),
         ticker_count=("ticker_present", "sum"),
         eligible_ticker_count=("eligible_ticker", "sum"),
+        eligible_1d_count=("perf_1d_eligible", "sum"),
         eligible_1w_count=("perf_1w_eligible", "sum"),
         eligible_1m_count=("perf_1m_eligible", "sum"),
         eligible_3m_count=("perf_3m_eligible", "sum"),
@@ -1261,6 +1365,7 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         eligible_standardized_count=("standardized_metric_eligible", "sum"),
         eligible_atr_count=("atr_metric_eligible", "sum"),
         eligible_momentum_count=("standardized_metric_eligible", "sum"),
+        avg_1d=("perf_1d_capped_for_agg", "mean"),
         avg_1w=("perf_1w_capped_for_agg", "mean"),
         avg_1m=("perf_1m_capped_for_agg", "mean"),
         avg_1w_atr_units=("perf_1w_atr_units_capped_for_agg", "mean"),
@@ -1276,6 +1381,7 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
     count_cols = [
         "ticker_count",
         "eligible_ticker_count",
+        "eligible_1d_count",
         "eligible_1w_count",
         "eligible_1m_count",
         "eligible_3m_count",
@@ -1309,6 +1415,7 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
     out["standardized_base_strength_score"] = (
         STANDARDIZED_COMPOSITE_WEIGHTS["perf_1w"] * out["avg_1w"].fillna(0.0)
         + STANDARDIZED_COMPOSITE_WEIGHTS["perf_1m"] * out["avg_1m"].fillna(0.0)
+        + STANDARDIZED_COMPOSITE_WEIGHTS["perf_3m"] * out["avg_3m"].fillna(0.0)
     )
     out["standardized_participation_ratio"] = np.where(
         out["ticker_count"] > 0,
@@ -1330,8 +1437,8 @@ def _build_current_ranking_metrics(raw: pd.DataFrame) -> pd.DataFrame:
         np.nan,
     )
     out["composite_atr_base_strength_score"] = (
-        STANDARDIZED_COMPOSITE_WEIGHTS["perf_1w"] * out["avg_1w_atr_units"].fillna(0.0)
-        + STANDARDIZED_COMPOSITE_WEIGHTS["perf_1m"] * out["avg_1m_atr_units"].fillna(0.0)
+        COMPOSITE_ATR_BASE_WEIGHTS["perf_1w"] * out["avg_1w_atr_units"].fillna(0.0)
+        + COMPOSITE_ATR_BASE_WEIGHTS["perf_1m"] * out["avg_1m_atr_units"].fillna(0.0)
     )
     out["composite_atr_participation_ratio"] = np.where(
         out["ticker_count"] > 0,
@@ -1555,19 +1662,25 @@ def _build_current_momentum_validation(
     ).reset_index(drop=True)
 
 
-def compute_current_ranking_snapshot(conn) -> dict[str, pd.DataFrame]:
+def _empty_current_ranking_snapshot(*, include_validation: bool = True) -> dict[str, pd.DataFrame]:
+    snapshot = {
+        "theme_metrics": pd.DataFrame(columns=CURRENT_RANKING_COLUMNS),
+        "rankings": pd.DataFrame(),
+        "standardized_rankings": pd.DataFrame(),
+    }
+    if include_validation:
+        snapshot["standardized_comparison"] = pd.DataFrame()
+        snapshot["current_momentum_rankings"] = pd.DataFrame()
+        snapshot["current_momentum_comparison"] = pd.DataFrame()
+    return snapshot
+
+
+def _build_current_ranking_base_snapshot(conn) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     # Current trust surfaces all derive from one prepared latest-snapshot view so
     # contributor eligibility and capped-return semantics stay consistent.
     current = _build_current_ranking_metrics(_load_current_ranking_constituents(conn))
     if current.empty:
-        return {
-            "theme_metrics": pd.DataFrame(columns=CURRENT_RANKING_COLUMNS),
-            "rankings": pd.DataFrame(),
-            "standardized_rankings": pd.DataFrame(),
-            "standardized_comparison": pd.DataFrame(),
-            "current_momentum_rankings": pd.DataFrame(),
-            "current_momentum_comparison": pd.DataFrame(),
-        }
+        return current, pd.DataFrame(), pd.DataFrame()
 
     legacy_rankings = _finalize_current_rankings(current, score_col="legacy_composite_score", eligible_count_col="eligible_composite_count")
     standardized_rankings = _finalize_current_rankings(
@@ -1587,27 +1700,22 @@ def compute_current_ranking_snapshot(conn) -> dict[str, pd.DataFrame]:
         current["composite_atr_rank"] = current["theme_id"].map(atr_rank_lookup)
         standardized_rankings["composite_atr_rank"] = standardized_rankings["theme_id"].map(atr_rank_lookup)
         legacy_rankings["composite_atr_rank"] = legacy_rankings["theme_id"].map(atr_rank_lookup)
-        current_1w_rankings = _finalize_current_window_rankings(current, "avg_1w")
-        current_1m_rankings = _finalize_current_window_rankings(current, "avg_1m")
-        current_momentum_rankings = _finalize_current_rankings(
-            current,
-            score_col="current_momentum_score",
-            eligible_count_col="eligible_momentum_count",
-        )
-    else:
-        current_1w_rankings = _finalize_current_window_rankings(current, "avg_1w")
-        current_1m_rankings = _finalize_current_window_rankings(current, "avg_1m")
-        current_momentum_rankings = _finalize_current_rankings(
-            current,
-            score_col="current_momentum_score",
-            eligible_count_col="eligible_momentum_count",
-        )
-    standardized_comparison = _build_standardized_composite_validation(legacy_rankings, standardized_rankings)
-    current_momentum_comparison = _build_current_momentum_validation(
-        current_1w_rankings,
-        current_momentum_rankings,
-        standardized_rankings,
-    )
+    return current, legacy_rankings, standardized_rankings
+
+
+def compute_current_ranking_operating_snapshot(conn) -> dict[str, pd.DataFrame]:
+    current, legacy_rankings, standardized_rankings = _build_current_ranking_base_snapshot(conn)
+    return _build_current_ranking_operating_snapshot_from_base(conn, current, legacy_rankings, standardized_rankings)
+
+
+def _build_current_ranking_operating_snapshot_from_base(
+    conn,
+    current: pd.DataFrame,
+    legacy_rankings: pd.DataFrame,
+    standardized_rankings: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    if current.empty:
+        return _empty_current_ranking_snapshot(include_validation=False)
 
     preferred_source = preferred_theme_snapshot_source(conn)
     if not preferred_source:
@@ -1624,9 +1732,6 @@ def compute_current_ranking_snapshot(conn) -> dict[str, pd.DataFrame]:
             "theme_metrics": current,
             "rankings": rankings,
             "standardized_rankings": standardized_rankings,
-            "standardized_comparison": standardized_comparison,
-            "current_momentum_rankings": current_momentum_rankings,
-            "current_momentum_comparison": current_momentum_comparison,
         }
 
     prior = conn.execute(
@@ -1668,9 +1773,63 @@ def compute_current_ranking_snapshot(conn) -> dict[str, pd.DataFrame]:
         "theme_metrics": current,
         "rankings": rankings,
         "standardized_rankings": standardized_rankings,
+    }
+
+
+def compute_current_ranking_validation_snapshot(conn) -> dict[str, pd.DataFrame]:
+    current, legacy_rankings, standardized_rankings = _build_current_ranking_base_snapshot(conn)
+    return _build_current_ranking_validation_snapshot_from_base(current, legacy_rankings, standardized_rankings)
+
+
+def _build_current_ranking_validation_snapshot_from_base(
+    current: pd.DataFrame,
+    legacy_rankings: pd.DataFrame,
+    standardized_rankings: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    if current.empty:
+        return {
+            "standardized_comparison": pd.DataFrame(),
+            "current_momentum_rankings": pd.DataFrame(),
+            "current_momentum_comparison": pd.DataFrame(),
+        }
+
+    current_1w_rankings = _finalize_current_window_rankings(current, "avg_1w")
+    current_momentum_rankings = _finalize_current_rankings(
+        current,
+        score_col="current_momentum_score",
+        eligible_count_col="eligible_momentum_count",
+    )
+    standardized_comparison = _build_standardized_composite_validation(legacy_rankings, standardized_rankings)
+    current_momentum_comparison = _build_current_momentum_validation(
+        current_1w_rankings,
+        current_momentum_rankings,
+        standardized_rankings,
+    )
+    return {
         "standardized_comparison": standardized_comparison,
         "current_momentum_rankings": current_momentum_rankings,
         "current_momentum_comparison": current_momentum_comparison,
+    }
+
+
+def compute_current_ranking_snapshot(conn) -> dict[str, pd.DataFrame]:
+    current, legacy_rankings, standardized_rankings = _build_current_ranking_base_snapshot(conn)
+    if current.empty:
+        return _empty_current_ranking_snapshot(include_validation=True)
+    operating_snapshot = _build_current_ranking_operating_snapshot_from_base(
+        conn,
+        current,
+        legacy_rankings,
+        standardized_rankings,
+    )
+    validation_snapshot = _build_current_ranking_validation_snapshot_from_base(
+        current,
+        legacy_rankings,
+        standardized_rankings,
+    )
+    return {
+        **operating_snapshot,
+        **validation_snapshot,
     }
 
 

@@ -1,6 +1,8 @@
 import unittest
 
 import duckdb
+import pandas as pd
+from unittest.mock import patch
 
 from src.database import SCHEMA_SQL
 from src.queries import canonical_theme_rank_history, latest_canonical_theme_daily_snapshots
@@ -118,5 +120,130 @@ class TestCanonicalThemeDailySnapshots(unittest.TestCase):
             self.assertEqual(int(result["inserted_count"]), 0)
             row_count = conn.execute("select count(*) from canonical_theme_daily_snapshots").fetchone()[0]
             self.assertEqual(row_count, 0)
+        finally:
+            conn.close()
+
+    def test_persist_canonical_theme_daily_snapshot_for_run_overwrite_deduplicates_same_day_rows(self):
+        conn = self._build_conn()
+        try:
+            conn.execute(
+                """
+                insert into canonical_theme_daily_snapshots(
+                    snapshot_date, snapshot_time, run_id, theme_id, theme, category, is_active,
+                    snapshot_source, extract_session, is_canonical_daily, canonical_reason,
+                    ticker_count, eligible_ticker_count, eligible_1w_count, eligible_1m_count,
+                    eligible_3m_count, eligible_composite_count, eligible_standardized_count,
+                    eligible_momentum_count, eligible_breadth_pct, avg_1w, avg_1m, avg_3m,
+                    positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                    legacy_composite_score, standardized_base_strength_score, standardized_participation_ratio,
+                    standardized_participation_factor, standardized_guardrail_factor,
+                    standardized_recovery_factor, standardized_composite_score,
+                    current_momentum_raw_score, current_momentum_quality_factor,
+                    current_momentum_score, canonical_rank
+                ) values
+                ('2026-04-21', '2026-04-21 16:00:00', 40, 1, 'Alpha', 'Compute', true,
+                 'live', 'after_hours_official', true, 'official_daily_refresh',
+                 3, 3, 3, 3, 3, 3, 3, 3, 100, 9, 9, 9,
+                 100, 100, 100, 9, 9, 1, 1, 1, 1, 9, 9, 1, 9, 1)
+                """
+            )
+            duplicate_rows = pd.DataFrame(
+                [
+                    {
+                        "snapshot_date": pd.Timestamp("2026-04-21").date(),
+                        "snapshot_time": pd.Timestamp("2026-04-21 16:00:00"),
+                        "run_id": 41,
+                        "theme_id": 1,
+                        "theme": "Alpha",
+                        "category": "Compute",
+                        "is_active": True,
+                        "snapshot_source": "live",
+                        "extract_session": "after_hours_official",
+                        "is_canonical_daily": True,
+                        "canonical_reason": "official_daily_refresh",
+                        "ticker_count": 3,
+                        "eligible_ticker_count": 3,
+                        "eligible_1w_count": 3,
+                        "eligible_1m_count": 3,
+                        "eligible_3m_count": 3,
+                        "eligible_composite_count": 3,
+                        "eligible_standardized_count": 3,
+                        "eligible_momentum_count": 3,
+                        "eligible_breadth_pct": 100.0,
+                        "avg_1w": 10.0,
+                        "avg_1m": 10.0,
+                        "avg_3m": 10.0,
+                        "positive_1w_breadth_pct": 100.0,
+                        "positive_1m_breadth_pct": 100.0,
+                        "positive_3m_breadth_pct": 100.0,
+                        "legacy_composite_score": 10.0,
+                        "standardized_base_strength_score": 10.0,
+                        "standardized_participation_ratio": 1.0,
+                        "standardized_participation_factor": 1.0,
+                        "standardized_guardrail_factor": 1.0,
+                        "standardized_recovery_factor": 1.0,
+                        "standardized_composite_score": 10.0,
+                        "current_momentum_raw_score": 10.0,
+                        "current_momentum_quality_factor": 1.0,
+                        "current_momentum_score": 10.0,
+                        "canonical_rank": 1,
+                    },
+                    {
+                        "snapshot_date": pd.Timestamp("2026-04-21").date(),
+                        "snapshot_time": pd.Timestamp("2026-04-21 16:00:00"),
+                        "run_id": 41,
+                        "theme_id": 1,
+                        "theme": "Alpha",
+                        "category": "Compute",
+                        "is_active": True,
+                        "snapshot_source": "live",
+                        "extract_session": "after_hours_official",
+                        "is_canonical_daily": True,
+                        "canonical_reason": "official_daily_refresh",
+                        "ticker_count": 3,
+                        "eligible_ticker_count": 3,
+                        "eligible_1w_count": 3,
+                        "eligible_1m_count": 3,
+                        "eligible_3m_count": 3,
+                        "eligible_composite_count": 3,
+                        "eligible_standardized_count": 3,
+                        "eligible_momentum_count": 3,
+                        "eligible_breadth_pct": 100.0,
+                        "avg_1w": 10.0,
+                        "avg_1m": 10.0,
+                        "avg_3m": 10.0,
+                        "positive_1w_breadth_pct": 100.0,
+                        "positive_1m_breadth_pct": 100.0,
+                        "positive_3m_breadth_pct": 100.0,
+                        "legacy_composite_score": 10.0,
+                        "standardized_base_strength_score": 10.0,
+                        "standardized_participation_ratio": 1.0,
+                        "standardized_participation_factor": 1.0,
+                        "standardized_guardrail_factor": 1.0,
+                        "standardized_recovery_factor": 1.0,
+                        "standardized_composite_score": 10.0,
+                        "current_momentum_raw_score": 10.0,
+                        "current_momentum_quality_factor": 1.0,
+                        "current_momentum_score": 10.0,
+                        "canonical_rank": 1,
+                    },
+                ]
+            )
+
+            with patch("src.rankings.build_canonical_theme_daily_rows_for_run", return_value=duplicate_rows):
+                result = persist_canonical_theme_daily_snapshot_for_run(conn, 41, overwrite_existing=True)
+
+            self.assertEqual(result["status"], "materialized_from_run")
+            self.assertEqual(int(result["inserted_count"]), 1)
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) from canonical_theme_daily_snapshots where snapshot_date = '2026-04-21' and theme_id = 1"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                conn.execute("select max(run_id) from canonical_theme_daily_snapshots where snapshot_date = '2026-04-21'").fetchone()[0],
+                41,
+            )
         finally:
             conn.close()

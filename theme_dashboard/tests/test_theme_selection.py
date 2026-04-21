@@ -63,6 +63,19 @@ class TestThemeSelection(unittest.TestCase):
         self.assertEqual(widget_key, "historical_selected_theme__widget__0")
         self.assertEqual(session_state[widget_key], "Energy (Macro)")
 
+    def test_prepare_replaceable_selectbox_widget_key_resyncs_stale_widget_value(self):
+        session_state = {"historical_selected_theme__widget__0": "AI (Tech)"}
+
+        widget_key = prepare_replaceable_selectbox_widget_key(
+            session_state,
+            "historical_selected_theme",
+            ["AI (Tech)", "Energy (Macro)"],
+            "Energy (Macro)",
+        )
+
+        self.assertEqual(widget_key, "historical_selected_theme__widget__0")
+        self.assertEqual(session_state[widget_key], "Energy (Macro)")
+
     def test_rotate_replaceable_selectbox_widget_advances_widget_version(self):
         session_state = {}
 

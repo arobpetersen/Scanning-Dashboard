@@ -182,6 +182,7 @@ class LiveProvider(ProviderBase):
                 if TRACE_REFRESH_TICKER and ticker == TRACE_REFRESH_TICKER:
                     logger.warning("Refresh trace %s: LiveProvider fetch start", ticker)
                 closes, volumes, last_updated = self._fetch_history(ticker)
+                perf_1d = self._calc_return(closes, 1)
                 perf_1w = self._calc_return(closes, 5)
                 perf_1m = self._calc_return(closes, 21)
                 perf_3m = self._calc_return(closes, 63)
@@ -200,6 +201,7 @@ class LiveProvider(ProviderBase):
                     {
                         "ticker": ticker,
                         "price": float(price),
+                        "perf_1d": perf_1d,
                         "perf_1w": perf_1w,
                         "perf_1m": perf_1m,
                         "perf_3m": perf_3m,

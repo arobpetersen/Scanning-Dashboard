@@ -80,8 +80,8 @@ from src.suggestions_service import (
 )
 from src.theme_service import get_theme_members, list_themes, seed_if_needed
 
-st.set_page_config(page_title="Suggestions", layout="wide")
-st.title("Suggestions")
+st.set_page_config(page_title="Scanner Audit", layout="wide")
+st.title("Scanner Audit")
 reset_perf_timings("suggestions")
 research_feedback = st.session_state.pop("scanner_research_feedback", None)
 if research_feedback:
@@ -303,18 +303,9 @@ theme_options = themes[["id", "name"]].to_dict("records")
 theme_option_by_id = {int(row["id"]): row for row in theme_options}
 all_theme_ids = {int(row["id"]) for row in theme_options}
 
-suggestions_tab_options = ["Manual", "Queue", "Rules", "AI", "Scanner Audit"]
-st.session_state["suggestions_active_tab"] = resolve_active_suggestions_tab(
-    st.session_state.get("suggestions_active_tab"),
-    suggestions_tab_options,
-    "Manual",
-)
-active_suggestions_tab = st.radio(
-    "Suggestions section",
-    suggestions_tab_options,
-    horizontal=True,
-    key="suggestions_active_tab",
-    label_visibility="collapsed",
+active_suggestions_tab = "Scanner Audit"
+st.caption(
+    "Scanner Audit is the active operator workflow on this page. Legacy suggestion queue, manual, rules, and AI proposal tools are hidden from the normal UI."
 )
 
 if active_suggestions_tab == "Manual":

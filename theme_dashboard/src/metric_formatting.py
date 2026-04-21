@@ -60,7 +60,7 @@ def format_theme_ticker_table(df: pd.DataFrame) -> pd.DataFrame:
         return df
     out = df.copy()
 
-    for col in ("perf_1w", "perf_1m", "perf_3m"):
+    for col in ("perf_1d", "perf_1w", "perf_1m", "perf_3m"):
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce").round(2)
 

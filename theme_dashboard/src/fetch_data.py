@@ -261,6 +261,7 @@ def run_refresh(
             )
             persist_theme_snapshot_for_run(conn, run_id)
             if progress_callback:
+                accounting = provider.get_call_accounting() if hasattr(provider, "get_call_accounting") else {"api_call_count": 0, "endpoint_counts": {}}
                 progress_callback(
                     {
                         "run_id": run_id,
@@ -270,6 +271,9 @@ def run_refresh(
                         "success": 0,
                         "failure": 0,
                         "elapsed_seconds": 0.0,
+                        "current_ticker": None,
+                        "api_call_count": int(accounting.get("api_call_count", 0)),
+                        "api_endpoint_counts": dict(accounting.get("endpoint_counts", {})),
                     }
                 )
             return run_id
@@ -315,10 +319,10 @@ def run_refresh(
                 conn.execute(
                     """
                     INSERT INTO ticker_snapshots(
-                        run_id, ticker, price, perf_1w, perf_1m, perf_3m,
+                        run_id, ticker, price, perf_1d, perf_1w, perf_1m, perf_3m,
                         market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated, snapshot_source
                     )
-                    SELECT run_id, ticker, price, perf_1w, perf_1m, perf_3m,
+                    SELECT run_id, ticker, price, perf_1d, perf_1w, perf_1m, perf_3m,
                            market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated, ?
                     FROM incoming_snapshots
                     """,
@@ -373,6 +377,7 @@ def run_refresh(
             )
 
             if progress_callback:
+                accounting = provider.get_call_accounting() if hasattr(provider, "get_call_accounting") else {"api_call_count": 0, "endpoint_counts": {}}
                 progress_callback(
                     {
                         "run_id": run_id,
@@ -382,6 +387,9 @@ def run_refresh(
                         "success": success_count,
                         "failure": failure_count,
                         "elapsed_seconds": (_utc_now_naive() - started).total_seconds(),
+                        "current_ticker": ticker,
+                        "api_call_count": int(accounting.get("api_call_count", 0)),
+                        "api_endpoint_counts": dict(accounting.get("endpoint_counts", {})),
                     }
                 )
 

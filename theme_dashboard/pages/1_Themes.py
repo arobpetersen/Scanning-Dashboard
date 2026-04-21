@@ -5,10 +5,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from src.database import get_bootstrap_conn, get_conn, init_db
-from src.eod_refresh import materialize_latest_canonical_day, run_latest_daily_sync, run_scheduled_historical_append
+from src.database import get_conn, init_db
 from src.historical_backfill import reconstruct_theme_history_range
 from src.leaderboard_utils import (
+    annotate_current_leadership_quality,
     build_category_leaderboard,
     build_category_theme_breakdown,
     build_current_leadership_table,
@@ -44,11 +44,13 @@ from src.rankings import (
     standardized_three_month_guardrail_factor,
     visible_ticker_suppressed,
 )
+from src.theme_sync_status import ranked_canonical_sync_status
 from src.streamlit_utils import (
     clear_current_market_view_caches,
     db_cache_token,
     extract_selected_row,
-    load_current_ranking_snapshot_cached,
+    load_current_ranking_operating_snapshot_cached,
+    load_current_ranking_validation_snapshot_cached,
     load_theme_momentum_cached,
     prepare_post_mutation_refresh,
     queue_feedback_message,
@@ -65,7 +67,7 @@ from src.theme_selection import (
     SELECTED_THEME_LABEL_KEY,
     SELECTED_THEME_SOURCE_KEY,
     describe_selection_source,
-    rotate_replaceable_selectbox_widget,
+    prepare_replaceable_selectbox_widget_key,
     set_theme_selection_state,
     should_apply_selection_token,
 )
@@ -89,7 +91,6 @@ st.set_page_config(page_title="Themes", layout="wide")
 st.title("Themes")
 reset_perf_timings("themes")
 
-DAILY_HISTORICAL_APPEND_STALE_MINUTES = 45
 TICKER_COMPOSITE_CHART_TARGET_DAILY_POINTS = 20
 TICKER_COMPOSITE_CHART_TRADING_DAY_LOOKBACK = 140
 TICKER_COMPOSITE_CHART_RAW_SNAPSHOT_LIMIT = 160
@@ -123,26 +124,13 @@ def _short_date_label(value) -> str:
     return stamp.strftime("%Y-%m-%d")
 
 
-def _ranked_canonical_sync_status(live_value, ranked_canonical_value) -> str:
-    live_ts = pd.to_datetime(live_value, errors="coerce")
-    ranked_ts = pd.to_datetime(ranked_canonical_value, errors="coerce")
-    if pd.isna(live_ts) and pd.isna(ranked_ts):
-        return "Status unavailable"
-    if pd.isna(live_ts):
-        return "Live snapshot unavailable"
-    if pd.isna(ranked_ts):
-        return "Ranked canonical unavailable"
-
-    day_gap = int((live_ts.normalize() - ranked_ts.normalize()).days)
-    if day_gap == 0:
-        return "In sync"
-    if day_gap > 0:
-        suffix = "day" if day_gap == 1 else "days"
-        return f"Live ahead of ranked canonical by {day_gap} {suffix}"
-
-    day_gap = abs(day_gap)
-    suffix = "day" if day_gap == 1 else "days"
-    return f"Ranked canonical ahead of live by {day_gap} {suffix}"
+def _ranked_canonical_sync_status(latest_live_trading_value, ranked_canonical_value, as_of_et=None) -> str:
+    return ranked_canonical_sync_status(
+        latest_live_trading_value,
+        ranked_canonical_value,
+        latest_finalizable_value=None,
+        as_of_et=as_of_et,
+    )
 
 
 def _theme_option_maps(themes_df: pd.DataFrame) -> tuple[dict[str, int], dict[int, str], dict[str, int]]:
@@ -169,32 +157,6 @@ def _display_theme_table(df: pd.DataFrame) -> pd.DataFrame:
     if "theme_display" in out.columns:
         out["theme"] = out["theme_display"]
     return out
-
-
-def _active_daily_historical_append_runs() -> pd.DataFrame:
-    with get_bootstrap_conn() as conn:
-        table_exists_row = conn.execute(
-            "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'historical_reconstruction_runs'"
-        ).fetchone()
-        if not table_exists_row or int(table_exists_row[0]) == 0:
-            return pd.DataFrame()
-        active = conn.execute(
-            """
-            SELECT run_id, started_at, status, start_date, end_date, market_data_source
-            FROM historical_reconstruction_runs
-            WHERE status = 'running'
-              AND run_kind = 'daily_historical_append'
-            ORDER BY run_id DESC
-            """
-        ).df()
-    if active.empty:
-        return active
-    started = pd.to_datetime(active["started_at"], errors="coerce")
-    now = pd.Timestamp.utcnow().tz_localize(None)
-    age_minutes = ((now - started).dt.total_seconds() / 60.0).round(1)
-    active["age_minutes"] = age_minutes
-    active["likely_stale"] = age_minutes >= float(DAILY_HISTORICAL_APPEND_STALE_MINUTES)
-    return active
 
 
 def _resolve_prior_daily_endpoint(history: pd.DataFrame) -> tuple[pd.DataFrame, object | None, object | None]:
@@ -392,7 +354,7 @@ def _current_table_column_config(columns: list[str], *, text_columns: set[str] |
             configs[column] = st.column_config.NumberColumn(column, format="%d", width="small")
         elif column in {"current_momentum_score", "composite_score", "composite_atr_score", "momentum", "composite", "Comp ATR"}:
             configs[column] = st.column_config.NumberColumn(column, format="%.2f", width="small")
-        elif column in {"performance", "avg_1w", "avg_1m", "breadth_1m", "eligible_breadth_pct", "eligible %"}:
+        elif column in {"performance", "avg_1d", "avg_1w", "avg_1m", "breadth_1m", "eligible_breadth_pct", "eligible %"}:
             # These values are already rendered in percentage-point form like
             # "17.9%" before they reach the dataframe, so keep them as text to
             # avoid Streamlit applying fractional-percent scaling again.
@@ -416,7 +378,7 @@ def _historical_table_column_config(columns: list[str], *, text_columns: set[str
             configs[column] = st.column_config.NumberColumn(column, format="%d", width="small")
         elif column in {"momentum_score", "momentum", "composite_score", "composite"}:
             configs[column] = st.column_config.NumberColumn(column, format="%.2f", width="small")
-        elif column in {"performance", "avg_1w", "avg_1m", "avg_3m", "breadth_1m", "breadth", "eligible_breadth_pct", "eligible %"}:
+        elif column in {"performance", "avg_1d", "avg_1w", "avg_1m", "avg_3m", "breadth_1m", "breadth", "eligible_breadth_pct", "eligible %"}:
             configs[column] = st.column_config.TextColumn(column, width="small")
     return configs
 
@@ -454,7 +416,7 @@ def _apply_prior_current_model_scores(display_df: pd.DataFrame) -> pd.DataFrame:
     eligible_standardized_count = pd.to_numeric(out["eligible_standardized_count"], errors="coerce").fillna(0.0)
     eligible_momentum_count = pd.to_numeric(out["eligible_momentum_count"], errors="coerce").fillna(0.0)
 
-    prior_base_strength = 0.30 * prior_avg_1w + 0.70 * prior_avg_1m
+    prior_base_strength = 0.20 * prior_avg_1w + 0.55 * prior_avg_1m + 0.25 * prior_avg_3m
     participation_ratio = np.where(
         ticker_count > 0,
         eligible_standardized_count / ticker_count,
@@ -1062,7 +1024,8 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, sh
     st.subheader("Current Market Leadership")
     st.caption(
         "Ranks active themes by the current standardized composite baseline using only eligible preferred-source contributors. "
-        "This table keeps baseline strength, current momentum, and short-window performance adjacent so you can scan strength-now versus thrust-now without extra clutter."
+        "This table keeps baseline strength, current momentum, and short-window performance adjacent so you can scan strength-now versus thrust-now without extra clutter. "
+        "`avg_1d` is context-only and does not affect ranking."
     )
     prior_daily_lookup = prior_lookup if prior_lookup is not None else pd.DataFrame()
     display_base = leadership_df
@@ -1095,7 +1058,7 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, sh
         )
     display_df = _apply_plain_value_formatting(
         display_df,
-        percent_cols={"avg_1w", "avg_1m", "avg_3m", "eligible_breadth_pct"},
+        percent_cols={"avg_1d", "avg_1w", "avg_1m", "avg_3m", "eligible_breadth_pct"},
         percent_decimals=1,
     )
     visible_cols = [
@@ -1106,6 +1069,7 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, sh
         "current_momentum_score",
         "composite_score",
         "composite_atr_score",
+        "avg_1d",
         "avg_1w",
         "avg_1m",
         "avg_3m",
@@ -1167,7 +1131,8 @@ def _render_current_performance(
     st.markdown(f"**{title}**")
     st.caption(
         "Ranks current active themes on the selected window return using eligible preferred-source contributors only. "
-        "The table is still ranked by the selected window return using capped constituent aggregation, while nearby avg, momentum, and composite columns give thrust-now and baseline-strength context without relying on extra count columns."
+        "The table is still ranked by the selected window return using capped constituent aggregation, while nearby avg, momentum, composite, and `avg_1d` columns give thrust-now and baseline-strength context without relying on extra count columns. "
+        "`avg_1d` is informational only."
     )
     prior_daily_lookup = prior_lookup if prior_lookup is not None else pd.DataFrame()
     display_base = (
@@ -1190,6 +1155,7 @@ def _render_current_performance(
         "rank",
         "theme",
         "category",
+        "avg_1d",
         "avg_1w",
         "avg_1m",
         "avg_3m",
@@ -1206,7 +1172,7 @@ def _render_current_performance(
             )
     display_df = _apply_plain_value_formatting(
         display_df,
-        percent_cols={"avg_1w", "avg_1m", "avg_3m", "eligible_breadth_pct"},
+        percent_cols={"avg_1d", "avg_1w", "avg_1m", "avg_3m", "eligible_breadth_pct"},
         percent_decimals=1,
     )
     visible_cols.extend(
@@ -1253,14 +1219,25 @@ def _render_current_performance(
 
 
 def _render_standardized_composite_validation(
+    db_token: tuple[str, int],
     standardized_rankings: pd.DataFrame,
-    standardized_comparison: pd.DataFrame,
 ) -> None:
     with st.expander("Standardized Composite Validation", expanded=False):
         st.caption(
             "Validation view only: the Themes page above now uses the standardized composite as its default baseline, while this expander preserves legacy-vs-standardized comparison for debugging. "
-            "The standardized score uses 30% avg_1w, 70% avg_1m, a soft 3M guardrail, a recovery-strength burden of proof for weak 3M backdrops, and a participation-based adjustment instead of the fixed-size confidence baseline."
+            "The standardized score uses 20% avg_1w, 55% avg_1m, 25% avg_3m, a soft 3M guardrail, a recovery-strength burden of proof for weak 3M backdrops, and a participation-based adjustment instead of the fixed-size confidence baseline."
         )
+        load_validation = st.toggle(
+            "Load standardized validation tables",
+            value=False,
+            key="themes_load_standardized_validation",
+            help="Loads the heavier validation/comparison snapshot only when you need the debug view.",
+        )
+        if not load_validation:
+            st.caption("Current operating tables above stay on the faster base snapshot. Turn this on only when auditing the model.")
+            return
+        validation_snapshot = load_current_ranking_validation_snapshot_cached(db_token)
+        standardized_comparison = validation_snapshot.get("standardized_comparison", pd.DataFrame())
 
         if standardized_rankings.empty:
             st.info("No standardized composite rankings are available yet.")
@@ -1394,14 +1371,25 @@ def _render_standardized_composite_validation(
 
 
 def _render_current_momentum_validation(
-    current_momentum_rankings: pd.DataFrame,
-    current_momentum_comparison: pd.DataFrame,
+    db_token: tuple[str, int],
 ) -> None:
     with st.expander("Current Momentum Validation", expanded=False):
         st.caption(
             "Validation view only: current momentum is a current-thrust model, not the historical start/end momentum engine. "
             "It uses 70% avg_1w, 30% avg_1m, then applies a soft standardized-composite quality factor so weak baseline themes need stronger recent thrust to rank cleanly."
         )
+        load_validation = st.toggle(
+            "Load current momentum validation tables",
+            value=False,
+            key="themes_load_current_momentum_validation",
+            help="Loads the heavier validation/comparison snapshot only when you need the debug view.",
+        )
+        if not load_validation:
+            st.caption("Current operating tables above stay on the faster base snapshot. Turn this on only when auditing the model.")
+            return
+        validation_snapshot = load_current_ranking_validation_snapshot_cached(db_token)
+        current_momentum_rankings = validation_snapshot.get("current_momentum_rankings", pd.DataFrame())
+        current_momentum_comparison = validation_snapshot.get("current_momentum_comparison", pd.DataFrame())
 
         if current_momentum_rankings.empty:
             st.info("No current momentum rankings are available yet.")
@@ -1530,10 +1518,11 @@ explore_tab, manage_tab = st.tabs(["Explore Themes", "Manage & Ops"])
 
 with explore_tab:
     render_feedback_message(st.session_state, "themes_refresh_feedback")
-    st.info("Start here: review current leadership or current top themes, then click any theme row to open detail below. Use Theme Movement Snapshots for historical context, not current leadership.")
+    st.info("Use Themes for review and drilldown. Run daily sync/finalization from the Apps page, then come here to inspect current leadership and open detail.")
     with st.expander("Internal testing quick guide", expanded=False):
         st.markdown(
             "- Start in `Themes` for current leadership, drilldown, and ticker-level inspection.\n"
+            "- Run daily sync/finalization from `Apps`; this page now assumes the DB has already been refreshed there.\n"
             "- Use `Historical Performance` only when you want to audit historical movement, trust, or provenance for a theme that already looks interesting.\n"
             "- Most useful feedback: confusing labels/states, drilldown or selection bugs, trust/reconciliation issues, and places where the app feels broken even when data is present.\n"
             "- Known limitations: some advanced/debug tools remain available for internal trust work, and thin themes can still appear when their historical row contract is valid."
@@ -1553,17 +1542,25 @@ with explore_tab:
     if SELECTED_THEME_SOURCE_KEY not in st.session_state:
         st.session_state[SELECTED_THEME_SOURCE_KEY] = "default"
 
-    current_snapshot = load_current_ranking_snapshot_cached(db_token)
+    current_snapshot = load_current_ranking_operating_snapshot_cached(db_token)
     current_theme_metrics = current_snapshot["theme_metrics"].copy()
     if "standardized_composite_score" in current_theme_metrics.columns:
         current_theme_metrics["composite_score"] = current_theme_metrics["standardized_composite_score"]
     current_rankings = current_snapshot.get("standardized_rankings", current_snapshot["rankings"]).copy()
     if "standardized_composite_score" in current_rankings.columns:
         current_rankings["composite_score"] = current_rankings["standardized_composite_score"]
+    if not current_rankings.empty:
+        current_rankings = current_rankings.reset_index(drop=True).copy()
+        current_rankings["rank"] = current_rankings.index + 1
+        current_rankings = annotate_current_leadership_quality(current_rankings)
+        current_theme_metrics = current_theme_metrics.merge(
+            current_rankings[["theme_id", "rank", "leader_cohort_eligible", "leader_cohort_cutoff_rank", "active_theme_count"]].rename(
+                columns={"rank": "current_rank"}
+            ),
+            on="theme_id",
+            how="left",
+        )
     standardized_rankings = current_snapshot.get("standardized_rankings", pd.DataFrame())
-    standardized_comparison = current_snapshot.get("standardized_comparison", pd.DataFrame())
-    current_momentum_rankings = current_snapshot.get("current_momentum_rankings", pd.DataFrame())
-    current_momentum_comparison = current_snapshot.get("current_momentum_comparison", pd.DataFrame())
     momentum_1w = load_theme_momentum_cached(db_token, 7, top_n=20)
     momentum_1m = load_theme_momentum_cached(db_token, 30, top_n=20)
     baseline_row = baseline.iloc[0] if not baseline.empty else None
@@ -1579,112 +1576,40 @@ with explore_tab:
     current_snapshot_label = short_timestamp(current_driver_time)
     if not current_snapshot_label and baseline_row is not None:
         current_snapshot_label = short_timestamp(baseline_row.get("latest_ticker_snapshot_time"))
+    current_live_reference = current_driver_time
+    if current_live_reference is None and baseline_row is not None:
+        current_live_reference = baseline_row.get("latest_ticker_snapshot_time")
+    latest_expected_trading_date = canonical_window_row.get("latest_expected_trading_date") if canonical_window_row is not None else None
     latest_raw_canonical_date = canonical_window_row.get("latest_raw_canonical_date") if canonical_window_row is not None else None
     latest_ranked_canonical_date = canonical_window_row.get("latest_ranked_canonical_date") if canonical_window_row is not None else None
-    sync_status_label = _ranked_canonical_sync_status(
-        current_driver_time if current_driver_time is not None else (baseline_row.get("latest_ticker_snapshot_time") if baseline_row is not None else None),
+    current_live_trading_date = _short_date_label(current_live_reference)
+    sync_status_label = ranked_canonical_sync_status(
+        current_live_reference,
         latest_ranked_canonical_date,
+        latest_finalizable_value=latest_expected_trading_date,
     )
     freshness_c1, freshness_c2, freshness_c3, freshness_c4 = st.columns([1.1, 1.0, 1.35, 1.15])
     freshness_c1.metric("Current live snapshot", current_snapshot_label or "-")
     freshness_c2.metric("Latest ranked canonical date", _short_date_label(latest_ranked_canonical_date))
     freshness_c3.metric("Sync status", sync_status_label)
-    active_append_runs = _active_daily_historical_append_runs()
     with freshness_c4:
-        if st.button("Finalize latest market day", type="primary", key="themes_finalize_latest_day"):
-            status_container = st.status("Finalize latest market day: started.", expanded=True)
-            try:
-                status_container.write("Running live refresh, latest-day historical append, and canonical materialization in order.")
-                with get_bootstrap_conn() as conn:
-                    sync_result = run_latest_daily_sync(conn, provider_name="live")
-
-                clear_current_market_view_caches()
-                live_stage = sync_result.get("stages", {}).get("live_refresh", {})
-                append_stage = sync_result.get("stages", {}).get("historical_append", {})
-                canonical_stage = sync_result.get("stages", {}).get("canonical_materialization", {})
-                feedback_level = "success" if str(sync_result.get("status") or "") == "success" else "warning"
-                if any(str(stage.get("status") or "") == "failed" for stage in [live_stage, append_stage, canonical_stage]):
-                    feedback_level = "error"
-
-                status_container.write(
-                    f"Live refresh=`{live_stage.get('status') or 'unknown'}` | "
-                    f"historical append=`{append_stage.get('status') or 'unknown'}` | "
-                    f"canonical=`{canonical_stage.get('status') or 'unknown'}`."
-                )
-                status_container.write("Themes/Historical caches cleared; page rerun is next.")
-
-                feedback_bits = [
-                    f"Latest-day sync finished with overall status=`{sync_result.get('status') or 'unknown'}`.",
-                    (
-                        f"Live snapshot stage=`{live_stage.get('status') or 'unknown'}`"
-                        + (f" | run_id=`{live_stage.get('run_id')}`." if live_stage.get("run_id") else ".")
-                    ),
-                    (
-                        f"Historical append stage=`{append_stage.get('status') or 'unknown'}` | "
-                        f"theme_rows_written=`{int(append_stage.get('snapshot_rows_written') or 0)}` | "
-                        f"ticker_rows_written=`{int(append_stage.get('ticker_history_rows_written') or 0)}`."
-                    ),
-                    (
-                        f"Canonical stage=`{canonical_stage.get('status') or 'unknown'}` | "
-                        f"latest_expected=`{canonical_stage.get('latest_expected_trading_date') or '-'}` | "
-                        f"latest_canonical_after=`{canonical_stage.get('latest_canonical_snapshot_date_after') or '-'}` | "
-                        f"inserted=`{int(canonical_stage.get('inserted_count') or 0)}`."
-                    ),
-                    "Themes/Historical analytics caches were cleared and the page reran against refreshed state.",
-                ]
-                if append_stage.get("failed_tickers"):
-                    failed_tickers = list(append_stage.get("failed_tickers") or [])
-                    feedback_bits.append(
-                        f"Historical append failed for tickers=`{', '.join(failed_tickers[:8])}`"
-                        + (f" +{len(failed_tickers) - 8} more." if len(failed_tickers) > 8 else ".")
-                    )
-                if str(canonical_stage.get("status") or "") == "failed":
-                    feedback_bits.append(f"Canonical materialization error: {canonical_stage.get('error')}")
-                elif str(canonical_stage.get("status") or "") == "already_current":
-                    feedback_bits.append("Canonical latest day was already current, so no duplicate canonical rows were written.")
-
-                status_container.update(
-                    label=f"Finalize latest market day: {sync_result.get('status') or 'complete'}.",
-                    state="error" if feedback_level == "error" else "complete",
-                    expanded=True,
-                )
-                prepare_post_mutation_refresh(
-                    st.session_state,
-                    "themes_refresh_feedback",
-                    level=feedback_level,
-                    message=" ".join(feedback_bits),
-                    clear_market=True,
-                )
-                st.rerun()
-            except Exception as exc:
-                status_container.update(
-                    label="Finalize latest market day: error.",
-                    state="error",
-                    expanded=True,
-                )
-                status_container.write(f"Latest-day sync failed before completion: {exc}")
-                queue_feedback_message(
-                    st.session_state,
-                    "themes_refresh_feedback",
-                    level="error",
-                    message=(
-                        "Finalize latest market day failed before completion. "
-                        f"No full-current guarantee: {exc}"
-                    ),
-                )
-                st.rerun()
-    if not active_append_runs.empty and bool(active_append_runs.iloc[0].get("likely_stale")):
-        stale_run = active_append_runs.iloc[0]
-        st.warning(
-            "A daily historical append run appears likely stale/orphaned. "
-            f"run_id=`{int(stale_run['run_id'])}` has been marked `running` since `{short_timestamp(stale_run.get('started_at')) or '-'}` "
-            f"({float(stale_run.get('age_minutes') or 0):.1f} minutes). "
-            "The duplicate-run guard will block new Themes materialization attempts until this stale run is cleaned up manually."
-        )
+        if st.button("Reload latest DB state", key="themes_force_refresh"):
+            clear_current_market_view_caches()
+            queue_feedback_message(
+                st.session_state,
+                "themes_refresh_feedback",
+                level="success",
+                message=(
+                    "Reloaded Themes against the latest stored DB state. This page does not run sync/finalization; use Apps for the daily refresh workflow."
+                ),
+            )
+            st.rerun()
+        st.caption("Light reload only. Use Apps for daily sync/finalization.")
     with st.expander("Snapshot details", expanded=False):
-        detail_c1, detail_c2 = st.columns(2)
-        detail_c1.metric("Latest raw canonical date", _short_date_label(latest_raw_canonical_date))
-        detail_c2.metric("Latest ranked canonical window end", short_timestamp(latest_ranked_window_end) or "-")
+        detail_c1, detail_c2, detail_c3 = st.columns(3)
+        detail_c1.metric("Latest live trading date", current_live_trading_date)
+        detail_c2.metric("Latest raw canonical date", _short_date_label(latest_raw_canonical_date))
+        detail_c3.metric("Latest ranked canonical window end", short_timestamp(latest_ranked_window_end) or "-")
         if canonical_window_row is not None and bool(canonical_window_row.get("raw_vs_ranked_date_differs")):
             st.info(
                 f"Latest canonical rows exist for `{_short_date_label(latest_raw_canonical_date)}`, "
@@ -1692,159 +1617,10 @@ with explore_tab:
                 "because the newer date does not have usable ranked canonical rows yet."
             )
 
-    with st.expander("Advanced refresh controls", expanded=False):
-        refresh_c1, refresh_c2, refresh_c3 = st.columns([1.0, 1.25, 1.2])
-        with refresh_c1:
-            if st.button("Reload latest DB state", key="themes_force_refresh"):
-                clear_current_market_view_caches()
-                queue_feedback_message(
-                    st.session_state,
-                    "themes_refresh_feedback",
-                    level="success",
-                    message=(
-                        "Cleared cached Themes/Historical analytics and reran this page against the latest DB state. "
-                        "This recomputes current ranking and movement tables in-memory from stored data only; it does not run upstream refreshes or rebuild snapshots."
-                    ),
-                )
-                st.rerun()
-            st.caption("Use when the page looks stale but today's data should already be loaded.")
-        with refresh_c2:
-            if st.button("Append latest historical day (reconstructed)", key="themes_force_latest_day_refresh"):
-                if not active_append_runs.empty:
-                    active_run = active_append_runs.iloc[0]
-                    if bool(active_run.get("likely_stale")):
-                        st.warning(
-                            "Append latest historical day (reconstructed) did not start because a daily historical append run looks stale/orphaned. "
-                            f"Active run_id=`{int(active_run['run_id'])}` started=`{short_timestamp(active_run.get('started_at')) or '-'}` "
-                            f"and has been running for about `{float(active_run.get('age_minutes') or 0):.1f}` minutes. "
-                            "The duplicate-run guard will continue blocking new materialization attempts until the stale run is cleaned up manually."
-                        )
-                    else:
-                        st.warning(
-                            "Append latest historical day (reconstructed) did not start because a daily historical append run is already active. "
-                            f"Active run_id=`{int(active_run['run_id'])}` started=`{short_timestamp(active_run.get('started_at')) or '-'}`. "
-                            "Wait for the current append to finish before starting another one from Themes."
-                        )
-                else:
-                    status_container = st.status("Append latest historical day (reconstructed): started.", expanded=True)
-                    try:
-                        status_container.write("Historical append step running against provider historical data for the latest trading day.")
-                        with get_bootstrap_conn() as conn:
-                            historical_append_result = run_scheduled_historical_append(conn, provider_name="live", force=True)
-
-                        append_status = str((historical_append_result or {}).get("status") or "not_run")
-                        append_rows_written = int((historical_append_result or {}).get("snapshot_rows_written") or 0)
-                        append_ticker_rows_written = int((historical_append_result or {}).get("ticker_history_rows_written") or 0)
-                        append_failed_tickers = list((historical_append_result or {}).get("failed_tickers") or [])
-                        historical_append_ran = historical_append_result is not None
-                        movement_likely_advanced = historical_append_ran and append_status in {"success", "partial", "no_op"}
-                        feedback_level = "success"
-                        if not historical_append_ran or append_status in {"failed", "no_scope"}:
-                            feedback_level = "warning"
-                        if append_status == "failed":
-                            feedback_level = "error"
-                        final_state = "success"
-                        if append_status in {"no_op", "no_scope"}:
-                            final_state = "no-op"
-                        elif append_status == "partial":
-                            final_state = "partial"
-                        elif append_status == "failed":
-                            final_state = "error"
-
-                        status_container.write(
-                            f"Historical append completed with status `{append_status}` | "
-                            f"theme_rows_written=`{append_rows_written}` | "
-                            f"ticker_rows_written=`{append_ticker_rows_written}`."
-                        )
-                        status_container.write("Cache clear and rerun preparation running.")
-
-                        feedback_bits = [
-                            (
-                                f"Latest-day historical append ran with status=`{append_status}` | "
-                                f"theme_rows_written=`{append_rows_written}` | "
-                                f"ticker_rows_written=`{append_ticker_rows_written}`."
-                                if historical_append_ran
-                                else "Latest-day historical append did not run."
-                            ),
-                            (
-                            "Reconstructed movement-history layers were likely advanced to the latest trading day when provider history was available."
-                                if movement_likely_advanced
-                                else "Reconstructed movement-history layers were not clearly advanced; inspect append status and source data availability."
-                            ),
-                            "Themes/Historical analytics caches were cleared and the page reran against refreshed state.",
-                            "This path appends ticker/day history and reconstructed movement layers only; it does not write canonical daily snapshot rows, so the 1W/1M canonical window end may remain unchanged.",
-                        ]
-                        if append_failed_tickers:
-                            feedback_bits.append(f"Append failed for tickers=`{', '.join(append_failed_tickers[:8])}`" + (f" +{len(append_failed_tickers) - 8} more." if len(append_failed_tickers) > 8 else "."))
-
-                        status_container.update(
-                            label=f"Append latest historical day (reconstructed): {final_state}.",
-                            state="error" if feedback_level == "error" else "complete",
-                            expanded=True,
-                        )
-                        prepare_post_mutation_refresh(
-                            st.session_state,
-                            "themes_refresh_feedback",
-                            level=feedback_level,
-                            message=" ".join(feedback_bits),
-                            clear_market=True,
-                        )
-                        st.rerun()
-                    except Exception as exc:
-                        status_container.update(
-                            label="Append latest historical day (reconstructed): error.",
-                            state="error",
-                            expanded=True,
-                        )
-                        status_container.write(f"Historical append failed before completion: {exc}")
-                        queue_feedback_message(
-                            st.session_state,
-                            "themes_refresh_feedback",
-                            level="error",
-                            message=(
-                                "Append latest historical day (reconstructed) failed before completion. "
-                                f"No refresh guarantee: {exc}"
-                            ),
-                        )
-                        st.rerun()
-            st.caption("Use only if today's historical movement context looks missing.")
-        with refresh_c3:
-            if st.button("Materialize latest canonical day", key="themes_force_latest_canonical_day"):
-                status_container = st.status("Materialize latest canonical day: started.", expanded=True)
-                try:
-                    with get_bootstrap_conn() as conn:
-                        canonical_result = materialize_latest_canonical_day(conn, provider_name="live")
-                    clear_current_market_view_caches()
-                    status_container.write(
-                        f"Canonical stage=`{canonical_result.get('status') or 'unknown'}` | "
-                        f"latest_expected=`{canonical_result.get('latest_expected_trading_date') or '-'}` | "
-                        f"latest_canonical_after=`{canonical_result.get('latest_canonical_snapshot_date_after') or '-'}`."
-                    )
-                    status_container.update(label="Materialize latest canonical day: complete.", state="complete", expanded=True)
-                    prepare_post_mutation_refresh(
-                        st.session_state,
-                        "themes_refresh_feedback",
-                        level="success" if str(canonical_result.get("status") or "") not in {"failed", "missing"} else "warning",
-                        message=(
-                            f"Canonical latest-day materialization finished with status=`{canonical_result.get('status') or 'unknown'}` | "
-                            f"latest_expected=`{canonical_result.get('latest_expected_trading_date') or '-'}` | "
-                            f"latest_canonical_after=`{canonical_result.get('latest_canonical_snapshot_date_after') or '-'}` | "
-                            f"inserted=`{int(canonical_result.get('inserted_count') or 0)}`."
-                        ),
-                        clear_market=True,
-                    )
-                    st.rerun()
-                except Exception as exc:
-                    status_container.update(label="Materialize latest canonical day: error.", state="error", expanded=True)
-                    status_container.write(f"Canonical materialization failed before completion: {exc}")
-                    queue_feedback_message(
-                        st.session_state,
-                        "themes_refresh_feedback",
-                        level="error",
-                        message=f"Materialize latest canonical day failed before completion. No canonical guarantee: {exc}",
-                    )
-                    st.rerun()
-            st.caption("Use only if today's ranked canonical date is behind.")
+    with st.expander("Refresh guidance", expanded=False):
+        st.caption(
+            "Themes reads stored state only. Use `Apps` for daily sync/finalization, then use `Reload latest DB state` here if this page needs a clean rerun against the refreshed database."
+        )
 
     leadership_df = _attach_current_leadership_tickers(build_current_leadership_table(current_rankings, top_k=12))
     current_1w_df = build_current_performance_table(current_theme_metrics, "avg_1w", top_k=10)
@@ -1867,7 +1643,7 @@ with explore_tab:
             prior_lookup=current_delta_lookup,
         )
         _render_current_rank_movers(current_rankings, label_by_id)
-        _render_standardized_composite_validation(standardized_rankings, standardized_comparison)
+        _render_standardized_composite_validation(db_token, standardized_rankings)
 
     st.divider()
     st.subheader("Current Top Themes By Window")
@@ -1913,7 +1689,7 @@ with explore_tab:
                 prior_lookup=current_delta_lookup,
                 metric_col="avg_1m",
             )
-    _render_current_momentum_validation(current_momentum_rankings, current_momentum_comparison)
+    _render_current_momentum_validation(db_token)
 
     lb1, lb1_msg = _build_historical_leaderboard(
         momentum_1w,
@@ -2015,7 +1791,12 @@ with explore_tab:
         else:
             st.markdown("### Search and select a theme to view detail.")
         st.markdown("")
-        theme_search_widget_key = f"theme_detail_view_search__{int(st.session_state.get('theme_detail_view_search__widget_version', 0))}"
+        theme_search_widget_key = prepare_replaceable_selectbox_widget_key(
+            st.session_state,
+            "theme_detail_view_search",
+            labels,
+            selection,
+        )
         selected_search = st.selectbox(
             "Theme detail view",
             labels,
@@ -2024,10 +1805,9 @@ with explore_tab:
             key=theme_search_widget_key,
             label_visibility="collapsed",
         )
-        if selected_search:
+        if selected_search and str(selected_search) != str(selection or ""):
             selection = str(selected_search)
             _set_theme_selection(int(options[selection]), selection, "manual_dropdown")
-            rotate_replaceable_selectbox_widget(st.session_state, "theme_detail_view_search")
     with source_col:
         if selection:
             st.caption(f"Selected from: {describe_selection_source(st.session_state.get(SELECTED_THEME_SOURCE_KEY))}")
@@ -2084,7 +1864,7 @@ with explore_tab:
         governed_count = int(current_row.get("ticker_count") or 0) if current_row is not None else int(len(ticker_df))
         visible_member_rows = int(len(visible_ticker_df))
         suppressed_hidden_count = max(int(len(ticker_df)) - visible_member_rows, 0)
-        enriched_basis_cols = [col for col in ["price", "perf_1w", "perf_1m", "perf_3m", "avg_volume", "snapshot_time"] if col in visible_ticker_df.columns]
+        enriched_basis_cols = [col for col in ["price", "perf_1d", "perf_1w", "perf_1m", "perf_3m", "avg_volume", "snapshot_time"] if col in visible_ticker_df.columns]
         enriched_row_count = int(visible_ticker_df[enriched_basis_cols].notna().any(axis=1).sum()) if enriched_basis_cols else 0
 
     if current_row is not None:
@@ -2143,12 +1923,22 @@ with explore_tab:
                         "—" if pd.isna(current_row.get("eligible_composite_count")) else int(current_row.get("eligible_composite_count") or 0),
                     )
                 with s6:
-                    _render_summary_metric("Avg 1W", _metric_value(current_row.get("avg_1w"), suffix="%"))
+                    _render_summary_metric("Avg 1D", _metric_value(current_row.get("avg_1d"), suffix="%"))
                 with s7:
-                    _render_summary_metric("Avg 1M", _metric_value(current_row.get("avg_1m"), suffix="%"))
+                    _render_summary_metric("Avg 1W", _metric_value(current_row.get("avg_1w"), suffix="%"))
                 with s8:
-                    _render_summary_metric("Avg 3M", _metric_value(current_row.get("avg_3m"), suffix="%"))
+                    _render_summary_metric("Avg 1M", _metric_value(current_row.get("avg_1m"), suffix="%"))
                 st.markdown("<div style='height:0.18rem;'></div>", unsafe_allow_html=True)
+                s9, s10, s11, s12 = st.columns(4, gap="small")
+                with s9:
+                    _render_summary_metric("Avg 3M", _metric_value(current_row.get("avg_3m"), suffix="%"))
+                with s10:
+                    quality_label = "n/a (inactive theme)" if not bool(current_row.get("is_active")) else current_leadership_quality_label(current_row)
+                    _render_summary_metric("Quality", quality_label)
+                with s11:
+                    _render_summary_metric("Snapshot", short_timestamp(current_row.get("snapshot_time")) or "â€”")
+                with s12:
+                    _render_summary_metric("Workflow", "Sync in Apps")
 
     if suppressed_hidden_count > 0 and not include_suppressed_tickers:
         st.caption(f"{suppressed_hidden_count} suppressed ticker(s) are hidden from the default detail table.")
@@ -2179,7 +1969,7 @@ with explore_tab:
 
     if not visible_ticker_df.empty:
         display_ticker_df = format_theme_ticker_table(visible_ticker_df)
-        for perf_col in ("perf_1w", "perf_1m", "perf_3m"):
+        for perf_col in ("perf_1d", "perf_1w", "perf_1m", "perf_3m"):
             if perf_col in display_ticker_df.columns:
                 display_ticker_df[perf_col] = display_ticker_df[perf_col].apply(
                     lambda v: display_or_dash(None) if v is None else (display_or_dash(None) if str(v) == "nan" else f"{float(v):.2f}%")
@@ -2197,6 +1987,7 @@ with explore_tab:
                 "eligible",
                 "suppressed" if include_suppressed_tickers else None,
                 "price",
+                "perf_1d",
                 "perf_1w",
                 "perf_1m",
                 "perf_3m",

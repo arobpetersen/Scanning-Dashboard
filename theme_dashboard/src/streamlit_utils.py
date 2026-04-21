@@ -10,7 +10,12 @@ from .database import DB_PATH, DatabaseLockedError, database_path_str, get_conn,
 from .inflection_engine import compute_theme_inflections
 from .momentum_engine import compute_theme_momentum
 from .queries import theme_health_overview
-from .rankings import compute_current_ranking_snapshot, compute_theme_rankings
+from .rankings import (
+    compute_current_ranking_operating_snapshot,
+    compute_current_ranking_snapshot,
+    compute_current_ranking_validation_snapshot,
+    compute_theme_rankings,
+)
 from .scanner_audit import scanner_candidate_summary
 from .scanner_research_cache import clear_scanner_research_caches
 
@@ -248,8 +253,38 @@ def load_current_ranking_snapshot_cached(db_token: tuple[str, int]):
     return _timed_cached_load("current_ranking_snapshot", _load_current_ranking_snapshot_cached, db_token)
 
 
+@st.cache_data(show_spinner=False)
+def _load_current_ranking_operating_snapshot_cached(_db_token: tuple[str, int]):
+    with get_conn() as conn:
+        return compute_current_ranking_operating_snapshot(conn)
+
+
+def load_current_ranking_operating_snapshot_cached(db_token: tuple[str, int]):
+    return _timed_cached_load(
+        "current_ranking_operating_snapshot",
+        _load_current_ranking_operating_snapshot_cached,
+        db_token,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _load_current_ranking_validation_snapshot_cached(_db_token: tuple[str, int]):
+    with get_conn() as conn:
+        return compute_current_ranking_validation_snapshot(conn)
+
+
+def load_current_ranking_validation_snapshot_cached(db_token: tuple[str, int]):
+    return _timed_cached_load(
+        "current_ranking_validation_snapshot",
+        _load_current_ranking_validation_snapshot_cached,
+        db_token,
+    )
+
+
 def clear_current_market_view_caches() -> None:
     _load_current_ranking_snapshot_cached.clear()
+    _load_current_ranking_operating_snapshot_cached.clear()
+    _load_current_ranking_validation_snapshot_cached.clear()
     _load_theme_rankings_cached.clear()
     _load_theme_momentum_cached.clear()
     _load_theme_inflections_cached.clear()
