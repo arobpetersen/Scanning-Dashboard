@@ -1,0 +1,9 @@
+Qualitative governance sanity check reviewed: 6
+strongest exemplar candidate: 4
+BLMN, LTC, CCS, STC
+
+plausible but not ideal exemplar: 2
+DRUG, IIPR
+
+numerically close but poor policy exemplar: 0
+none

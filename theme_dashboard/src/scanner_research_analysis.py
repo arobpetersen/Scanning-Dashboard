@@ -517,6 +517,52 @@ def heuristic_research_draft(candidate: dict[str, object], catalog: list[dict[st
     }
 
 
+def direct_theme_native_matches(
+    candidate: dict[str, object],
+    catalog: list[dict[str, object]],
+    profile: dict[str, object],
+    *,
+    candidate_analysis_result: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    from . import scanner_research as legacy
+
+    analysis = candidate_analysis_result or candidate_analysis(profile, candidate)
+    strong_role_evidence = bool(analysis.get("strong_role_evidence"))
+    ranked: list[tuple[int, int, dict[str, object]]] = []
+    for entry in preprocessed_catalog(catalog):
+        fit_details = theme_fit_details(entry, profile, candidate, candidate_analysis=analysis)
+        score = int(fit_details.get("score") or 0)
+        if score < 3:
+            continue
+        suggestion = annotate_suggestion_fit(
+            {
+                "theme_id": int(entry["theme_id"]),
+                "theme_name": str(entry["theme_name"]),
+                "category": str(entry["category"]),
+                "why_it_might_fit": str(fit_details.get("why") or ""),
+                "representative_tickers": list(entry.get("representative_tickers") or []),
+            },
+            fit_details,
+        )
+        suggestion["_match_score"] = score
+        suggestion["_match_source"] = "theme_native"
+        ranked.append((score, 1 if fit_details.get("direct_role_fit") else 0, suggestion))
+
+    ranked.sort(key=lambda item: (-item[0], -item[1], str(item[2].get("theme_name") or "")))
+    if not ranked:
+        return []
+
+    strongest_score = ranked[0][0]
+    score_floor = max(8, strongest_score - 2) if strongest_score else 999
+    selected = [item[2] for item in ranked if item[0] >= score_floor][:5]
+    return truncate_existing_theme_suggestions(
+        legacy._prioritize_operating_role_suggestions(
+            selected,
+            strong_role_evidence=strong_role_evidence,
+        )
+    )
+
+
 def description_theme_generation_draft(candidate: dict[str, object], catalog: list[dict[str, object]], profile: dict[str, object]) -> dict[str, object]:
     from . import scanner_research as legacy
 
@@ -551,6 +597,14 @@ def description_theme_generation_draft(candidate: dict[str, object], catalog: li
             if theme_id not in best_by_theme_id or int(match["score"]) > int(best_by_theme_id[theme_id]["score"]):
                 best_by_theme_id[theme_id] = match
     match_ms = legacy._elapsed_ms(match_start)
+    direct_match_start = legacy._now_perf()
+    theme_native_matches = direct_theme_native_matches(
+        candidate,
+        catalog,
+        profile,
+        candidate_analysis_result=candidate_analysis_result,
+    )
+    direct_match_ms = legacy._elapsed_ms(direct_match_start)
     finalize_start = legacy._now_perf()
     ranked_matches = sorted(
         best_by_theme_id.values(),
@@ -597,6 +651,25 @@ def description_theme_generation_draft(candidate: dict[str, object], catalog: li
         seen_generic_clusters.add(cluster_key)
         if len(suggested_existing) >= 3:
             break
+    theme_native_debug = [
+        {
+            "theme_name": str(item.get("theme_name") or ""),
+            "score": int(item.get("_match_score") or 0),
+            "fit_label": str(item.get("fit_label") or "broad_fit"),
+            "source": "theme_native",
+        }
+        for item in list(theme_native_matches or [])
+    ]
+    merged_suggestions_by_id = {int(item["theme_id"]): item for item in list(suggested_existing or [])}
+    for suggestion in list(theme_native_matches or []):
+        theme_id = int(suggestion["theme_id"])
+        existing = merged_suggestions_by_id.get(theme_id)
+        if existing is None or int(suggestion.get("_match_score") or 0) > int(existing.get("_match_score") or 0):
+            merged_suggestions_by_id[theme_id] = suggestion
+    suggested_existing = sorted(
+        merged_suggestions_by_id.values(),
+        key=lambda item: (-int(item.get("_match_score") or 0), str(item.get("theme_name") or "")),
+    )
     suggested_existing = legacy._prioritize_operating_role_suggestions(
         suggested_existing,
         strong_role_evidence=strong_role_evidence,
@@ -662,6 +735,10 @@ def description_theme_generation_draft(candidate: dict[str, object], catalog: li
             "Best governed-theme matches: "
             + "; ".join(f"{item['theme_name']} [{item['fit_label']}: {item['why_it_might_fit']}]" for item in suggested_existing)
         )
+        if theme_native_debug:
+            rationale_parts.append(
+                "Theme-native retrieval also compared the company description directly against governed theme identities from the database, so existing-theme suggestions do not depend only on generated phrase labels."
+            )
     if possible_new_theme:
         if suggested_existing:
             rationale_parts.append(
@@ -715,6 +792,7 @@ def description_theme_generation_draft(candidate: dict[str, object], catalog: li
         "value_chain_layers": value_chain_layers,
         "generated_theme_ideas": candidate_theme_ideas[:5],
         "evaluated_matches": validation_matches,
+        "theme_native_retrieval_top_hits": theme_native_debug[:5],
         "possible_new_theme_decision": {
             "candidate": strongest_unmatched_idea,
             "selected": possible_new_theme,
@@ -729,6 +807,7 @@ def description_theme_generation_draft(candidate: dict[str, object], catalog: li
         "dominant_business_role_ms": role_ms,
         "candidate_theme_ideas_ms": idea_ms,
         "governed_theme_matching_ms": match_ms,
+        "theme_native_retrieval_ms": direct_match_ms,
         "finalize_ms": legacy._elapsed_ms(finalize_start),
         "strategy_total_ms": legacy._elapsed_ms(draft_start),
     }

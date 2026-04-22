@@ -1,0 +1,9 @@
+Compared threshold-policy candidate names: 25
+strongest future policy exception candidates: 6
+DRUG, IIPR, BLMN, LTC, CCS, STC
+
+acceptable but still should remain below the line: 6
+HOPE, IMKTA, WFG, MRTN, LADR, REX
+
+not compelling despite numerical proximity: 13
+APPN, DPRO, JACK, MCRI, KOPN, GILT, VTLE, RPAY, XHR, DQ, LTBR, BLDP, DCOM

@@ -695,6 +695,16 @@ def init_db() -> None:
             conn,
             "UPDATE symbol_refresh_status SET manual_suppressed = COALESCE(manual_suppressed, FALSE) WHERE manual_suppressed IS NULL",
         )
+        _best_effort_init_update(
+            conn,
+            """
+            UPDATE symbol_refresh_status
+            SET suppression_reason = suggested_reason
+            WHERE COALESCE(status, 'active') = 'refresh_suppressed'
+              AND suppression_reason IS NULL
+              AND suggested_reason IS NOT NULL
+            """,
+        )
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS source_context_json VARCHAR")
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS source_updated_at TIMESTAMP")

@@ -53,11 +53,13 @@ from src.queries import (
 from src.symbol_hygiene import (
     OVERRIDE_ACTIONS,
     STAGED_ACTIONS,
+    approve_suppression,
     apply_refresh_failure,
     apply_refresh_success,
     apply_staged_symbol_hygiene_actions,
     clear_symbol_hygiene_staged_state,
     filter_symbol_hygiene_queue,
+    reject_keep_active,
     resolve_staged_symbol_hygiene_action,
     sync_symbol_hygiene_staged_action,
     sort_symbol_hygiene_queue,
@@ -2575,10 +2577,44 @@ class TestFailureClassificationAndHygiene(unittest.TestCase):
         self.assertEqual(int(suppressed[2]), 5)
 
         apply_refresh_success(conn, "BAD1", 6)
-        recovered = conn.execute("select status, consecutive_failure_count, last_failure_category from symbol_refresh_status where ticker='BAD1'").fetchone()
+        recovered = conn.execute(
+            "select status, consecutive_failure_count, last_failure_category, suppression_reason from symbol_refresh_status where ticker='BAD1'"
+        ).fetchone()
         self.assertEqual(recovered[0], "active")
         self.assertEqual(int(recovered[1]), 0)
         self.assertIsNone(recovered[2])
+        self.assertIsNone(recovered[3])
+        conn.close()
+
+    def test_auto_suppression_persists_operational_provenance(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp default current_timestamp
+            )
+            """
+        )
+
+        for i in range(1, 6):
+            apply_refresh_failure(conn, "BAD2", i, "NO_CANDLES: Massive returned no daily aggregates")
+
+        suppressed = conn.execute(
+            "select status, suggested_reason, suppression_reason from symbol_refresh_status where ticker='BAD2'"
+        ).fetchone()
+        self.assertEqual(suppressed[0], "refresh_suppressed")
+        self.assertEqual(suppressed[1], suppressed[2])
         conn.close()
 
     def test_symbol_hygiene_queue_includes_last_valid_market_data_context(self):
@@ -3949,6 +3985,46 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertFalse(bool(restored["manual_suppressed"]))
         self.assertIsNone(restored["manual_suppression_reason"])
         self.assertIsNone(restored["manual_suppressed_at"])
+        conn.close()
+
+    def test_health_queue_suppression_persists_reason_and_unsuppress_clears_it(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            """
+            create table symbol_refresh_status(
+                ticker varchar primary key,
+                status varchar,
+                suggested_status varchar,
+                suggested_reason varchar,
+                suppression_reason varchar,
+                manual_suppressed boolean default false,
+                manual_suppression_reason varchar,
+                manual_suppressed_at timestamp,
+                last_failure_category varchar,
+                consecutive_failure_count bigint,
+                rolling_failure_count bigint,
+                last_failure_at timestamp,
+                last_success_at timestamp,
+                last_run_id bigint,
+                updated_at timestamp
+            )
+            """
+        )
+
+        approve_suppression(conn, "JNPR")
+        suppressed = conn.execute(
+            "select status, suggested_reason, suppression_reason from symbol_refresh_status where ticker='JNPR'"
+        ).fetchone()
+        self.assertEqual(suppressed[0], "refresh_suppressed")
+        self.assertEqual(suppressed[1], suppressed[2])
+
+        reject_keep_active(conn, "JNPR")
+        restored = conn.execute(
+            "select status, suggested_reason, suppression_reason from symbol_refresh_status where ticker='JNPR'"
+        ).fetchone()
+        self.assertEqual(restored[0], "active")
+        self.assertEqual(restored[1], "Suppression rejected; kept active by reviewer.")
+        self.assertIsNone(restored[2])
         conn.close()
 
     def test_manual_suppression_excludes_governed_views_but_preserves_raw_lookup_context(self):

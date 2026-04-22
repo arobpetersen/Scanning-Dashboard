@@ -3328,6 +3328,129 @@ class TestScannerAudit(unittest.TestCase):
     @patch(
         "src.scanner_research._load_company_profile",
         return_value={
+            "ticker": "AOSLX",
+            "company_name": "Alpha and Omega Semiconductor",
+            "description": (
+                "Designs, develops and supplies a portfolio of power semiconductors, including power discretes and "
+                "power ICs, for computing, communications and industrial applications."
+            ),
+            "sic_description": "Semiconductors & Related Devices",
+        },
+    )
+    def test_description_first_strategy_prioritizes_semis_power_for_explicit_power_semiconductor_phrase(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Semis - Power", "Semiconductors", "AOSL"),
+            (2, "AI - Infrastructure", "Artificial Intelligence", "DELL"),
+            (3, "Telecom - Equipment", "Telecom", "CIEN"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AOSLX', 'AOSLX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aoslx-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "AOSLX", strategy="description_theme_generation")
+        suggested_names = [item["theme_name"] for item in draft["suggested_existing_themes"]]
+
+        self.assertIn("Power Semiconductors", set(draft["candidate_theme_ideas"]))
+        self.assertTrue(suggested_names)
+        self.assertEqual(suggested_names[0], "Semis - Power")
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "PKGTX",
+            "company_name": "Packaging Test Example",
+            "description": (
+                "Provides outsourced semiconductor assembly and test services, advanced packaging, and semiconductor "
+                "test capabilities for integrated device manufacturers and fabless chip companies."
+            ),
+            "sic_description": "Semiconductor Packaging and Test Services",
+        },
+    )
+    def test_description_first_strategy_recognizes_semiconductor_packaging_and_test_phrases(self, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Semis - Packaging & Test", "Semiconductors", "AMKR"),
+            (2, "Semis - Equipment", "Semiconductors", "AMAT"),
+            (3, "Semis - Power", "Semiconductors", "AOSL"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'PKGTX', 'PKGTX', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'pkgtx-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "PKGTX", strategy="description_theme_generation")
+        suggested_names = [item["theme_name"] for item in draft["suggested_existing_themes"]]
+
+        self.assertIn("Semiconductor Packaging & Test", set(draft["candidate_theme_ideas"]))
+        self.assertTrue(suggested_names)
+        self.assertEqual(suggested_names[0], "Semis - Packaging & Test")
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
+            "ticker": "AOSLY",
+            "company_name": "Alpha and Omega Semiconductor",
+            "description": (
+                "Designs, develops and supplies a portfolio of power semiconductors, including power discretes and "
+                "power ICs, for computing, communications and industrial applications."
+            ),
+            "sic_description": "Semiconductors & Related Devices",
+        },
+    )
+    @patch("src.scanner_research_analysis.candidate_theme_ideas_from_description", return_value=["Related Devices"])
+    def test_description_first_strategy_can_recover_from_weak_generated_ideas_via_theme_native_matching(self, _mock_ideas, _mock_profile, _mock_key):
+        conn = self._conn()
+        for theme_id, theme_name, category, ticker in [
+            (1, "Semis - Power", "Semiconductors", "AOSL"),
+            (2, "AI - Infrastructure", "Artificial Intelligence", "DELL"),
+            (3, "Telecom - Equipment", "Telecom", "CIEN"),
+        ]:
+            conn.execute("insert into themes(id, name, category, is_active) values (?, ?, ?, true)", [theme_id, theme_name, category])
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+        conn.execute(
+            """
+            insert into scanner_hit_history(
+                import_run_id, import_source, normalized_ticker, raw_ticker, observed_date, observed_at,
+                source_file, source_label, scanner_name, row_hash
+            ) values
+            (1, 'tc2000', 'AOSLY', 'AOSLY', '2026-03-12', '2026-03-12 08:00:00', 'f1.csv', 'tc2000', 'Momentum', 'aosly-1')
+            """
+        )
+
+        draft = generate_scanner_research_draft(conn, "AOSLY", strategy="description_theme_generation")
+        suggested_names = [item["theme_name"] for item in draft["suggested_existing_themes"]]
+        native_debug = list((draft.get("validation_debug") or {}).get("theme_native_retrieval_top_hits") or [])
+
+        self.assertTrue(suggested_names)
+        self.assertEqual(suggested_names[0], "Semis - Power")
+        self.assertTrue(native_debug)
+        self.assertEqual(native_debug[0]["theme_name"], "Semis - Power")
+        conn.close()
+
+    @patch("src.scanner_research.openai_api_key", return_value=None)
+    @patch(
+        "src.scanner_research._load_company_profile",
+        return_value={
             "ticker": "VAGEX",
             "company_name": "Vague Example",
             "description": "A diversified company providing products and solutions across multiple markets.",

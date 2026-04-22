@@ -1,0 +1,26 @@
+export_path=exports\governed_ticker_eligibility_audit_2026-04-21.csv
+preferred_snapshot_source=live
+preferred_history_source=live
+eligible_count=1215
+ineligible_count=457
+bucket_counts:
+  dollar volume invalid: 231
+  no current preferred snapshot: 178
+  refresh suppressed: 24
+  price invalid: 24
+questionable_dollar_volume_borderline:
+  DRUG: dollar_volume=14,815,134, price=87.42, avg_volume=169,471, reason=dollar volume invalid: 14,815,134 < 15,000,000
+  IIPR: dollar_volume=14,651,550, price=52.85, avg_volume=277,229, reason=dollar volume invalid: 14,651,550 < 15,000,000
+  BLMN: dollar_volume=14,353,251, price=6.49, avg_volume=2,211,595, reason=dollar volume invalid: 14,353,251 < 15,000,000
+  APPN: dollar_volume=14,317,611, price=21.06, avg_volume=679,849, reason=dollar volume invalid: 14,317,611 < 15,000,000
+  LTC: dollar_volume=14,244,404, price=38.70, avg_volume=368,072, reason=dollar volume invalid: 14,244,404 < 15,000,000
+  JKS: dollar_volume=14,219,617, price=20.47, avg_volume=694,656, reason=dollar volume invalid: 14,219,617 < 15,000,000
+  CCS: dollar_volume=14,142,616, price=63.81, avg_volume=221,636, reason=dollar volume invalid: 14,142,616 < 15,000,000
+  HLX: dollar_volume=13,940,918, price=9.38, avg_volume=1,486,239, reason=dollar volume invalid: 13,940,918 < 15,000,000
+  GCI: dollar_volume=13,850,380, price=4.55, avg_volume=3,044,040, reason=dollar volume invalid: 13,850,380 < 15,000,000; refresh suppressed
+  BMBL: dollar_volume=13,821,648, price=4.47, avg_volume=3,092,091, reason=dollar volume invalid: 13,821,648 < 15,000,000
+  FUSE: dollar_volume=13,798,151, price=1.97, avg_volume=7,004,137, reason=dollar volume invalid: 13,798,151 < 15,000,000
+  ISSC: dollar_volume=13,693,281, price=20.57, avg_volume=665,692, reason=dollar volume invalid: 13,693,281 < 15,000,000
+  SJW: dollar_volume=13,624,733, price=54.86, avg_volume=248,355, reason=dollar volume invalid: 13,624,733 < 15,000,000; refresh suppressed
+  STC: dollar_volume=13,552,474, price=67.25, avg_volume=201,524, reason=dollar volume invalid: 13,552,474 < 15,000,000
+  EVTL: dollar_volume=13,531,159, price=2.66, avg_volume=5,086,902, reason=dollar volume invalid: 13,531,159 < 15,000,000

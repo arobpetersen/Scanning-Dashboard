@@ -87,7 +87,7 @@ CONCEPT_KEYWORDS: dict[str, set[str]] = {
     "cybersecurity": {"cybersecurity", "cyber", "security", "identity", "endpoint", "threat", "zero", "trust"},
     "cloud": {"cloud", "saas", "platform", "infrastructure", "observability", "devops"},
     "ai_compute": {"ai", "artificial", "gpu", "accelerated", "inference", "training", "compute", "datacenter", "data center"},
-    "semiconductor": {"semiconductor", "chip", "chips", "fab", "wafer", "silicon", "processor"},
+    "semiconductor": {"semiconductor", "semiconductors", "chip", "chips", "fab", "wafer", "silicon", "processor"},
     "data_analytics": {"analytics", "data", "integration", "decision", "intelligence", "ontology"},
     "defense": {"defense", "military", "government", "battlefield", "aerospace"},
     "robotics": {"robotics", "automation", "autonomous", "industrial", "factory"},
@@ -141,8 +141,34 @@ ROLE_KEYWORDS: dict[str, set[str]] = {
         "metrology",
         "inspection",
         "fab equipment",
+        "wafer fab equipment",
+        "semiconductor manufacturing equipment",
+        "semiconductor fabrication equipment",
+        "wafer processing equipment",
         "packaging equipment",
         "process equipment",
+    },
+    "semiconductor_power": {
+        "power semiconductor",
+        "power semiconductors",
+        "power discrete",
+        "power discretes",
+        "power ic",
+        "power ics",
+        "power mosfet",
+        "power mosfets",
+        "igbt",
+        "igbts",
+    },
+    "semiconductor_packaging_test": {
+        "semiconductor packaging",
+        "advanced packaging",
+        "chip packaging",
+        "semiconductor test",
+        "packaging and test",
+        "assembly and test",
+        "outsourced semiconductor assembly and test",
+        "osat",
     },
     "chip_designer": {"fabless", "asic", "gpu", "cpu", "processor", "chip designer"},
     "server_systems": {"server", "servers", "rack-scale", "rack", "accelerated computing"},
@@ -201,6 +227,8 @@ ROLE_NEW_LABELS = {
     "optical_networking": "Optical Networking",
     "semiconductor_materials": "Semiconductor Materials",
     "semiconductor_equipment": "Semiconductor Equipment",
+    "semiconductor_power": "Power Semiconductors",
+    "semiconductor_packaging_test": "Semiconductor Packaging & Test",
     "chip_designer": "Chip Designers",
     "server_systems": "AI Server Systems",
     "power_generation": "Power Generation",
@@ -215,6 +243,8 @@ ROLE_DISPLAY_NAMES = {
     "optical_networking": "optical networking and interconnect",
     "semiconductor_materials": "semiconductor materials and substrates",
     "semiconductor_equipment": "semiconductor equipment",
+    "semiconductor_power": "power semiconductors",
+    "semiconductor_packaging_test": "semiconductor packaging and test",
     "chip_designer": "chip design",
     "server_systems": "server systems",
     "power_generation": "power generation",
@@ -469,6 +499,51 @@ CONNECTED_OPERATIONS_DRIFT_TOKENS = {
 }
 
 DESCRIPTION_NATIVE_DESCRIPTOR_RULES = (
+    {
+        "label": "Power Semiconductors",
+        "phrases": (
+            "power semiconductor",
+            "power semiconductors",
+            "power discrete",
+            "power discretes",
+            "power ic",
+            "power ics",
+            "power mosfet",
+            "power mosfets",
+            "igbt",
+            "igbts",
+        ),
+        "layers": {"component", "device"},
+        "family": "semiconductor_power",
+    },
+    {
+        "label": "Semiconductor Packaging & Test",
+        "phrases": (
+            "semiconductor packaging",
+            "advanced packaging",
+            "chip packaging",
+            "semiconductor test",
+            "packaging and test",
+            "assembly and test",
+            "outsourced semiconductor assembly and test",
+            "osat",
+        ),
+        "layers": {"component", "module"},
+        "family": "semiconductor_packaging_test",
+    },
+    {
+        "label": "Wafer Fab Equipment",
+        "phrases": (
+            "wafer fab equipment",
+            "semiconductor manufacturing equipment",
+            "semiconductor fabrication equipment",
+            "wafer processing equipment",
+            "fab equipment",
+            "process equipment",
+        ),
+        "layers": {"system", "component"},
+        "family": "semiconductor_equipment",
+    },
     {
         "label": "Optical Interconnects",
         "phrases": (
@@ -884,6 +959,8 @@ INDUSTRIAL_MANUFACTURING_DRIFT_TOKENS = {
 MISSING_THEME_CATEGORY_BY_FAMILY = {
     "industrial_additive_manufacturing": "Additive Manufacturing / Industrial 3D Printing",
     "optical_networking": "Optical Networking",
+    "semiconductor_power": "Semiconductors",
+    "semiconductor_packaging_test": "Semiconductors",
     "digital_asset_infrastructure": "Crypto Infrastructure / Digital Assets",
     "consumer_fintech": "Financial Technology",
     "memory_storage": "Semiconductors / Storage",
@@ -910,6 +987,8 @@ ROLE_FAMILY = {
     "optical_networking": "communications_hardware",
     "semiconductor_materials": "semiconductor_supply_chain",
     "semiconductor_equipment": "semiconductor_supply_chain",
+    "semiconductor_power": "semiconductor_products",
+    "semiconductor_packaging_test": "semiconductor_supply_chain",
     "chip_designer": "semiconductor_products",
     "server_systems": "compute_hardware",
     "power_generation": "energy",
@@ -1177,6 +1256,8 @@ ROLE_ALIGNMENT = {
     "optical_networking": {"component_supplier"},
     "semiconductor_materials": {"materials_supplier"},
     "semiconductor_equipment": {"component_supplier"},
+    "semiconductor_power": {"component_supplier"},
+    "semiconductor_packaging_test": {"component_supplier"},
     "chip_designer": {"component_supplier"},
     "server_systems": {"end_platform_operator", "infrastructure_operator", "component_supplier"},
     "software_tooling": {"software_service_provider"},
@@ -1474,6 +1555,19 @@ def _representative_ticker_role_hints(tickers: list[object]) -> set[str]:
     return hints
 
 
+THEME_ALIAS_HINTS: dict[str, str] = {
+    "semis - power": "power semiconductors power semiconductor power discretes power discrete power ics power ic power mosfets power mosfet igbts igbt",
+    "semis - packaging & test": "semiconductor packaging advanced packaging semiconductor packaging and test semiconductor test assembly and test outsourced semiconductor assembly and test osat",
+    "semis - equipment": "wafer fab equipment semiconductor manufacturing equipment semiconductor fabrication equipment wafer processing equipment fab equipment process equipment lithography etch deposition metrology inspection",
+    "semis - substrates": "semiconductor substrates semiconductor substrate abf substrates abf substrate packaging substrates",
+}
+
+
+def _theme_alias_text(theme_entry: dict[str, object]) -> str:
+    normalized_theme_name = _normalize_text(theme_entry.get("theme_name")).lower()
+    return THEME_ALIAS_HINTS.get(normalized_theme_name, "")
+
+
 def _representative_ticker_market_hints(tickers: list[object]) -> set[str]:
     hints: set[str] = set()
     joined = " ".join(str(value or "").strip().upper() for value in tickers if str(value or "").strip())
@@ -1501,6 +1595,7 @@ def _theme_concepts(theme_entry: dict[str, object]) -> set[str]:
         theme_entry.get("theme_name"),
         theme_entry.get("category"),
         theme_entry.get("theme_description"),
+        _theme_alias_text(theme_entry),
     ) | _representative_ticker_market_hints(list(theme_entry.get("representative_tickers") or []))
 
 
@@ -1555,6 +1650,7 @@ def _theme_roles(theme_entry: dict[str, object]) -> set[str]:
         theme_entry.get("theme_name"),
         theme_entry.get("category"),
         theme_entry.get("theme_description"),
+        _theme_alias_text(theme_entry),
     )
     roles = _infer_signals(
         ROLE_KEYWORDS,
@@ -1589,6 +1685,7 @@ def _theme_end_markets(theme_entry: dict[str, object]) -> set[str]:
         theme_entry.get("theme_name"),
         theme_entry.get("category"),
         theme_entry.get("theme_description"),
+        _theme_alias_text(theme_entry),
     ) | _representative_ticker_market_hints(list(theme_entry.get("representative_tickers") or []))
 
 
@@ -2645,6 +2742,21 @@ def _refine_ranked_description_descriptors(descriptors: list[str], normalized_te
         _contains_phrase(text, token)
         for token in ("semiconductor memory", "memory semiconductors", "nand flash", "flash memory", "storage controller", "storage controllers")
     )
+    semiconductor_material_signals = any(
+        _contains_phrase(text, token)
+        for token in (
+            "semiconductor materials",
+            "electronic materials",
+            "electronics materials",
+            "specialty electronics materials",
+            "compound semiconductor",
+            "compound semiconductors",
+            "substrate",
+            "substrates",
+            "abf substrate",
+            "abf substrates",
+        )
+    )
     energy_storage_signals = any(
         _contains_phrase(text, token)
         for token in (
@@ -2697,6 +2809,14 @@ def _refine_ranked_description_descriptors(descriptors: list[str], normalized_te
         add("Semiconductor Memory")
         add("Memory & Storage")
         add("Data Storage")
+    if _merchant_input_evidence(text) and semiconductor_material_signals:
+        if any(_contains_phrase(text, token) for token in ("compound semiconductor", "compound semiconductors")):
+            add("Compound Semiconductor Materials")
+        add("Semiconductor Materials")
+        if any(_contains_phrase(text, token) for token in ("substrate", "substrates", "abf substrate", "abf substrates")):
+            add("Semiconductor Substrates")
+        if any(_contains_phrase(text, token) for token in ("electronic materials", "electronics materials", "specialty electronics materials")):
+            add("Electronics Materials")
     if energy_storage_signals:
         add("Energy Storage Systems")
         if any(_contains_phrase(text, token) for token in ("software", "platform", "optimization", "dispatch", "grid services")):
@@ -2719,6 +2839,13 @@ def _refine_ranked_description_descriptors(descriptors: list[str], normalized_te
         if upstream_signals and normalized == "Upstream Oil & Gas" and "Oil & Gas Exploration & Production" in refined:
             continue
         if payments_and_lending_signals and normalized == "Consumer Lending" and {"Digital Payments", "Fintech Payments"} & set(refined):
+            continue
+        if normalized == "Semiconductor Packaging & Test" and {
+            "Semiconductor Materials",
+            "Semiconductor Substrates",
+            "Electronics Materials",
+            "Compound Semiconductor Materials",
+        } & set(refined):
             continue
         add(normalized)
 

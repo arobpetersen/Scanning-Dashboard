@@ -151,6 +151,7 @@ def clear_manual_ticker_suppression(conn, ticker: str) -> dict[str, object]:
             manual_suppressed = FALSE,
             manual_suppression_reason = NULL,
             manual_suppressed_at = NULL,
+            suppression_reason = NULL,
             updated_at = CURRENT_TIMESTAMP
         WHERE upper(trim(ticker)) = ?
         """,

@@ -1,0 +1,28 @@
+Non-suppressed ineligible active governed tickers reviewed: 233
+No current preferred snapshot / likely stale symbol: 0
+Likely governance cleanup candidate: 7
+Sub-$1: 13
+Borderline dollar-volume miss: 22
+Likely threshold-policy review candidate: 18
+Clearly illiquid: 173
+
+Governance cleanup overlay candidates:
+BURBY, CRLBF, FMTOF, LSF, SIFY, TSNDF, VWSYF
+
+no current preferred snapshot / likely stale symbol:
+none
+
+likely governance cleanup candidate:
+BURBY, CRLBF, FMTOF, LSF, SIFY, TSNDF, VWSYF
+
+sub-$1:
+BLNK, CHGG, GFAI, HUMA, IMCC, INCR, INVZ, MAPS, NFE, RELI, SGMO, TPET, YCBD
+
+borderline dollar-volume miss:
+APPN, BJRI, BLMN, BMBL, CABO, CARS, CCS, CLOV, DRUG, EVTL, FUSE, GLNCY, HLX, IIPR, ISSC, JKS, LTC, MQ, PKX, RPD, STC, WPP
+
+likely threshold-policy review candidate:
+BLDP, DCOM, DPRO, DQ, GILT, HOPE, IMKTA, JACK, KOPN, LADR, LTBR, MCRI, MRTN, REX, RPAY, VTLE, WFG, XHR
+
+clearly illiquid:
+ACB, AFCG, AISP, AIV, AKAN, ALT, ALTO, ALVO, AMTX, AMWL, ANGPY, ANVS, APT, ARCT, ARLP, ARQQ, ARVN, ASTE, BARK, BATRA, BBBY, BETZ, BOLT, BV, BWX, BYDDF, CGC, CHPT, CLIR, CLNE, CQP, CRON, CRTO, CSV, CTRM, CURLF, CUT, CVAC, CYBN, CYH, DAC, DDD, DENN, DFH, DRD, DSP, DSX, DTST, EDIT, EGLE, EH, EMQQ, EVEX, EVGO, EXPI, FANUY, FATE, FFIC, FINV, FLGC, FLYE, FNKO, FOXF, FTHM, GDEN, GDRX, GEMI, GEVO, GHLD, GLRE, GNK, GOOS, GORO, GREE, GRWG, GTBIF, GTN, HIPO, HTLD, IHRT, IMBBY, IMMR, IMPUY, INNV, IONR, ISPR, ITIC, IVPAF, JAKK, JBGS, JBSS, KRBN, KREF, LBRDA, LDI, LEE, LFMD, LGI, LIDR, LMNX, LOCO, LTRX, LU, MATW, MAXN, MBGAF, MGPI, MJ, MOB, MSOX, MTLS, MTW, MVST, NAVI, NC, NDLS, NNDM, NUCL, NXRT, OFIX

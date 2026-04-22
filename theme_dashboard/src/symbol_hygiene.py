@@ -100,6 +100,7 @@ def apply_refresh_success(conn, ticker: str, run_id: int) -> dict:
         SET status='active',
             suggested_status=NULL,
             suggested_reason=NULL,
+            suppression_reason=NULL,
             last_failure_category=NULL,
             consecutive_failure_count=0,
             last_success_at=CURRENT_TIMESTAMP,
@@ -146,12 +147,14 @@ def apply_refresh_failure(conn, ticker: str, run_id: int, error_message: str) ->
     elif category in {"TIMEOUT", "RATE_LIMIT"} and status == ACTIVE:
         status = WATCH
 
+    suppression_reason = suggested_reason if status == REFRESH_SUPPRESSED else None
     conn.execute(
         """
         UPDATE symbol_refresh_status
         SET status=?,
             suggested_status=?,
             suggested_reason=?,
+            suppression_reason=?,
             last_failure_category=?,
             consecutive_failure_count=?,
             rolling_failure_count=?,
@@ -160,7 +163,7 @@ def apply_refresh_failure(conn, ticker: str, run_id: int, error_message: str) ->
             updated_at=CURRENT_TIMESTAMP
         WHERE ticker=?
         """,
-        [status, suggested_status, suggested_reason, category, consecutive, rolling, run_id, ticker],
+        [status, suggested_status, suggested_reason, suppression_reason, category, consecutive, rolling, run_id, ticker],
     )
     return {"flagged": flagged, "auto_suppressed": auto_suppressed, "category": category}
 
@@ -831,10 +834,11 @@ def approve_suppression(conn, ticker: str, note: str | None = None) -> None:
         SET status='refresh_suppressed',
             suggested_status=NULL,
             suggested_reason=?,
+            suppression_reason=?,
             updated_at=CURRENT_TIMESTAMP
         WHERE ticker=?
         """,
-        [reason, ticker],
+        [reason, reason, ticker],
     )
 
 
@@ -888,7 +892,7 @@ def reject_keep_active(conn, ticker: str) -> None:
         SET status='active',
             suggested_status=NULL,
             suggested_reason='Suppression rejected; kept active by reviewer.',
-            suppression_reason='Calculation outlier kept active by reviewer.',
+            suppression_reason=NULL,
             updated_at=CURRENT_TIMESTAMP
         WHERE ticker=?
         """,
@@ -904,6 +908,7 @@ def reset_failure_history(conn, ticker: str, to_watch: bool = False) -> None:
         SET status=?,
             suggested_status=NULL,
             suggested_reason='Failure history reset by reviewer.',
+            suppression_reason=NULL,
             last_failure_category=NULL,
             consecutive_failure_count=0,
             rolling_failure_count=0,

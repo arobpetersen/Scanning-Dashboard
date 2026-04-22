@@ -1,0 +1,9 @@
+Borderline dollar-volume miss names reviewed: 22
+strongest future threshold-policy review cases: 7
+DRUG, IIPR, BLMN, APPN, LTC, CCS, STC
+
+genuine near-threshold names worth monitoring: 8
+JKS, HLX, CARS, WPP, BJRI, PKX, CABO, GLNCY
+
+numerically borderline but still weak/undesirable: 7
+BMBL, FUSE, ISSC, EVTL, RPD, MQ, CLOV
