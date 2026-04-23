@@ -235,6 +235,7 @@ CREATE TABLE IF NOT EXISTS ticker_snapshots (
     perf_1w DOUBLE,
     perf_1m DOUBLE,
     perf_3m DOUBLE,
+    perf_6m DOUBLE,
     market_cap DOUBLE,
     avg_volume DOUBLE,
     short_interest_pct DOUBLE,
@@ -254,6 +255,7 @@ CREATE TABLE IF NOT EXISTS theme_snapshots (
     avg_1w DOUBLE,
     avg_1m DOUBLE,
     avg_3m DOUBLE,
+    avg_6m DOUBLE,
     positive_1w_breadth_pct DOUBLE,
     positive_1m_breadth_pct DOUBLE,
     positive_3m_breadth_pct DOUBLE,
@@ -316,6 +318,7 @@ CREATE TABLE IF NOT EXISTS reconstructed_theme_snapshots (
     avg_1w DOUBLE,
     avg_1m DOUBLE,
     avg_3m DOUBLE,
+    avg_6m DOUBLE,
     positive_1w_breadth_pct DOUBLE,
     positive_1m_breadth_pct DOUBLE,
     positive_3m_breadth_pct DOUBLE,
@@ -344,6 +347,7 @@ CREATE TABLE IF NOT EXISTS canonical_theme_daily_snapshots (
     eligible_1w_count BIGINT NOT NULL DEFAULT 0,
     eligible_1m_count BIGINT NOT NULL DEFAULT 0,
     eligible_3m_count BIGINT NOT NULL DEFAULT 0,
+    eligible_6m_count BIGINT NOT NULL DEFAULT 0,
     eligible_composite_count BIGINT NOT NULL DEFAULT 0,
     eligible_standardized_count BIGINT NOT NULL DEFAULT 0,
     eligible_momentum_count BIGINT NOT NULL DEFAULT 0,
@@ -351,6 +355,7 @@ CREATE TABLE IF NOT EXISTS canonical_theme_daily_snapshots (
     avg_1w DOUBLE,
     avg_1m DOUBLE,
     avg_3m DOUBLE,
+    avg_6m DOUBLE,
     positive_1w_breadth_pct DOUBLE,
     positive_1m_breadth_pct DOUBLE,
     positive_3m_breadth_pct DOUBLE,
@@ -711,7 +716,12 @@ def init_db() -> None:
         conn.execute("ALTER TABLE theme_suggestions ADD COLUMN IF NOT EXISTS proposed_theme_category VARCHAR")
         conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
         conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS perf_1d DOUBLE")
+        conn.execute("ALTER TABLE ticker_snapshots ADD COLUMN IF NOT EXISTS perf_6m DOUBLE")
         conn.execute("ALTER TABLE theme_snapshots ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR DEFAULT 'live'")
+        conn.execute("ALTER TABLE theme_snapshots ADD COLUMN IF NOT EXISTS avg_6m DOUBLE")
+        conn.execute("ALTER TABLE reconstructed_theme_snapshots ADD COLUMN IF NOT EXISTS avg_6m DOUBLE")
+        conn.execute("ALTER TABLE canonical_theme_daily_snapshots ADD COLUMN IF NOT EXISTS eligible_6m_count BIGINT DEFAULT 0")
+        conn.execute("ALTER TABLE canonical_theme_daily_snapshots ADD COLUMN IF NOT EXISTS avg_6m DOUBLE")
         conn.execute("ALTER TABLE ticker_daily_history ADD COLUMN IF NOT EXISTS atr_14 DOUBLE")
         conn.execute("ALTER TABLE ticker_daily_history ADD COLUMN IF NOT EXISTS atr_pct_14 DOUBLE")
         conn.execute("ALTER TABLE historical_reconstruction_runs ADD COLUMN IF NOT EXISTS ticker_history_rows_written BIGINT DEFAULT 0")

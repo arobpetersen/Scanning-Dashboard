@@ -41,6 +41,7 @@ TABLE_HELP = {
     "perf_1w": "Current average 1-week return snapshot value for this theme.",
     "perf_1m": "Current average 1-month return snapshot value for this theme.",
     "perf_3m": "Current average 3-month return snapshot value for this theme.",
+    "perf_6m": "Current average 6-month return snapshot value for this theme.",
     "breadth_1m": "Current positive 1M breadth across eligible contributors.",
     "leadership_quality": "Current-state leadership quality label aligned to Themes using current eligible contributor count, participation, and breadth.",
     "start_rank": "Theme rank at the start of the selected lookback window.",
@@ -56,12 +57,14 @@ TABLE_HELP = {
     "delta_avg_1w": "Change in average 1-week return over the window.",
     "delta_avg_1m": "Change in average 1-month return over the window.",
     "delta_avg_3m": "Change in average 3-month return over the window.",
+    "delta_avg_6m": "Change in average 6-month return over the window.",
     "delta_ticker_count": "Change in constituent count over the selected window.",
     "composite_score_start": "Confidence-adjusted composite score at the beginning of the selected window.",
     "composite_score_end": "Confidence-adjusted composite score at the end of the selected window.",
     "avg_1w": "Average 1-week return snapshot value for this theme.",
     "avg_1m": "Average 1-month return snapshot value for this theme.",
     "avg_3m": "Average 3-month return snapshot value for this theme.",
+    "avg_6m": "Average 6-month return snapshot value for this theme.",
     "window_perf": "Primary return metric for this overview window.",
     "signal_label": "Detected inflection category for this theme.",
     "reason": "Why the signal was triggered.",
@@ -200,6 +203,7 @@ def _build_master_research_grid(
         "avg_1w",
         "avg_1m",
         "avg_3m",
+        "avg_6m",
         "composite_score",
         "composite_atr_score",
     ]
@@ -274,6 +278,7 @@ def _build_master_research_grid(
     grid["perf_1w"] = pd.to_numeric(grid.get("avg_1w"), errors="coerce")
     grid["perf_1m"] = pd.to_numeric(grid.get("avg_1m"), errors="coerce")
     grid["perf_3m"] = pd.to_numeric(grid.get("avg_3m"), errors="coerce")
+    grid["perf_6m"] = pd.to_numeric(grid.get("avg_6m"), errors="coerce")
     grid["breadth_1m"] = pd.to_numeric(grid.get("eligible_breadth_pct"), errors="coerce")
     grid["start_rank"] = pd.to_numeric(grid.get("rank_start"), errors="coerce")
     grid["end_rank"] = pd.to_numeric(grid.get("rank_end"), errors="coerce")
@@ -299,6 +304,7 @@ def _build_master_research_grid(
         "perf_1w",
         "perf_1m",
         "perf_3m",
+        "perf_6m",
         "perf_1d",
         "breadth_1m",
         "leadership_quality",
@@ -343,6 +349,7 @@ def _attach_grid_top_tickers(grid: pd.DataFrame, *, top_k: int = 4) -> pd.DataFr
     scored["perf_1w"] = pd.to_numeric(scored.get("perf_1w"), errors="coerce")
     scored["perf_1m"] = pd.to_numeric(scored.get("perf_1m"), errors="coerce")
     scored["perf_3m"] = pd.to_numeric(scored.get("perf_3m"), errors="coerce")
+    scored["perf_6m"] = pd.to_numeric(scored.get("perf_6m"), errors="coerce")
     scored["ticker_composite_score"] = scored.apply(
         lambda row: ticker_standardized_composite_score(row.get("perf_1w"), row.get("perf_1m"), row.get("perf_3m")),
         axis=1,
@@ -556,6 +563,7 @@ master_grid_cols = [
     "perf_1w",
     "perf_1m",
     "perf_3m",
+    "perf_6m",
     "breadth_1m",
     "leadership_quality",
     "ticker_count",
@@ -576,6 +584,7 @@ render_dataframe(
         "perf_1w": st.column_config.NumberColumn("Perf 1W", format="%.1f%%"),
         "perf_1m": st.column_config.NumberColumn("Perf 1M", format="%.1f%%"),
         "perf_3m": st.column_config.NumberColumn("Perf 3M", format="%.1f%%"),
+        "perf_6m": st.column_config.NumberColumn("Perf 6M", format="%.1f%%"),
         "breadth_1m": st.column_config.NumberColumn("Breadth 1M", format="%.1f%%"),
     },
     key="historical_master_research_grid",

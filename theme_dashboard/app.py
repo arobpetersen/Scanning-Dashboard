@@ -281,21 +281,12 @@ def _render_daily_sync_running_status(container, running_status: dict[str, objec
         container.caption(last_update_text)
 
     stages = running_status.get("stages") or {}
-    completed_stages, active_stage_idx, active_stage_label = _workflow_stage_progress(running_status)
+    completed_stages, _active_stage_idx, active_stage_label = _workflow_stage_progress(running_status)
     active_payload = stages.get(active_stage) if active_stage else None
     progress_source = active_payload if active_payload else running_status
     live_stage_payload = stages.get("live_refresh") or {}
     live_total = int(live_stage_payload.get("total") or 0)
     live_completed = int(live_stage_payload.get("completed") or 0)
-
-    workflow_fraction = completed_stages / len(DAILY_SYNC_STAGE_ORDER)
-    if active_stage == "live_refresh" and live_total > 0:
-        workflow_fraction = min(max((live_completed / max(live_total, 1)) / len(DAILY_SYNC_STAGE_ORDER), 0.0), 1.0)
-    workflow_fraction = min(max(workflow_fraction, 0.0), 1.0)
-    stage_counter_text = f"Stage {active_stage_idx} of {len(DAILY_SYNC_STAGE_ORDER)}"
-    if completed_stages >= len(DAILY_SYNC_STAGE_ORDER):
-        stage_counter_text = f"Stage {len(DAILY_SYNC_STAGE_ORDER)} of {len(DAILY_SYNC_STAGE_ORDER)}"
-    container.progress(workflow_fraction, text=f"{stage_counter_text} | Active: {active_stage_label}")
 
     workflow_c1, workflow_c2, workflow_c3 = container.columns(3)
     workflow_c1.metric("Stages complete", f"{completed_stages}/{len(DAILY_SYNC_STAGE_ORDER)}")

@@ -9,7 +9,7 @@ from .db_introspection import table_exists, table_has_column
 from .rankings import _compute_theme_metrics
 from .ticker_history import persist_ticker_daily_history
 
-HISTORICAL_LOOKBACK_BUFFER_DAYS = 120
+HISTORICAL_LOOKBACK_BUFFER_DAYS = 220
 SUPPRESSION_REBUILD_LOOKBACK_DAYS = 45
 
 
@@ -99,17 +99,18 @@ def _scope_membership(conn, tickers: list[str] | None = None, theme_ids: list[in
 
 def _compute_daily_perf(history: pd.DataFrame, requested_start: date, requested_end: date) -> pd.DataFrame:
     if history.empty:
-        return pd.DataFrame(columns=["ticker", "snapshot_date", "perf_1w", "perf_1m", "perf_3m"])
+        return pd.DataFrame(columns=["ticker", "snapshot_date", "perf_1w", "perf_1m", "perf_3m", "perf_6m"])
 
     enriched = history.sort_values(["ticker", "snapshot_date"]).copy()
     grouped = enriched.groupby("ticker")["close"]
     enriched["perf_1w"] = ((grouped.transform(lambda s: s / s.shift(5))) - 1.0) * 100.0
     enriched["perf_1m"] = ((grouped.transform(lambda s: s / s.shift(21))) - 1.0) * 100.0
     enriched["perf_3m"] = ((grouped.transform(lambda s: s / s.shift(63))) - 1.0) * 100.0
+    enriched["perf_6m"] = ((grouped.transform(lambda s: s / s.shift(126))) - 1.0) * 100.0
     mask = (pd.to_datetime(enriched["snapshot_date"]).dt.date >= requested_start) & (
         pd.to_datetime(enriched["snapshot_date"]).dt.date <= requested_end
     )
-    return enriched.loc[mask, ["ticker", "snapshot_date", "perf_1w", "perf_1m", "perf_3m"]].copy()
+    return enriched.loc[mask, ["ticker", "snapshot_date", "perf_1w", "perf_1m", "perf_3m", "perf_6m"]].copy()
 
 
 def _insert_reconstruction_run(
@@ -313,7 +314,7 @@ def reconstruct_theme_history_range(
             ).astype(bool)
         for snapshot_date in snapshot_dates:
             daily_perf = perf_df[pd.to_datetime(perf_df["snapshot_date"]).dt.date == snapshot_date][
-                ["ticker", "perf_1w", "perf_1m", "perf_3m"]
+                ["ticker", "perf_1w", "perf_1m", "perf_3m", "perf_6m"]
             ].copy()
             raw = membership_base.merge(daily_perf, on="ticker", how="left")
             metrics = _compute_theme_metrics(raw)
@@ -352,13 +353,13 @@ def reconstruct_theme_history_range(
 
                 conn.execute(
                     """
-                    INSERT INTO reconstructed_theme_snapshots(
+                    INSERT OR REPLACE INTO reconstructed_theme_snapshots(
                         run_id, snapshot_date, snapshot_time, theme_id, ticker_count,
-                        avg_1w, avg_1m, avg_3m,
+                        avg_1w, avg_1m, avg_3m, avg_6m,
                         positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
                         composite_score, provenance_class, provenance_source_label, market_data_source, membership_basis
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         int(row.run_id),
@@ -369,6 +370,7 @@ def reconstruct_theme_history_range(
                         row.avg_1w,
                         row.avg_1m,
                         row.avg_3m,
+                        row.avg_6m,
                         row.positive_1w_breadth_pct,
                         row.positive_1m_breadth_pct,
                         row.positive_3m_breadth_pct,
@@ -620,7 +622,7 @@ def rebuild_recent_reconstructed_history(
 
             for snapshot_date in snapshot_dates:
                 daily_perf = perf_df[pd.to_datetime(perf_df["snapshot_date"]).dt.date == snapshot_date][
-                    ["ticker", "perf_1w", "perf_1m", "perf_3m"]
+                    ["ticker", "perf_1w", "perf_1m", "perf_3m", "perf_6m"]
                 ].copy()
                 raw = membership_base.merge(daily_perf, on="ticker", how="left")
                 metrics = _compute_theme_metrics(raw)
@@ -638,13 +640,13 @@ def rebuild_recent_reconstructed_history(
                 for row in metrics.itertuples(index=False):
                     conn.execute(
                         """
-                        INSERT INTO reconstructed_theme_snapshots(
+                        INSERT OR REPLACE INTO reconstructed_theme_snapshots(
                             run_id, snapshot_date, snapshot_time, theme_id, ticker_count,
-                            avg_1w, avg_1m, avg_3m,
+                            avg_1w, avg_1m, avg_3m, avg_6m,
                             positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
                             composite_score, provenance_class, provenance_source_label, market_data_source, membership_basis
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [
                             row.run_id,
@@ -655,6 +657,7 @@ def rebuild_recent_reconstructed_history(
                             row.avg_1w,
                             row.avg_1m,
                             row.avg_3m,
+                            row.avg_6m,
                             row.positive_1w_breadth_pct,
                             row.positive_1m_breadth_pct,
                             row.positive_3m_breadth_pct,
@@ -704,6 +707,191 @@ def rebuild_recent_reconstructed_history(
         "labels_rebuilt": labels,
         "rows_replaced": rows_replaced,
         "rows_written": rows_written,
+        "window_start": start_date,
+        "window_end": end_date,
+        "market_data_source": market_data_source,
+    }
+
+
+def backfill_reconstructed_theme_snapshot_avg_6m(
+    conn,
+    *,
+    tickers: list[str] | None = None,
+    theme_ids: list[int] | None = None,
+    lookback_days: int = SUPPRESSION_REBUILD_LOOKBACK_DAYS,
+) -> dict[str, object]:
+    if not table_exists(conn, "reconstructed_theme_snapshots"):
+        return {"status": "missing_table", "rows_updated": 0}
+
+    normalized_tickers = sorted({str(t or "").strip().upper() for t in (tickers or []) if str(t or "").strip()})
+    normalized_theme_ids = sorted({int(theme_id) for theme_id in (theme_ids or [])})
+    membership = _scope_membership(conn, tickers=normalized_tickers or None, theme_ids=normalized_theme_ids or None)
+    if membership.empty:
+        return {
+            "status": "no_scope",
+            "affected_theme_ids": [],
+            "affected_tickers": normalized_tickers,
+            "rows_updated": 0,
+        }
+
+    scoped_theme_ids = sorted(membership["theme_id"].astype(int).unique().tolist())
+    scoped_tickers = sorted(membership["ticker"].astype(str).str.strip().str.upper().unique().tolist())
+    market_data_source = _preferred_stored_history_source(conn)
+    if not market_data_source:
+        return {
+            "status": "no_ticker_history",
+            "affected_theme_ids": scoped_theme_ids,
+            "affected_tickers": scoped_tickers,
+            "rows_updated": 0,
+        }
+
+    latest_row = conn.execute(
+        """
+        SELECT MAX(snapshot_date)
+        FROM reconstructed_theme_snapshots
+        WHERE market_data_source = ?
+          AND avg_6m IS NULL
+        """,
+        [market_data_source],
+    ).fetchone()
+    latest_snapshot_date = latest_row[0] if latest_row and latest_row[0] else None
+    if latest_snapshot_date is None:
+        return {
+            "status": "no_missing_rows",
+            "affected_theme_ids": scoped_theme_ids,
+            "affected_tickers": scoped_tickers,
+            "rows_updated": 0,
+        }
+
+    end_date = _normalize_date(latest_snapshot_date)
+    start_date = end_date - timedelta(days=int(lookback_days))
+    target_rows = conn.execute(
+        f"""
+        SELECT snapshot_date, theme_id
+        FROM reconstructed_theme_snapshots
+        WHERE market_data_source = ?
+          AND avg_6m IS NULL
+          AND snapshot_date BETWEEN ? AND ?
+          AND theme_id IN ({", ".join(["?"] * len(scoped_theme_ids))})
+        GROUP BY snapshot_date, theme_id
+        ORDER BY snapshot_date, theme_id
+        """,
+        [market_data_source, start_date, end_date, *scoped_theme_ids],
+    ).df()
+    if target_rows.empty:
+        return {
+            "status": "no_missing_rows_in_window",
+            "affected_theme_ids": scoped_theme_ids,
+            "affected_tickers": scoped_tickers,
+            "rows_updated": 0,
+            "window_start": start_date,
+            "window_end": end_date,
+            "market_data_source": market_data_source,
+        }
+
+    stored_history = conn.execute(
+        f"""
+        SELECT
+            ticker,
+            trading_date AS snapshot_date,
+            close
+        FROM ticker_daily_history
+        WHERE market_data_source = ?
+          AND ticker IN ({", ".join(["?"] * len(scoped_tickers))})
+          AND trading_date BETWEEN ? AND ?
+        ORDER BY ticker, trading_date
+        """,
+        [
+            market_data_source,
+            *scoped_tickers,
+            start_date - timedelta(days=HISTORICAL_LOOKBACK_BUFFER_DAYS),
+            end_date,
+        ],
+    ).df()
+    if stored_history.empty:
+        return {
+            "status": "no_history_rows",
+            "affected_theme_ids": scoped_theme_ids,
+            "affected_tickers": scoped_tickers,
+            "rows_updated": 0,
+            "window_start": start_date,
+            "window_end": end_date,
+            "market_data_source": market_data_source,
+        }
+
+    perf_df = _compute_daily_perf(stored_history, start_date, end_date)
+    if perf_df.empty:
+        return {
+            "status": "no_perf_rows",
+            "affected_theme_ids": scoped_theme_ids,
+            "affected_tickers": scoped_tickers,
+            "rows_updated": 0,
+            "window_start": start_date,
+            "window_end": end_date,
+            "market_data_source": market_data_source,
+        }
+
+    membership_base = membership[["theme_id", "theme", "category", "is_active", "ticker"]].copy()
+    if table_exists(conn, "symbol_refresh_status"):
+        status_df = conn.execute(
+            """
+            SELECT ticker, COALESCE(status, 'active') <> 'refresh_suppressed' AS calculation_eligible
+            FROM symbol_refresh_status
+            """
+        ).df()
+        if not status_df.empty:
+            membership_base = membership_base.merge(status_df, on="ticker", how="left")
+    membership_base["calculation_eligible"] = membership_base.get(
+        "calculation_eligible",
+        pd.Series(True, index=membership_base.index, dtype="boolean"),
+    ).combine_first(pd.Series(True, index=membership_base.index, dtype="boolean")).astype(bool)
+
+    updates: list[pd.DataFrame] = []
+    target_dates = sorted(pd.to_datetime(target_rows["snapshot_date"]).dt.date.unique().tolist())
+    for snapshot_date in target_dates:
+        daily_perf = perf_df[pd.to_datetime(perf_df["snapshot_date"]).dt.date == snapshot_date][
+            ["ticker", "perf_1w", "perf_1m", "perf_3m", "perf_6m"]
+        ].copy()
+        raw = membership_base.merge(daily_perf, on="ticker", how="left")
+        metrics = _compute_theme_metrics(raw)
+        if metrics.empty:
+            continue
+        metrics["snapshot_date"] = snapshot_date
+        updates.append(metrics[["snapshot_date", "theme_id", "avg_6m"]].copy())
+
+    if not updates:
+        return {
+            "status": "no_updates_computed",
+            "affected_theme_ids": scoped_theme_ids,
+            "affected_tickers": scoped_tickers,
+            "rows_updated": 0,
+            "window_start": start_date,
+            "window_end": end_date,
+            "market_data_source": market_data_source,
+        }
+
+    update_df = pd.concat(updates, ignore_index=True).drop_duplicates(subset=["snapshot_date", "theme_id"], keep="last")
+    conn.register("reconstructed_avg_6m_updates", update_df)
+    updated_rows = conn.execute(
+        """
+        UPDATE reconstructed_theme_snapshots AS r
+        SET avg_6m = u.avg_6m
+        FROM reconstructed_avg_6m_updates u
+        WHERE r.snapshot_date = u.snapshot_date
+          AND r.theme_id = u.theme_id
+          AND r.market_data_source = ?
+          AND r.avg_6m IS NULL
+        RETURNING r.snapshot_date, r.theme_id, r.provenance_source_label
+        """,
+        [market_data_source],
+    ).fetchall()
+    conn.unregister("reconstructed_avg_6m_updates")
+
+    return {
+        "status": "success" if updated_rows else "no_op",
+        "affected_theme_ids": scoped_theme_ids,
+        "affected_tickers": scoped_tickers,
+        "rows_updated": int(len(updated_rows)),
         "window_start": start_date,
         "window_end": end_date,
         "market_data_source": market_data_source,

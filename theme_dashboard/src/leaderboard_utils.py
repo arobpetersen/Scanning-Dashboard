@@ -289,6 +289,7 @@ def build_current_leadership_table(
         "avg_1w",
         "avg_1m",
         "avg_3m",
+        "avg_6m",
         "breadth_1m",
         "ticker_count",
         "eligible_contributor_count",
@@ -301,6 +302,9 @@ def build_current_leadership_table(
     for col in ordered_cols:
         if col not in deduped_cols:
             deduped_cols.append(col)
+    for col in deduped_cols:
+        if col not in leadership.columns:
+            leadership[col] = np.nan
     return leadership[deduped_cols]
 
 
@@ -456,28 +460,31 @@ def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k
     if "avg_3m" not in current.columns:
         current["avg_3m"] = np.nan
     current = current.rename(columns={"positive_1m_breadth_pct": "breadth_1m"})
-    return current[
-        [
-            "rank",
-            "theme_id",
-            "theme",
-            "category",
-            "composite_atr_rank",
-            "performance",
-            "avg_1d",
-            "avg_1w",
-            "avg_1m",
-            "avg_3m",
-            "current_momentum_score",
-            "composite_score",
-            "composite_atr_score",
-            "breadth_1m",
-            "ticker_count",
-            "eligible_contributor_count",
-            "eligible_breadth_pct",
-            "leadership_quality",
-        ]
+    output_cols = [
+        "rank",
+        "theme_id",
+        "theme",
+        "category",
+        "composite_atr_rank",
+        "performance",
+        "avg_1d",
+        "avg_1w",
+        "avg_1m",
+        "avg_3m",
+        "avg_6m",
+        "current_momentum_score",
+        "composite_score",
+        "composite_atr_score",
+        "breadth_1m",
+        "ticker_count",
+        "eligible_contributor_count",
+        "eligible_breadth_pct",
+        "leadership_quality",
     ]
+    for col in output_cols:
+        if col not in current.columns:
+            current[col] = np.nan
+    return current[output_cols]
 
 
 def build_category_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -> tuple[pd.DataFrame, str | None]:

@@ -186,6 +186,7 @@ class LiveProvider(ProviderBase):
                 perf_1w = self._calc_return(closes, 5)
                 perf_1m = self._calc_return(closes, 21)
                 perf_3m = self._calc_return(closes, 63)
+                perf_6m = self._calc_return(closes, 126)
                 price = closes[-1]
 
                 market_cap = None
@@ -205,6 +206,7 @@ class LiveProvider(ProviderBase):
                         "perf_1w": perf_1w,
                         "perf_1m": perf_1m,
                         "perf_3m": perf_3m,
+                        "perf_6m": perf_6m,
                         "market_cap": market_cap,
                         "avg_volume": self._avg_volume(volumes, 21),
                         "short_interest_pct": None,

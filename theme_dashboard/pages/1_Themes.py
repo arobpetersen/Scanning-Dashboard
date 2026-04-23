@@ -805,19 +805,20 @@ def _build_historical_leaderboard(
         )
 
     latest = momentum["history"].sort_values(["snapshot_time", "theme"]).groupby("theme_id", as_index=False).tail(1)
+    latest_merge_cols = [
+        "theme_id",
+        "category",
+        "avg_1w",
+        "avg_1m",
+        "avg_3m",
+        "avg_6m",
+        "composite_score",
+        "positive_1m_breadth_pct",
+        "ticker_count",
+    ]
+    latest = latest.reindex(columns=latest_merge_cols)
     ranked = ranked.merge(
-        latest[
-            [
-                "theme_id",
-                "category",
-                "avg_1w",
-                "avg_1m",
-                "avg_3m",
-                "composite_score",
-                "positive_1m_breadth_pct",
-                "ticker_count",
-            ]
-        ],
+        latest,
         on="theme_id",
         how="left",
         suffixes=("", "_latest"),
@@ -827,6 +828,8 @@ def _build_historical_leaderboard(
         ranked = ranked.drop(columns=["category_latest"])
     if "avg_3m" not in ranked.columns:
         ranked["avg_3m"] = np.nan
+    if "avg_6m" not in ranked.columns:
+        ranked["avg_6m"] = np.nan
     if "composite_score" not in ranked.columns:
         ranked["composite_score"] = np.nan
     if "positive_1m_breadth_pct" not in ranked.columns:
@@ -846,6 +849,7 @@ def _build_historical_leaderboard(
             "avg_1w",
             "avg_1m",
             "avg_3m",
+            "avg_6m",
             "momentum_score",
             "composite_score",
             "rank_change",
@@ -899,7 +903,7 @@ def _render_leaderboard(
         )
     display_df = _apply_plain_value_formatting(
         display_df,
-        percent_cols={"performance", "avg_1w", "avg_1m", "avg_3m", "eligible_breadth_pct"},
+        percent_cols={"performance", "avg_1w", "avg_1m", "avg_3m", "avg_6m", "eligible_breadth_pct"},
         percent_decimals=1,
     )
     visible_cols = [
@@ -909,6 +913,7 @@ def _render_leaderboard(
         "avg_1w",
         "avg_1m",
         "avg_3m",
+        "avg_6m",
         "momentum_score",
         "composite_score",
         "eligible_breadth_pct",
@@ -1058,9 +1063,11 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, sh
         )
     display_df = _apply_plain_value_formatting(
         display_df,
-        percent_cols={"avg_1d", "avg_1w", "avg_1m", "avg_3m", "eligible_breadth_pct"},
+        percent_cols={"avg_1d", "avg_1w", "avg_1m", "avg_3m", "avg_6m", "eligible_breadth_pct"},
         percent_decimals=1,
     )
+    if "avg_6m" not in display_df.columns:
+        display_df["avg_6m"] = np.nan
     visible_cols = [
         "rank",
         "theme",
@@ -1073,6 +1080,7 @@ def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, sh
         "avg_1w",
         "avg_1m",
         "avg_3m",
+        "avg_6m",
         "eligible_breadth_pct",
         "leadership_quality",
     ]
@@ -1159,6 +1167,7 @@ def _render_current_performance(
         "avg_1w",
         "avg_1m",
         "avg_3m",
+        "avg_6m",
         "current_momentum_score",
         "composite_score",
         "composite_atr_score",
@@ -1172,9 +1181,11 @@ def _render_current_performance(
             )
     display_df = _apply_plain_value_formatting(
         display_df,
-        percent_cols={"avg_1d", "avg_1w", "avg_1m", "avg_3m", "eligible_breadth_pct"},
+        percent_cols={"avg_1d", "avg_1w", "avg_1m", "avg_3m", "avg_6m", "eligible_breadth_pct"},
         percent_decimals=1,
     )
+    if "avg_6m" not in display_df.columns:
+        display_df["avg_6m"] = np.nan
     visible_cols.extend(
         [
             "eligible_breadth_pct",
@@ -1864,7 +1875,7 @@ with explore_tab:
         governed_count = int(current_row.get("ticker_count") or 0) if current_row is not None else int(len(ticker_df))
         visible_member_rows = int(len(visible_ticker_df))
         suppressed_hidden_count = max(int(len(ticker_df)) - visible_member_rows, 0)
-        enriched_basis_cols = [col for col in ["price", "perf_1d", "perf_1w", "perf_1m", "perf_3m", "avg_volume", "snapshot_time"] if col in visible_ticker_df.columns]
+        enriched_basis_cols = [col for col in ["price", "perf_1d", "perf_1w", "perf_1m", "perf_3m", "perf_6m", "avg_volume", "snapshot_time"] if col in visible_ticker_df.columns]
         enriched_row_count = int(visible_ticker_df[enriched_basis_cols].notna().any(axis=1).sum()) if enriched_basis_cols else 0
 
     if current_row is not None:
@@ -1933,12 +1944,22 @@ with explore_tab:
                 with s9:
                     _render_summary_metric("Avg 3M", _metric_value(current_row.get("avg_3m"), suffix="%"))
                 with s10:
-                    quality_label = "n/a (inactive theme)" if not bool(current_row.get("is_active")) else current_leadership_quality_label(current_row)
-                    _render_summary_metric("Quality", quality_label)
+                    _render_summary_metric("Avg 6M", _metric_value(current_row.get("avg_6m"), suffix="%"))
                 with s11:
                     _render_summary_metric("Snapshot", short_timestamp(current_row.get("snapshot_time")) or "â€”")
                 with s12:
                     _render_summary_metric("Workflow", "Sync in Apps")
+                st.markdown("<div style='height:0.18rem;'></div>", unsafe_allow_html=True)
+                s13, s14, s15, s16 = st.columns(4, gap="small")
+                with s13:
+                    quality_label = "n/a (inactive theme)" if not bool(current_row.get("is_active")) else current_leadership_quality_label(current_row)
+                    _render_summary_metric("Quality", quality_label)
+                with s14:
+                    _render_summary_metric("", "")
+                with s15:
+                    _render_summary_metric("", "")
+                with s16:
+                    _render_summary_metric("", "")
 
     if suppressed_hidden_count > 0 and not include_suppressed_tickers:
         st.caption(f"{suppressed_hidden_count} suppressed ticker(s) are hidden from the default detail table.")
@@ -1969,7 +1990,7 @@ with explore_tab:
 
     if not visible_ticker_df.empty:
         display_ticker_df = format_theme_ticker_table(visible_ticker_df)
-        for perf_col in ("perf_1d", "perf_1w", "perf_1m", "perf_3m"):
+        for perf_col in ("perf_1d", "perf_1w", "perf_1m", "perf_3m", "perf_6m"):
             if perf_col in display_ticker_df.columns:
                 display_ticker_df[perf_col] = display_ticker_df[perf_col].apply(
                     lambda v: display_or_dash(None) if v is None else (display_or_dash(None) if str(v) == "nan" else f"{float(v):.2f}%")
@@ -1991,6 +2012,7 @@ with explore_tab:
                 "perf_1w",
                 "perf_1m",
                 "perf_3m",
+                "perf_6m",
                 "ticker_composite_score",
                 "ticker_momentum_score",
                 "market_cap",

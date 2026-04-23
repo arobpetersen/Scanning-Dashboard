@@ -15,7 +15,7 @@ from .db_introspection import table_exists, table_has_column
 
 
 RECENT_TICKER_HISTORY_DERIVED_CALENDAR_DAYS = 45
-TICKER_HISTORY_BUFFER_DAYS = 120
+TICKER_HISTORY_BUFFER_DAYS = 220
 TICKER_HISTORY_ELIGIBLE_COVERAGE_THRESHOLD = 0.6
 
 
@@ -129,6 +129,7 @@ def _historical_theme_snapshot_union(
         return pd.DataFrame()
     positive_1w_expr = "ts.positive_1w_breadth_pct" if table_has_column(conn, "theme_snapshots", "positive_1w_breadth_pct") else "NULL"
     positive_3m_expr = "ts.positive_3m_breadth_pct" if table_has_column(conn, "theme_snapshots", "positive_3m_breadth_pct") else "NULL"
+    avg_6m_expr = "ts.avg_6m" if table_has_column(conn, "theme_snapshots", "avg_6m") else "NULL"
     theme_filter_sql = "AND ts.theme_id = ?" if theme_id is not None else ""
     captured_date_filter_sql = "AND CAST(ts.snapshot_time AS DATE) >= ?" if start_date is not None else ""
     captured_params: list[object] = [preferred_source]
@@ -150,6 +151,7 @@ def _historical_theme_snapshot_union(
             ts.avg_1w,
             ts.avg_1m,
             ts.avg_3m,
+            {avg_6m_expr} AS avg_6m,
             {positive_1w_expr} AS positive_1w_breadth_pct,
             ts.positive_1m_breadth_pct,
             {positive_3m_expr} AS positive_3m_breadth_pct,
@@ -188,6 +190,7 @@ def _historical_theme_snapshot_union(
                 r.avg_1w,
                 r.avg_1m,
                 r.avg_3m,
+                r.avg_6m,
                 r.positive_1w_breadth_pct,
                 r.positive_1m_breadth_pct,
                 r.positive_3m_breadth_pct,
@@ -402,7 +405,8 @@ def _recent_ticker_history_theme_history(
                 h.close,
                 ((h.close / LAG(h.close, 5) OVER (PARTITION BY h.ticker ORDER BY h.trading_date)) - 1.0) * 100.0 AS perf_1w,
                 ((h.close / LAG(h.close, 21) OVER (PARTITION BY h.ticker ORDER BY h.trading_date)) - 1.0) * 100.0 AS perf_1m,
-                ((h.close / LAG(h.close, 63) OVER (PARTITION BY h.ticker ORDER BY h.trading_date)) - 1.0) * 100.0 AS perf_3m
+                ((h.close / LAG(h.close, 63) OVER (PARTITION BY h.ticker ORDER BY h.trading_date)) - 1.0) * 100.0 AS perf_3m,
+                ((h.close / LAG(h.close, 126) OVER (PARTITION BY h.ticker ORDER BY h.trading_date)) - 1.0) * 100.0 AS perf_6m
             FROM deduped_history h
         ),
         recent_perf AS (
@@ -417,6 +421,7 @@ def _recent_ticker_history_theme_history(
                 AVG(CASE WHEN m.is_eligible THEN GREATEST(LEAST(rp.perf_1w, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) ELSE NULL END) AS avg_1w,
                 AVG(CASE WHEN m.is_eligible THEN GREATEST(LEAST(rp.perf_1m, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) ELSE NULL END) AS avg_1m,
                 AVG(CASE WHEN m.is_eligible THEN GREATEST(LEAST(rp.perf_3m, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) ELSE NULL END) AS avg_3m,
+                AVG(CASE WHEN m.is_eligible THEN GREATEST(LEAST(rp.perf_6m, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) ELSE NULL END) AS avg_6m,
                 AVG(CASE WHEN NOT m.is_eligible OR rp.perf_1w IS NULL THEN NULL WHEN GREATEST(LEAST(rp.perf_1w, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_1w_breadth_pct,
                 AVG(CASE WHEN NOT m.is_eligible OR rp.perf_1m IS NULL THEN NULL WHEN GREATEST(LEAST(rp.perf_1m, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_1m_breadth_pct,
                 AVG(CASE WHEN NOT m.is_eligible OR rp.perf_3m IS NULL THEN NULL WHEN GREATEST(LEAST(rp.perf_3m, {CURRENT_RANKING_RETURN_CAP_PCT}), -{CURRENT_RANKING_RETURN_CAP_PCT}) > 0 THEN 1.0 ELSE 0.0 END) * 100.0 AS positive_3m_breadth_pct,
@@ -436,6 +441,7 @@ def _recent_ticker_history_theme_history(
             ROUND(tdm.avg_1w, 2) AS avg_1w,
             ROUND(tdm.avg_1m, 2) AS avg_1m,
             ROUND(tdm.avg_3m, 2) AS avg_3m,
+            ROUND(tdm.avg_6m, 2) AS avg_6m,
             ROUND(COALESCE(tdm.positive_1w_breadth_pct, 0), 2) AS positive_1w_breadth_pct,
             ROUND(COALESCE(tdm.positive_1m_breadth_pct, 0), 2) AS positive_1m_breadth_pct,
             ROUND(COALESCE(tdm.positive_3m_breadth_pct, 0), 2) AS positive_3m_breadth_pct,
@@ -478,6 +484,7 @@ def _recent_ticker_history_theme_history(
             "avg_1w",
             "avg_1m",
             "avg_3m",
+            "avg_6m",
             "positive_1w_breadth_pct",
             "positive_1m_breadth_pct",
             "positive_3m_breadth_pct",
@@ -655,6 +662,7 @@ def theme_ticker_metrics(conn, theme_id: int, *, include_suppressed: bool = Fals
                 s.perf_1w,
                 s.perf_1m,
                 s.perf_3m,
+                s.perf_6m,
                 s.market_cap,
                 s.avg_volume,
                 s.short_interest_pct,
@@ -687,6 +695,7 @@ def theme_ticker_metrics(conn, theme_id: int, *, include_suppressed: bool = Fals
             cs.perf_1w,
             cs.perf_1m,
             cs.perf_3m,
+            cs.perf_6m,
             COALESCE(cs.market_cap, lmc.market_cap) AS market_cap,
             cs.avg_volume,
             cs.short_interest_pct,
@@ -786,6 +795,7 @@ def theme_ticker_metrics_for_theme_ids(conn, theme_ids: list[int], *, include_su
                 s.perf_1w,
                 s.perf_1m,
                 s.perf_3m,
+                s.perf_6m,
                 s.market_cap,
                 s.avg_volume,
                 s.short_interest_pct,
@@ -819,6 +829,7 @@ def theme_ticker_metrics_for_theme_ids(conn, theme_ids: list[int], *, include_su
             cs.perf_1w,
             cs.perf_1m,
             cs.perf_3m,
+            cs.perf_6m,
             COALESCE(cs.market_cap, lmc.market_cap) AS market_cap,
             cs.avg_volume,
             cs.short_interest_pct,
@@ -1245,7 +1256,8 @@ def _historical_theme_movement_row_audit_core(conn, theme_id: int, lookback_days
     daily_history["perf_1w_raw"] = ((grouped.transform(lambda s: s / s.shift(5))) - 1.0) * 100.0
     daily_history["perf_1m_raw"] = ((grouped.transform(lambda s: s / s.shift(21))) - 1.0) * 100.0
     daily_history["perf_3m_raw"] = ((grouped.transform(lambda s: s / s.shift(63))) - 1.0) * 100.0
-    for perf_col in ("perf_1w", "perf_1m", "perf_3m"):
+    daily_history["perf_6m_raw"] = ((grouped.transform(lambda s: s / s.shift(126))) - 1.0) * 100.0
+    for perf_col in ("perf_1w", "perf_1m", "perf_3m", "perf_6m"):
         daily_history[f"{perf_col}_capped"] = pd.to_numeric(
             daily_history[f"{perf_col}_raw"], errors="coerce"
         ).clip(-CURRENT_RANKING_RETURN_CAP_PCT, CURRENT_RANKING_RETURN_CAP_PCT)
@@ -1292,6 +1304,7 @@ def _historical_theme_movement_row_audit_core(conn, theme_id: int, lookback_days
                 "avg_1w": round(float(eligible_rows["perf_1w_capped"].mean()), 2) if not eligible_rows.empty else None,
                 "avg_1m": round(float(eligible_rows["perf_1m_capped"].mean()), 2) if not eligible_rows.empty else None,
                 "avg_3m": round(float(eligible_rows["perf_3m_capped"].mean()), 2) if not eligible_rows.empty else None,
+                "avg_6m": round(float(eligible_rows["perf_6m_capped"].mean()), 2) if not eligible_rows.empty else None,
                 "positive_1m_breadth_pct": (
                     round(float((eligible_rows["perf_1m_capped"] > 0).mean() * 100.0), 2)
                     if not eligible_rows.empty and eligible_rows["perf_1m_capped"].notna().any()
@@ -1333,6 +1346,12 @@ def _historical_theme_movement_row_audit_core(conn, theme_id: int, lookback_days
             else f"{float(row.get('perf_3m_raw')):.2f} -> {float(row.get('perf_3m_capped')):.2f}",
             axis=1,
         )
+        constituent_rows["raw_vs_capped_6m"] = constituent_rows.apply(
+            lambda row: None
+            if pd.isna(row.get("perf_6m_raw"))
+            else f"{float(row.get('perf_6m_raw')):.2f} -> {float(row.get('perf_6m_capped')):.2f}",
+            axis=1,
+        )
         constituent_rows = constituent_rows[
             [
                 "boundary_label",
@@ -1349,6 +1368,9 @@ def _historical_theme_movement_row_audit_core(conn, theme_id: int, lookback_days
                 "perf_3m_raw",
                 "perf_3m_capped",
                 "raw_vs_capped_3m",
+                "perf_6m_raw",
+                "perf_6m_capped",
+                "raw_vs_capped_6m",
                 "passed_historical_gate",
             ]
         ].sort_values(["boundary_label", "ticker"]).reset_index(drop=True)
@@ -1598,7 +1620,7 @@ def ticker_history_last_n_snapshots(conn, ticker: str, snapshot_limit: int = 14)
         return pd.DataFrame()
     return conn.execute(
         """
-        SELECT s.run_id, s.ticker, s.price, s.perf_1w, s.perf_1m, s.perf_3m,
+        SELECT s.run_id, s.ticker, s.price, s.perf_1w, s.perf_1m, s.perf_3m, s.perf_6m,
                s.market_cap, s.avg_volume, s.last_updated,
                r.finished_at AS snapshot_time, s.snapshot_source
         FROM ticker_snapshots s
@@ -1650,6 +1672,7 @@ def ticker_history_last_n_trading_days(conn, ticker: str, trading_day_limit: int
     history["perf_1w"] = ((grouped.transform(lambda s: s / s.shift(5))) - 1.0) * 100.0
     history["perf_1m"] = ((grouped.transform(lambda s: s / s.shift(21))) - 1.0) * 100.0
     history["perf_3m"] = ((grouped.transform(lambda s: s / s.shift(63))) - 1.0) * 100.0
+    history["perf_6m"] = ((grouped.transform(lambda s: s / s.shift(126))) - 1.0) * 100.0
     history["atr_14"] = pd.to_numeric(history.get("atr_14"), errors="coerce")
     history["atr_pct_14"] = pd.to_numeric(history.get("atr_pct_14"), errors="coerce")
     history["perf_1w_atr_units"] = np.where(
@@ -1672,6 +1695,7 @@ def ticker_history_last_n_trading_days(conn, ticker: str, trading_day_limit: int
             "perf_1w",
             "perf_1m",
             "perf_3m",
+            "perf_6m",
             "perf_1w_atr_units",
             "perf_1m_atr_units",
             "market_data_source",

@@ -115,7 +115,7 @@ def test_load_current_ranking_constituents_uses_operating_atr_helper():
             raise AssertionError(sql)
 
     latest = pd.DataFrame(
-        [{"ticker": "AAA", "run_id": 1, "snapshot_time": "2026-04-15 16:00:00", "price": 10.0, "avg_volume": 1000.0, "perf_1d": 0.5, "perf_1w": 1.0, "perf_1m": 2.0, "perf_3m": 3.0}]
+        [{"ticker": "AAA", "run_id": 1, "snapshot_time": "2026-04-15 16:00:00", "price": 10.0, "avg_volume": 1000.0, "perf_1d": 0.5, "perf_1w": 1.0, "perf_1m": 2.0, "perf_3m": 3.0, "perf_6m": 4.0}]
     )
     atr = pd.DataFrame([{"ticker": "AAA", "perf_1w_atr_units": 0.5, "perf_1m_atr_units": 1.5}])
 
@@ -133,6 +133,7 @@ def test_load_current_ranking_constituents_uses_operating_atr_helper():
 
     operating_helper.assert_called_once()
     assert "perf_1d" in out.columns
+    assert "perf_6m" in out.columns
     assert "perf_1w_atr_units" in out.columns
     assert "perf_1m_atr_units" in out.columns
 
@@ -154,6 +155,7 @@ def test_build_current_ranking_metrics_carries_avg_1d_without_changing_other_met
                 "perf_1w": 2.0,
                 "perf_1m": 3.0,
                 "perf_3m": 4.0,
+                "perf_6m": 5.0,
                 "status": "active",
             },
             {
@@ -170,6 +172,7 @@ def test_build_current_ranking_metrics_carries_avg_1d_without_changing_other_met
                 "perf_1w": 4.0,
                 "perf_1m": 5.0,
                 "perf_3m": 6.0,
+                "perf_6m": 7.0,
                 "status": "active",
             },
         ]
@@ -180,6 +183,7 @@ def test_build_current_ranking_metrics_carries_avg_1d_without_changing_other_met
     assert float(out.iloc[0]["avg_1d"]) == 2.0
     assert float(out.iloc[0]["avg_1w"]) == 3.0
     assert float(out.iloc[0]["avg_1m"]) == 4.0
+    assert float(out.iloc[0]["avg_6m"]) == 6.0
 
 
 def test_build_current_ranking_metrics_uses_new_standardized_base_mix_without_changing_atr_or_momentum_structure():

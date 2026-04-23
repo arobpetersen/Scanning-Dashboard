@@ -329,9 +329,23 @@ class TestExtractedResearchHelpers(unittest.TestCase):
         self.assertEqual(len(catalog), 1)
         self.assertEqual(catalog[0]["theme_name"], "AI - Infrastructure")
         self.assertEqual(catalog[0]["representative_tickers"], ["NVDA", "SMCI"])
+        self.assertEqual(catalog[0]["member_count"], 2)
+        self.assertIn("Governed theme AI - Infrastructure", catalog[0]["theme_identity_summary"])
 
         with (
-            patch("src.scanner_research_profiles.load_company_profile", side_effect=[{"company_name": "NVIDIA", "description": "GPU maker"}, {}]),
+            patch(
+                "src.scanner_research_profiles.load_company_profile",
+                side_effect=[
+                    {
+                        "company_name": "NVIDIA",
+                        "description": "GPU maker",
+                        "security_type": "CS",
+                        "active": True,
+                        "market": "stocks",
+                    },
+                    {},
+                ],
+            ),
         ):
             fresh = load_company_profile_with_cache("NVDA")
             cached = load_company_profile_with_cache("NVDA")
@@ -339,6 +353,8 @@ class TestExtractedResearchHelpers(unittest.TestCase):
         self.assertEqual(fresh["_profile_source"], "live_lookup")
         self.assertEqual(cached["_profile_source"], "cached_live_lookup")
         self.assertEqual(cached["company_name"], "NVIDIA")
+        self.assertEqual(cached["security_type"], "CS")
+        self.assertTrue(cached["active"])
 
     def test_normalize_ai_draft_payload_repairs_sparse_ai_output(self):
         payload = normalize_ai_draft_payload(
@@ -346,6 +362,7 @@ class TestExtractedResearchHelpers(unittest.TestCase):
                 "suggested_existing_themes": [{"theme_id": 1, "why_it_might_fit": "AI servers"}],
                 "recommended_action": "bad_value",
                 "caveats": ["", "Needs review"],
+                "final_adjudication": {"decision": "no_strong_fit", "business_role": "server vendor"},
             },
             candidate={"ticker": "SMCI"},
             profile={"company_name": "Super Micro", "description": "Builds AI servers"},
@@ -357,6 +374,7 @@ class TestExtractedResearchHelpers(unittest.TestCase):
         self.assertEqual(payload["recommended_action"], "watch_only")
         self.assertEqual(payload["suggested_existing_themes"][0]["theme_name"], "AI - Infrastructure")
         self.assertEqual(payload["caveats"], ["Needs review"])
+        self.assertEqual(payload["research_decision_trace"]["decision"], "no_strong_fit")
 
     def test_merge_reconciliation_promotes_precise_new_theme_when_existing_fit_is_adjacent(self):
         catalog = [
@@ -495,6 +513,7 @@ class TestExtractedResearchHelpers(unittest.TestCase):
         self.assertEqual(draft["domain_anchor"], "ai infrastructure")
         self.assertEqual(draft["recommended_action"], "watch_only")
         self.assertIn("ai_request_ms", draft["research_timing_summary"])
+        self.assertEqual(draft["research_context_meta"]["adjudication_model"], "gpt-5-mini")
 
     def test_best_suggested_theme_fit_details_prefers_highest_scoring_theme(self):
         catalog = [

@@ -1052,6 +1052,8 @@ class TestSuggestionsPageState(unittest.TestCase):
         out = build_current_leadership_table(rankings, top_k=10)
 
         self.assertEqual(out["theme"].tolist(), ["Broad Tech", "Narrow Spike", "Turning Up", "Small But Broad"])
+        self.assertIn("avg_6m", out.columns)
+        self.assertTrue(pd.isna(out.iloc[0]["avg_6m"]))
         self.assertEqual(out.iloc[0]["leadership_quality"], "Broad leader")
         self.assertEqual(out.iloc[1]["leadership_quality"], "Thin / filtered")
         self.assertEqual(out.iloc[2]["leadership_quality"], "Narrow strength")

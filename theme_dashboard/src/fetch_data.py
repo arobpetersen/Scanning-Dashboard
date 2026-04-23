@@ -319,10 +319,10 @@ def run_refresh(
                 conn.execute(
                     """
                     INSERT INTO ticker_snapshots(
-                        run_id, ticker, price, perf_1d, perf_1w, perf_1m, perf_3m,
+                        run_id, ticker, price, perf_1d, perf_1w, perf_1m, perf_3m, perf_6m,
                         market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated, snapshot_source
                     )
-                    SELECT run_id, ticker, price, perf_1d, perf_1w, perf_1m, perf_3m,
+                    SELECT run_id, ticker, price, perf_1d, perf_1w, perf_1m, perf_3m, perf_6m,
                            market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated, ?
                     FROM incoming_snapshots
                     """,

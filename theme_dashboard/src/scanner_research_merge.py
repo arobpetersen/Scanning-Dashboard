@@ -13,7 +13,7 @@ import json
 import requests
 
 from .ai_proposals import sanitize_context
-from .config import AI_MODEL, OPENAI_API_KEY_ENV, openai_api_key
+from .config import AI_RESEARCH_ADJUDICATION_MODEL, OPENAI_API_KEY_ENV, openai_api_key
 from .scanner_research_heuristics import (
     candidate_roles,
     fit_label_from_details,
@@ -32,6 +32,55 @@ class RecoverableResearchGenerationError(RuntimeError):
         self.details.setdefault("error_message", str(message or "").strip())
 
 
+RESEARCH_ADJUDICATION_SYSTEM_PROMPT = """You are the final governed-theme adjudicator for Scanner Audit.
+Return STRICT JSON only.
+
+Your job is not to brainstorm. Your job is to decide whether a company has a trustworthy fit to an existing governed theme.
+
+Use the provided structured company evidence, governed theme cards, and retrieval priors only.
+Prefer refusing weak fits over surfacing broad semantic lookalikes.
+
+Required top-level fields:
+- company_name
+- short_company_description
+- suggested_existing_themes (array of objects with theme_id, theme_name, category, why_it_might_fit, fit_label)
+- possible_new_theme
+- possible_new_theme_category
+- confidence
+- rationale
+- caveats (array of strings)
+- recommended_action
+- final_adjudication (object)
+
+Required final_adjudication fields:
+- business_role
+- sector_domain
+- what_it_is
+- what_it_is_not (array of strings)
+- decision
+- direct_fit_requirements_met (array of strings)
+- reasons_for_fit (array of strings)
+- reasons_against_fit (array of strings)
+- selected_theme_ids (array of integers)
+- refusal_reason
+- proposed_new_theme
+- default_stage_allowed
+
+Decision rules:
+- direct_fit requires a concrete business-role match to the governed theme identity, not just broad sector or end-market overlap.
+- adjacent_fit is allowed only when the company is clearly relevant but not representative of the theme's direct identity.
+- If evidence is weak, mixed, security-sanity is questionable, or the best match is only broad semantic overlap, choose no_strong_fit.
+- Never surface obviously unrelated governed themes just because of lexical overlap.
+- Better to return fewer suggestions or no_strong_fit than to guess.
+
+Allowed values:
+- suggested_existing_themes[].fit_label: direct_fit, adjacent_fit
+- recommended_action: add_to_existing_theme_review, consider_new_theme, watch_only, reject_for_now
+- final_adjudication.decision: direct_fit, adjacent_fit, no_strong_fit
+- final_adjudication.default_stage_allowed: yes, no
+"""
+
+
 def _recoverable_error_from_exception(exc: Exception) -> RecoverableResearchGenerationError:
     from . import scanner_research as legacy
 
@@ -42,19 +91,18 @@ def _recoverable_error_from_exception(exc: Exception) -> RecoverableResearchGene
 
 
 def call_openai_research(api_key: str, context: dict[str, object], *, max_output_tokens: int = 550) -> dict[str, object]:
-    from . import scanner_research as legacy
-
     payload = {
-        "model": AI_MODEL,
+        "model": AI_RESEARCH_ADJUDICATION_MODEL,
         "max_output_tokens": max_output_tokens,
         "input": [
-            {"role": "system", "content": legacy.RESEARCH_DRAFT_SYSTEM_PROMPT},
+            {"role": "system", "content": RESEARCH_ADJUDICATION_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": (
-                    "Generate one concise advisory research draft using the provided context only. "
-                    "Populate every required field. If existing themes are weak, say so explicitly, provide a useful rationale, "
-                    "and suggest a concise possible_new_theme when justified. Compare the best existing governed-theme fit against the best narrow business-role label and choose the more precise answer. "
+                    "Adjudicate governed-theme fit using the provided context only. "
+                    "Use the retrieval priors as hints, not as authority. "
+                    "Only keep themes that survive role-level scrutiny. "
+                    "If no governed theme clears that bar, say so explicitly and return no_strong_fit in final_adjudication. "
                     f"Context JSON: {json.dumps(sanitize_context(context))[:16000]}"
                 ),
             },
@@ -171,20 +219,75 @@ def build_ai_context(
     filtered_catalog: list[dict[str, object]],
     heuristic_baseline: dict[str, object],
 ) -> dict[str, object]:
+    from . import scanner_research as legacy
+
+    company_evidence = {
+        "ticker": str(candidate.get("ticker") or "").strip().upper(),
+        "company_name": legacy._normalize_text(profile.get("company_name")),
+        "official_description": legacy._normalize_text(profile.get("description")),
+        "sic_description": legacy._normalize_text(profile.get("sic_description")),
+        "sic_code": legacy._normalize_text(profile.get("sic_code")),
+        "security_type": legacy._normalize_text(profile.get("security_type")),
+        "active": profile.get("active"),
+        "primary_exchange": legacy._normalize_text(profile.get("primary_exchange")),
+        "market": legacy._normalize_text(profile.get("market")),
+        "locale": legacy._normalize_text(profile.get("locale")),
+        "currency_name": legacy._normalize_text(profile.get("currency_name")),
+        "list_date": legacy._normalize_text(profile.get("list_date")),
+        "market_cap": profile.get("market_cap"),
+        "profile_source": legacy._normalize_text(profile.get("_profile_source")),
+    }
+    governed_theme_cards: list[dict[str, object]] = []
+    for entry in list(filtered_catalog or []):
+        governed_theme_cards.append(
+            {
+                "theme_id": int(entry["theme_id"]),
+                "theme_name": str(entry["theme_name"]),
+                "category": str(entry.get("category") or "Uncategorized"),
+                "member_count": int(entry.get("member_count") or len(list(entry.get("representative_tickers") or []))),
+                "representative_tickers": [str(value).strip().upper() for value in list(entry.get("representative_tickers") or []) if str(value).strip()][:5],
+                "theme_identity_summary": legacy._normalize_text(entry.get("theme_identity_summary"))
+                or legacy._normalize_text(entry.get("theme_description")),
+                "inferred_roles": sorted(str(value) for value in set(entry.get("_theme_roles") or set())),
+                "inferred_concepts": sorted(str(value) for value in set(entry.get("_theme_concepts") or set())),
+                "inferred_end_markets": sorted(str(value) for value in set(entry.get("_theme_markets") or set())),
+                "inferred_archetypes": sorted(str(value) for value in set(entry.get("_theme_archetypes") or set())),
+                "inferred_economic_roles": sorted(str(value) for value in set(entry.get("_theme_economic_roles") or set())),
+                "generic_theme_flag": bool(entry.get("_looks_generic_theme") or entry.get("_is_generic_factor_theme")),
+            }
+        )
     return {
-        "candidate": candidate,
-        "company_profile": profile,
-        "governed_theme_catalog": filtered_catalog,
-        "heuristic_baseline": {
+        "candidate": {
+            "ticker": str(candidate.get("ticker") or "").strip().upper(),
+            "recommendation": candidate.get("recommendation"),
+            "recommendation_reason": candidate.get("recommendation_reason"),
+            "governed_status": candidate.get("governed_status"),
+            "source_labels": candidate.get("source_labels"),
+        },
+        "company_evidence": company_evidence,
+        "governed_theme_cards": governed_theme_cards,
+        "retrieval_priors": {
             "suggested_existing_themes": heuristic_baseline.get("suggested_existing_themes") or [],
             "possible_new_theme": heuristic_baseline.get("possible_new_theme"),
             "possible_new_theme_category": heuristic_baseline.get("possible_new_theme_category"),
-            "recommended_action": heuristic_baseline.get("recommended_action"),
-            "rationale_summary": heuristic_baseline.get("rationale"),
             "domain_anchor": heuristic_baseline.get("domain_anchor"),
             "dominant_business_role": heuristic_baseline.get("dominant_business_role"),
             "candidate_theme_ideas": list(heuristic_baseline.get("candidate_theme_ideas") or [])[:5],
             "matched_theme_candidates": list(heuristic_baseline.get("matched_theme_candidates") or [])[:5],
+        },
+        "adjudication_policy": {
+            "direct_fit_requires": [
+                "clear business-role agreement with the theme identity",
+                "not merely broad sector overlap",
+                "not merely end-market exposure",
+                "representative rather than incidental relation",
+            ],
+            "force_no_strong_fit_when": [
+                "best match is broad semantic overlap only",
+                "theme looks generic but business role is more specific",
+                "company identity remains mixed or weakly evidenced",
+                "candidate appears unrelated to proposed governed themes",
+            ],
         },
     }
 
@@ -212,6 +315,7 @@ def normalize_ai_draft_payload(
         "caveats": [str(value).strip() for value in raw.get("caveats") or [] if str(value).strip()],
         "recommended_action": normalize_action(raw.get("recommended_action"), "watch_only"),
         "research_context_meta": context_meta,
+        "research_decision_trace": dict(raw.get("final_adjudication") or {}) if isinstance(raw.get("final_adjudication"), dict) else {},
     }
 
 
@@ -247,7 +351,7 @@ def ai_research_draft_for_strategy(
             f"{OPENAI_API_KEY_ENV} is not set.",
             details={
                 "error_class": "MissingOpenAIAPIKey",
-                "model": AI_MODEL,
+                "model": AI_RESEARCH_ADJUDICATION_MODEL,
                 "error_message": f"{OPENAI_API_KEY_ENV} is not set.",
             },
         )
@@ -263,6 +367,7 @@ def ai_research_draft_for_strategy(
     )
     prefilter_ms = legacy._elapsed_ms(prefilter_start)
     context = build_ai_context(candidate, profile, filtered_catalog, heuristic_baseline)
+    context_meta["adjudication_model"] = AI_RESEARCH_ADJUDICATION_MODEL
     context_meta["estimated_context_chars"] = legacy._estimate_context_size_chars(context)
     request_start = legacy._now_perf()
     try:
@@ -281,7 +386,7 @@ def ai_research_draft_for_strategy(
             "OpenAI response was not a JSON object.",
             details={
                 "error_class": "InvalidOpenAIResponse",
-                "model": AI_MODEL,
+                "model": AI_RESEARCH_ADJUDICATION_MODEL,
                 "error_message": "OpenAI response was not a JSON object.",
             },
         )

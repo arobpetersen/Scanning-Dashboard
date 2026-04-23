@@ -33,15 +33,27 @@ def theme_catalog_context(conn, representative_limit: int = 5) -> list[dict[str,
     catalog: list[dict[str, object]] = []
     for (theme_id, theme_name, category), frame in rows.groupby(["theme_id", "theme_name", "category"], dropna=False):
         members = [str(value).strip().upper() for value in frame["ticker"].tolist() if str(value or "").strip()]
+        member_count = len(members)
+        representative_tickers = members[:representative_limit]
         catalog.append(
             {
                 "theme_id": int(theme_id),
                 "theme_name": str(theme_name),
                 "category": str(category or "Uncategorized"),
-                "representative_tickers": members[:representative_limit],
+                "representative_tickers": representative_tickers,
+                "member_count": member_count,
                 "theme_description": (
                     f"{theme_name} ({category or 'Uncategorized'}) with representative tickers "
-                    + (", ".join(members[:representative_limit]) if members else "none")
+                    + (", ".join(representative_tickers) if members else "none")
+                ),
+                "theme_identity_summary": (
+                    f"Governed theme {theme_name} in category {category or 'Uncategorized'} "
+                    f"with {member_count} governed member{'s' if member_count != 1 else ''}. "
+                    + (
+                        f"Representative governed tickers: {', '.join(representative_tickers)}."
+                        if representative_tickers
+                        else "No representative tickers are currently available."
+                    )
                 ),
             }
         )
@@ -65,7 +77,14 @@ def load_company_profile(ticker: str) -> dict[str, object]:
         "company_name": legacy._normalize_text(ref.get("name")),
         "description": legacy._normalize_text(ref.get("description")),
         "sic_description": legacy._normalize_text(ref.get("sic_description")),
+        "sic_code": legacy._normalize_text(ref.get("sic_code")),
         "primary_exchange": legacy._normalize_text(ref.get("primary_exchange")),
+        "market": legacy._normalize_text(ref.get("market")),
+        "locale": legacy._normalize_text(ref.get("locale")),
+        "security_type": legacy._normalize_text(ref.get("type")),
+        "active": ref.get("active"),
+        "currency_name": legacy._normalize_text(ref.get("currency_name")),
+        "list_date": legacy._normalize_text(ref.get("list_date")),
         "market_cap": ref.get("market_cap"),
     }
 

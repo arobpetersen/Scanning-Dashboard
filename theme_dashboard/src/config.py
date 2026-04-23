@@ -63,6 +63,7 @@ AIRTABLE_TABLE_TICKER_SNAPSHOT_HISTORY = os.getenv("AIRTABLE_TABLE_TICKER_SNAPSH
 AIRTABLE_EXPORT_SNAPSHOT_LIMIT = int(os.getenv("AIRTABLE_EXPORT_SNAPSHOT_LIMIT", "14").strip() or "14")
 OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
 AI_MODEL = "gpt-5-mini"
+AI_RESEARCH_ADJUDICATION_MODEL = os.getenv("AI_RESEARCH_ADJUDICATION_MODEL", AI_MODEL).strip() or AI_MODEL
 AI_MAX_PROPOSALS = 8
 TC2000_IMPORT_DIR = Path(os.getenv("TC2000_IMPORT_DIR", str(BASE_DIR / "imports" / "tc2000"))).expanduser()
 TC2000_FILE_GLOB = os.getenv("TC2000_FILE_GLOB", "*.csv,*.txt,*.tsv,*.xlsx").strip() or "*.csv,*.txt,*.tsv,*.xlsx"
