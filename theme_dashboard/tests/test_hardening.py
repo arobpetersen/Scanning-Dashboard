@@ -21,6 +21,7 @@ from src.leaderboard_utils import (
     build_category_theme_breakdown,
     build_current_leadership_table,
     build_current_performance_table,
+    build_current_rank_persistence_table,
     build_current_rank_movers_table,
     build_window_leaderboard,
     current_leadership_quality_label,
@@ -295,6 +296,48 @@ class TestLeaderboardUtils(unittest.TestCase):
         )
 
         self.assertEqual(ranked["theme"].tolist(), ["Thin", "Healthy"])
+
+    def test_window_leaderboard_excludes_inactive_themes_when_flag_is_present(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-01-01", "theme_id": 1, "theme": "Inactive Winner", "avg_1w": 7.0, "is_active": False},
+                {"snapshot_time": "2026-01-08", "theme_id": 1, "theme": "Inactive Winner", "avg_1w": 9.0, "is_active": False},
+                {"snapshot_time": "2026-01-01", "theme_id": 2, "theme": "Active Runner", "avg_1w": 5.0, "is_active": True},
+                {"snapshot_time": "2026-01-08", "theme_id": 2, "theme": "Active Runner", "avg_1w": 8.0, "is_active": True},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "Inactive Winner", "momentum_score": 10, "rank_change": 2},
+                {"theme_id": 2, "theme": "Active Runner", "momentum_score": 8, "rank_change": 1},
+            ]
+        )
+
+        ranked, _ = build_window_leaderboard({"history": history, "window_summary": summary}, "avg_1w", top_k=10)
+
+        self.assertEqual(ranked["theme"].tolist(), ["Active Runner"])
+
+    def test_category_leaderboard_excludes_inactive_themes_when_flag_is_present(self):
+        history = pd.DataFrame(
+            [
+                {"snapshot_time": "2026-01-01", "theme_id": 1, "theme": "Inactive Winner", "category": "Energy", "avg_1w": 7.0, "positive_1m_breadth_pct": 80.0, "is_active": False},
+                {"snapshot_time": "2026-01-08", "theme_id": 1, "theme": "Inactive Winner", "category": "Energy", "avg_1w": 9.0, "positive_1m_breadth_pct": 85.0, "is_active": False},
+                {"snapshot_time": "2026-01-01", "theme_id": 2, "theme": "Active Runner", "category": "Tech", "avg_1w": 5.0, "positive_1m_breadth_pct": 60.0, "is_active": True},
+                {"snapshot_time": "2026-01-08", "theme_id": 2, "theme": "Active Runner", "category": "Tech", "avg_1w": 8.0, "positive_1m_breadth_pct": 65.0, "is_active": True},
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "Inactive Winner", "momentum_score": 10, "rank_change": 2},
+                {"theme_id": 2, "theme": "Active Runner", "momentum_score": 8, "rank_change": 1},
+            ]
+        )
+
+        category_out, _ = build_category_leaderboard({"history": history, "window_summary": summary}, "avg_1w", top_k=10)
+        breakdown_out, _ = build_category_theme_breakdown({"history": history, "window_summary": summary}, "avg_1w")
+
+        self.assertEqual(category_out["category"].tolist(), ["Tech"])
+        self.assertEqual(breakdown_out["theme"].tolist(), ["Active Runner"])
 
     @patch("src.momentum_engine._top_n_membership_changes_from_history", return_value=([], []))
     @patch("src.momentum_engine.canonical_theme_history_window", return_value=pd.DataFrame())
@@ -1184,6 +1227,48 @@ class TestSuggestionsPageState(unittest.TestCase):
         self.assertEqual(risers.iloc[0]["move"], "3 → 1 (+2)")
         self.assertEqual(fallers["theme"].tolist(), ["B", "C"])
         self.assertEqual(fallers.iloc[0]["move"], "1 → 2 (-1)")
+
+    def test_build_current_rank_persistence_table_finds_steady_rank_grinders(self):
+        rankings = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "Steady Up", "category": "Tech", "composite_score": 15.0},
+                {"theme_id": 2, "theme": "Steady Down", "category": "Macro", "composite_score": 14.0},
+                {"theme_id": 3, "theme": "Jump Then Stall", "category": "Spec", "composite_score": 13.0},
+            ]
+        )
+        rank_history = pd.DataFrame(
+            [
+                {"theme_id": 1, "rank_history": [6.0, 5.0, 4.0, 3.0, 2.0, 1.0]},
+                {"theme_id": 2, "rank_history": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]},
+                {"theme_id": 3, "rank_history": [6.0, 2.0, 2.0, 2.0, 2.0, 2.0]},
+            ]
+        )
+
+        risers = build_current_rank_persistence_table(rankings, rank_history, direction="riser", top_k=5)
+        fallers = build_current_rank_persistence_table(rankings, rank_history, direction="faller", top_k=5)
+
+        self.assertEqual(risers["theme"].tolist(), ["Steady Up"])
+        self.assertEqual(risers.iloc[0]["persistence"], "5/5 up days")
+        self.assertEqual(fallers["theme"].tolist(), ["Steady Down"])
+        self.assertEqual(fallers.iloc[0]["persistence"], "5/5 down days")
+
+    def test_build_current_rank_persistence_table_requires_consistent_recent_days(self):
+        rankings = pd.DataFrame(
+            [
+                {"theme_id": 1, "theme": "Not Persistent", "category": "Tech", "composite_score": 15.0},
+            ]
+        )
+        rank_history = pd.DataFrame(
+            [
+                {"theme_id": 1, "rank_history": [6.0, 2.0, 3.0, 2.0, 3.0, 2.0]},
+            ]
+        )
+
+        risers = build_current_rank_persistence_table(rankings, rank_history, direction="riser", top_k=5)
+        fallers = build_current_rank_persistence_table(rankings, rank_history, direction="faller", top_k=5)
+
+        self.assertTrue(risers.empty)
+        self.assertTrue(fallers.empty)
 
     def test_current_performance_table_uses_metric_specific_eligible_counts(self):
         rankings = pd.DataFrame(
@@ -4040,7 +4125,7 @@ class TestManualTickerSuppression(unittest.TestCase):
         conn.execute(
             """
             create table ticker_snapshots(
-                run_id bigint, ticker varchar, price double, perf_1w double, perf_1m double, perf_3m double,
+                run_id bigint, ticker varchar, price double, perf_1d double, perf_1w double, perf_1m double, perf_3m double, perf_6m double,
                 market_cap double, avg_volume double, short_interest_pct double, float_shares double, adr_pct double,
                 last_updated timestamp, snapshot_source varchar
             )
@@ -4077,7 +4162,7 @@ class TestManualTickerSuppression(unittest.TestCase):
         conn.execute("insert into refresh_failures values (1, 'DOCN', 'temporary', 'transient', '2026-03-22 11:30:00')")
         conn.execute("insert into refresh_run_tickers values (1, 'DOCN')")
         conn.execute(
-            "insert into ticker_snapshots values (1, 'DOCN', 40, 1, 2, 3, 1000, 2000, null, null, null, '2026-03-22 10:59:00', 'live')"
+            "insert into ticker_snapshots values (1, 'DOCN', 40, 0.5, 1, 2, 3, 4, 1000, 2000, null, null, null, '2026-03-22 10:59:00', 'live')"
         )
 
         set_manual_ticker_suppression(conn, "DOCN", "pink sheets / out of universe")
@@ -4090,7 +4175,7 @@ class TestManualTickerSuppression(unittest.TestCase):
 
         self.assertTrue(bool(summary.iloc[0]["manually_suppressed"]))
         self.assertEqual(summary.iloc[0]["lookup_status"], "Suppressed operationally")
-        self.assertFalse(bool(summary.iloc[0]["exists_in_theme_membership"]))
+        self.assertTrue(bool(summary.iloc[0]["exists_in_theme_membership"]))
         self.assertEqual(int(summary.iloc[0]["assigned_theme_count"]), 2)
         self.assertEqual(summary.iloc[0]["manual_suppression_reason"], "pink sheets / out of universe")
         self.assertEqual(sorted(memberships["theme_name"].tolist()), ["AI - Agentic", "Cloud Software"])

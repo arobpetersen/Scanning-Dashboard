@@ -8,6 +8,7 @@ from src.database import SCHEMA_SQL
 from src.queries import canonical_theme_rank_history, latest_canonical_theme_daily_snapshots
 from src.rankings import (
     compute_current_ranking_snapshot,
+    compute_current_ranking_snapshot_for_run,
     persist_canonical_theme_daily_snapshot_for_run,
 )
 
@@ -103,6 +104,48 @@ class TestCanonicalThemeDailySnapshots(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_current_and_canonical_rank_ignore_inactive_high_score_theme(self):
+        conn = self._build_conn()
+        try:
+            conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'AAA'), (1, 'AAB'), (1, 'AAC')")
+            conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'BBB'), (2, 'BBC'), (2, 'BBD')")
+            conn.execute("insert into theme_membership(theme_id, ticker) values (3, 'DDD'), (3, 'DDE'), (3, 'DDF')")
+            conn.execute(
+                """
+                insert into refresh_runs(run_id, provider, started_at, finished_at, status, ticker_count, success_count, failure_count)
+                values (18, 'live', '2026-04-16 20:00:00', '2026-04-16 22:05:00', 'success', 9, 9, 0)
+                """
+            )
+            conn.execute(
+                """
+                insert into ticker_snapshots(
+                    run_id, ticker, price, perf_1w, perf_1m, perf_3m,
+                    market_cap, avg_volume, short_interest_pct, float_shares, adr_pct, last_updated, snapshot_source
+                ) values
+                (18, 'AAA', 10, 12, 16, 8, null, 2000000, null, null, null, '2026-04-16 22:00:00', 'live'),
+                (18, 'AAB', 11, 11, 15, 8, null, 2000000, null, null, null, '2026-04-16 22:00:00', 'live'),
+                (18, 'AAC', 12, 10, 14, 8, null, 2000000, null, null, null, '2026-04-16 22:00:00', 'live'),
+                (18, 'BBB', 10, 8, 10, 8, null, 2000000, null, null, null, '2026-04-16 22:00:00', 'live'),
+                (18, 'BBC', 10, 7, 9, 8, null, 2000000, null, null, null, '2026-04-16 22:00:00', 'live'),
+                (18, 'BBD', 10, 6, 8, 8, null, 2000000, null, null, null, '2026-04-16 22:00:00', 'live'),
+                (18, 'DDD', 20, 30, 40, 20, null, 2000000, null, null, null, '2026-04-16 22:00:00', 'live'),
+                (18, 'DDE', 20, 29, 39, 20, null, 2000000, null, null, null, '2026-04-16 22:00:00', 'live'),
+                (18, 'DDF', 20, 28, 38, 20, null, 2000000, null, null, null, '2026-04-16 22:00:00', 'live')
+                """
+            )
+
+            snapshot = compute_current_ranking_snapshot_for_run(conn, 18)
+            self.assertEqual(snapshot["standardized_rankings"]["theme"].tolist(), ["Alpha", "Beta"])
+
+            persist_canonical_theme_daily_snapshot_for_run(conn, 18)
+            latest = latest_canonical_theme_daily_snapshots(conn)
+            ranked = latest[latest["canonical_rank"].notna()].sort_values("canonical_rank")
+            self.assertEqual(ranked["theme"].tolist(), ["Alpha", "Beta"])
+            dormant = latest[latest["theme"] == "Dormant"].iloc[0]
+            self.assertTrue(pd.isna(dormant["canonical_rank"]))
+        finally:
+            conn.close()
+
     def test_persist_canonical_theme_daily_snapshot_for_run_skips_unrankable_run_rows(self):
         conn = self._build_conn()
         try:
@@ -166,6 +209,7 @@ class TestCanonicalThemeDailySnapshots(unittest.TestCase):
                         "eligible_1w_count": 3,
                         "eligible_1m_count": 3,
                         "eligible_3m_count": 3,
+                        "eligible_6m_count": 3,
                         "eligible_composite_count": 3,
                         "eligible_standardized_count": 3,
                         "eligible_momentum_count": 3,
@@ -173,6 +217,7 @@ class TestCanonicalThemeDailySnapshots(unittest.TestCase):
                         "avg_1w": 10.0,
                         "avg_1m": 10.0,
                         "avg_3m": 10.0,
+                        "avg_6m": 10.0,
                         "positive_1w_breadth_pct": 100.0,
                         "positive_1m_breadth_pct": 100.0,
                         "positive_3m_breadth_pct": 100.0,
@@ -205,6 +250,7 @@ class TestCanonicalThemeDailySnapshots(unittest.TestCase):
                         "eligible_1w_count": 3,
                         "eligible_1m_count": 3,
                         "eligible_3m_count": 3,
+                        "eligible_6m_count": 3,
                         "eligible_composite_count": 3,
                         "eligible_standardized_count": 3,
                         "eligible_momentum_count": 3,
@@ -212,6 +258,7 @@ class TestCanonicalThemeDailySnapshots(unittest.TestCase):
                         "avg_1w": 10.0,
                         "avg_1m": 10.0,
                         "avg_3m": 10.0,
+                        "avg_6m": 10.0,
                         "positive_1w_breadth_pct": 100.0,
                         "positive_1m_breadth_pct": 100.0,
                         "positive_3m_breadth_pct": 100.0,

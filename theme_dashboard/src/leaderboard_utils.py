@@ -214,6 +214,10 @@ def build_window_leaderboard(
         return pd.DataFrame(), msg
 
     latest = history.sort_values(["snapshot_time", "theme"]).groupby("theme_id", as_index=False).tail(1)
+    if "is_active" in latest.columns:
+        latest = latest[latest["is_active"] == True].copy()
+    if latest.empty:
+        return pd.DataFrame(), "No active themes available for this window."
     sort_col = primary_sort_col or perf_col
     sort_cols = [sort_col]
     if sort_col == "momentum_score":
@@ -423,6 +427,107 @@ def build_current_rank_movers_table(
     ].reset_index(drop=True)
 
 
+def build_current_rank_persistence_table(
+    rankings: pd.DataFrame,
+    rank_history: pd.DataFrame,
+    *,
+    direction: str,
+    top_k: int = 8,
+    min_transition_wins: int = 4,
+    min_transition_count: int = 5,
+) -> pd.DataFrame:
+    if rankings.empty or rank_history.empty:
+        return pd.DataFrame()
+
+    current = rankings.copy().reset_index(drop=True)
+    current["current_rank"] = current.index + 1
+    history = rank_history.copy()
+    history["cleaned_rank_history"] = history["rank_history"].apply(
+        lambda values: [float(value) for value in values if value is not None and not pd.isna(value)]
+        if isinstance(values, (list, tuple))
+        else []
+    )
+    history["transition_count"] = history["cleaned_rank_history"].apply(lambda values: max(len(values) - 1, 0))
+    history = history[history["transition_count"] >= int(min_transition_count)].copy()
+    if history.empty:
+        return pd.DataFrame()
+
+    history["rank_up_days"] = history["cleaned_rank_history"].apply(
+        lambda values: int(sum(1 for idx in range(1, len(values)) if values[idx - 1] > values[idx]))
+    )
+    history["rank_down_days"] = history["cleaned_rank_history"].apply(
+        lambda values: int(sum(1 for idx in range(1, len(values)) if values[idx - 1] < values[idx]))
+    )
+    history["net_rank_move"] = history["cleaned_rank_history"].apply(
+        lambda values: float(values[0] - values[-1]) if len(values) >= 2 else np.nan
+    )
+    history["persistence"] = history.apply(
+        lambda row: (
+            f"{int(row['rank_up_days'])}/{int(row['transition_count'])} up days"
+            if int(row.get("rank_up_days", 0)) >= int(row.get("rank_down_days", 0))
+            else f"{int(row['rank_down_days'])}/{int(row['transition_count'])} down days"
+        ),
+        axis=1,
+    )
+
+    merged = current.merge(
+        history[
+            [
+                "theme_id",
+                "rank_history",
+                "rank_up_days",
+                "rank_down_days",
+                "transition_count",
+                "net_rank_move",
+                "persistence",
+            ]
+        ],
+        on="theme_id",
+        how="left",
+    ).copy()
+
+    if direction == "riser":
+        merged = merged[
+            (merged["rank_up_days"] >= int(min_transition_wins))
+            & (merged["net_rank_move"] > 0)
+        ].copy()
+        merged = merged.sort_values(
+            ["rank_up_days", "net_rank_move", "current_rank", "theme"],
+            ascending=[False, False, True, True],
+        )
+    elif direction == "faller":
+        merged = merged[
+            (merged["rank_down_days"] >= int(min_transition_wins))
+            & (merged["net_rank_move"] < 0)
+        ].copy()
+        merged = merged.sort_values(
+            ["rank_down_days", "net_rank_move", "current_rank", "theme"],
+            ascending=[False, True, True, True],
+        )
+    else:
+        raise ValueError(f"Unsupported persistence direction: {direction}")
+
+    if merged.empty:
+        return pd.DataFrame()
+
+    merged["move"] = merged.apply(
+        lambda row: format_rank_history_movement(row.get("rank_history"), row.get("current_rank")),
+        axis=1,
+    )
+    out = merged.head(top_k).copy()
+    return out[
+        [
+            "current_rank",
+            "theme_id",
+            "theme",
+            "category",
+            "move",
+            "persistence",
+            "composite_score",
+        ]
+    ].reset_index(drop=True)
+
+
 def build_current_performance_table(rankings: pd.DataFrame, perf_col: str, top_k: int = 10) -> pd.DataFrame:
     if rankings.empty:
         return pd.DataFrame()
@@ -494,6 +599,10 @@ def build_category_leaderboard(momentum: dict, perf_col: str, top_k: int = 10) -
         return pd.DataFrame(), msg
 
     latest = history.sort_values(["snapshot_time", "theme"]).groupby("theme_id", as_index=False).tail(1)
+    if "is_active" in latest.columns:
+        latest = latest[latest["is_active"] == True].copy()
+    if latest.empty:
+        return pd.DataFrame(), "No active themes available for this window."
     grouped = latest[["theme_id", "theme", "category", perf_col, "positive_1m_breadth_pct"]].merge(
         summary[["theme_id", "momentum_score", "rank_change"]],
         on="theme_id",
@@ -538,6 +647,10 @@ def build_category_theme_breakdown(momentum: dict, perf_col: str) -> tuple[pd.Da
         return pd.DataFrame(), msg
 
     latest = history.sort_values(["snapshot_time", "theme"]).groupby("theme_id", as_index=False).tail(1)
+    if "is_active" in latest.columns:
+        latest = latest[latest["is_active"] == True].copy()
+    if latest.empty:
+        return pd.DataFrame(), "No active themes available for this window."
     breakdown = latest[["theme_id", "theme", "category", perf_col, "positive_1m_breadth_pct"]].merge(
         summary[["theme_id", "momentum_score", "rank_change"]],
         on="theme_id",

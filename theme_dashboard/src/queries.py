@@ -1915,10 +1915,12 @@ def canonical_theme_history_window(conn, lookback_days: int) -> pd.DataFrame:
             theme_id,
             theme,
             category,
+            is_active,
             ticker_count,
             avg_1w,
             avg_1m,
             avg_3m,
+            avg_6m,
             positive_1m_breadth_pct,
             standardized_composite_score AS composite_score,
             snapshot_source,
@@ -2557,7 +2559,7 @@ def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
         )
         SELECT
             ? AS ticker,
-            CAST(m.membership_count > 0 AND COALESCE(ss.manual_suppressed_flag, 0) = 0 AS BOOLEAN) AS exists_in_theme_membership,
+            CAST(m.membership_count > 0 AS BOOLEAN) AS exists_in_theme_membership,
             CAST(s.snapshot_count > 0 AS BOOLEAN) AS exists_in_ticker_snapshots,
             CAST(r.refresh_run_count > 0 AS BOOLEAN) AS exists_in_refresh_run_tickers,
             CAST(ss.symbol_status_count > 0 AS BOOLEAN) AS exists_in_symbol_refresh_status,

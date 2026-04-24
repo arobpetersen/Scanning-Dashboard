@@ -13,6 +13,7 @@ from src.leaderboard_utils import (
     build_category_theme_breakdown,
     build_current_leadership_table,
     build_current_performance_table,
+    build_current_rank_persistence_table,
     build_current_rank_movers_table,
     build_window_leaderboard,
     current_leadership_quality_label,
@@ -68,6 +69,7 @@ from src.theme_selection import (
     SELECTED_THEME_SOURCE_KEY,
     describe_selection_source,
     prepare_replaceable_selectbox_widget_key,
+    ranked_theme_labels_for_search,
     set_theme_selection_state,
     should_apply_selection_token,
 )
@@ -96,6 +98,8 @@ TICKER_COMPOSITE_CHART_TRADING_DAY_LOOKBACK = 140
 TICKER_COMPOSITE_CHART_RAW_SNAPSHOT_LIMIT = 160
 CURRENT_LEADERSHIP_TREND_POINTS = 10
 CURRENT_RANK_MOVER_LOOKBACK_POINTS = 5
+CURRENT_RANK_PERSISTENCE_LOOKBACK_POINTS = 6
+CURRENT_RANK_PERSISTENCE_MIN_WIN_TRANSITIONS = 4
 try:
     init_db()
     with get_conn() as conn:
@@ -640,10 +644,31 @@ def _render_current_rank_movers(
             theme_ids,
             lookback_points=int(lookback_points),
         )
+        persistence_rank_history = canonical_theme_leadership_rank_history(
+            conn,
+            theme_ids,
+            lookback_points=int(CURRENT_RANK_PERSISTENCE_LOOKBACK_POINTS),
+        )
 
     risers = build_current_rank_movers_table(current_rankings, rank_history, direction="riser", top_k=8)
     fallers = build_current_rank_movers_table(current_rankings, rank_history, direction="faller", top_k=8)
-    if risers.empty and fallers.empty:
+    persistent_risers = build_current_rank_persistence_table(
+        current_rankings,
+        persistence_rank_history,
+        direction="riser",
+        top_k=8,
+        min_transition_wins=int(CURRENT_RANK_PERSISTENCE_MIN_WIN_TRANSITIONS),
+        min_transition_count=int(CURRENT_RANK_PERSISTENCE_LOOKBACK_POINTS - 1),
+    )
+    persistent_fallers = build_current_rank_persistence_table(
+        current_rankings,
+        persistence_rank_history,
+        direction="faller",
+        top_k=8,
+        min_transition_wins=int(CURRENT_RANK_PERSISTENCE_MIN_WIN_TRANSITIONS),
+        min_transition_count=int(CURRENT_RANK_PERSISTENCE_LOOKBACK_POINTS - 1),
+    )
+    if risers.empty and fallers.empty and persistent_risers.empty and persistent_fallers.empty:
         return
 
     st.markdown("**Fast Risers / Fast Fallers**")
@@ -681,10 +706,51 @@ def _render_current_rank_movers(
             },
         )
 
+    def _render_persistence_table(title: str, mover_df: pd.DataFrame, key: str) -> None:
+        st.markdown(f"**{title}**")
+        if mover_df.empty:
+            st.info(f"No {title.lower()} for the recent canonical daily path.")
+            return
+        display_df = _display_theme_table(mover_df)
+        visible_df = display_df[
+            ["current_rank", "theme", "category", "move", "persistence", "composite_score"]
+        ].rename(
+            columns={
+                "current_rank": "rank",
+                "composite_score": "composite",
+            }
+        )
+        render_dataframe(
+            key,
+            visible_df,
+            width="stretch",
+            hide_index=True,
+            column_config=_current_table_column_config(
+                list(visible_df.columns),
+                text_columns={"move", "persistence"},
+            ) | {
+                "theme": st.column_config.TextColumn("theme", width="small"),
+                "category": st.column_config.TextColumn("category", width="small"),
+                "move": st.column_config.TextColumn("move", width="small"),
+                "persistence": st.column_config.TextColumn("persistence", width="small"),
+            },
+        )
+
     with col1:
         _render_mover_table("Fast Risers", risers, "fast_risers_table")
     with col2:
         _render_mover_table("Fast Fallers", fallers, "fast_fallers_table")
+
+    st.caption(
+        f"Persistent tables use the last `{int(CURRENT_RANK_PERSISTENCE_LOOKBACK_POINTS)}` available canonical daily dates and require "
+        f"improvement or deterioration on at least `{int(CURRENT_RANK_PERSISTENCE_MIN_WIN_TRANSITIONS)}` of the last "
+        f"`{int(CURRENT_RANK_PERSISTENCE_LOOKBACK_POINTS - 1)}` daily rank transitions, with the net move still in the same direction."
+    )
+    persistent_col1, persistent_col2 = st.columns(2)
+    with persistent_col1:
+        _render_persistence_table("Persistent Risers", persistent_risers, "persistent_risers_table")
+    with persistent_col2:
+        _render_persistence_table("Persistent Fallers", persistent_fallers, "persistent_fallers_table")
 
 
 def _build_ticker_composite_history_chart_df(
@@ -1791,7 +1857,7 @@ with explore_tab:
         selected_theme_id = None
         selected_theme_label = None
 
-    labels = list(options.keys())
+    labels = ranked_theme_labels_for_search(list(options.keys()), "")
     default_theme_index = labels.index(selected_theme_label) if selected_theme_label in labels else None
     selection = labels[default_theme_index] if default_theme_index is not None else None
     picker_col, source_col = st.columns([3.5, 1.5])
@@ -2100,7 +2166,7 @@ with manage_tab:
             st.error(f"Create failed: {exc}")
 
     labels = {f"{r['name']} [{r['id']}]": int(r["id"]) for _, r in themes.iterrows()}
-    manage_theme_options = list(labels.keys())
+    manage_theme_options = ranked_theme_labels_for_search(list(labels.keys()), "")
     next_manage_label = resolve_valid_selectbox_value(st.session_state.get("manage_theme"), manage_theme_options)
     if next_manage_label is not None and st.session_state.get("manage_theme") != next_manage_label:
         st.session_state["manage_theme"] = next_manage_label
@@ -2330,6 +2396,7 @@ with manage_tab:
             }
             selected_theme_ids = set(memberships["theme_id"].astype(int).tolist()) if not memberships.empty else set()
             selected_theme_labels = [label for label, theme_id in theme_options.items() if theme_id in selected_theme_ids]
+            visible_theme_assignment_labels = ranked_theme_labels_for_search(list(theme_options.keys()), "")
             action_label = "Add ticker" if str(row.get("lookup_status")) == "Not found" else "Update ticker"
 
             st.markdown("**Ticker intake / edit**")
@@ -2341,7 +2408,7 @@ with manage_tab:
                 form_ticker = st.text_input("Ticker (required)", value=lookup_ticker)
                 form_theme_labels = st.multiselect(
                     "Theme assignments (required)",
-                    list(theme_options.keys()),
+                    visible_theme_assignment_labels,
                     default=selected_theme_labels,
                 )
                 backfill_recent_history = st.checkbox(

@@ -22,9 +22,7 @@ from src.streamlit_utils import (
     reset_perf_timings,
     stop_for_database_error,
 )
-from src.theme_selection import (
-    set_theme_selection_state,
-)
+from src.theme_selection import set_theme_selection_state
 from src.theme_service import list_themes, seed_if_needed
 
 
@@ -288,6 +286,14 @@ def _build_master_research_grid(
     grid["delta_breadth"] = pd.to_numeric(grid.get("delta_breadth"), errors="coerce")
     grid["momentum_score"] = pd.to_numeric(grid.get("momentum_score"), errors="coerce")
     grid["rank"] = pd.to_numeric(grid.get("rank"), errors="coerce")
+    if "persistent_behavior" in grid.columns:
+        grid["persistent_behavior"] = grid["persistent_behavior"].fillna("").astype(str)
+    else:
+        grid["persistent_behavior"] = ""
+    if "persistent_behavior_reason" in grid.columns:
+        grid["persistent_behavior_reason"] = grid["persistent_behavior_reason"].fillna("").astype(str)
+    else:
+        grid["persistent_behavior_reason"] = ""
     grid = annotate_current_leadership_quality(grid)
     grid["atr_ready"] = grid["comp_atr"].notna()
 
@@ -308,6 +314,8 @@ def _build_master_research_grid(
         "perf_1d",
         "breadth_1m",
         "leadership_quality",
+        "persistent_behavior",
+        "persistent_behavior_reason",
         "start_rank",
         "end_rank",
         "rank_change",
@@ -466,7 +474,6 @@ with fg3:
         key="historical_grid_quality",
         placeholder="All quality labels",
     )
-
 gain_c1, gain_c2, gain_c3 = st.columns(3)
 with gain_c1:
     perf_1w_range = _render_gain_filter(
@@ -492,7 +499,6 @@ with gain_c3:
         default=(-100.0, 300.0),
         key="historical_grid_perf_3m",
     )
-
 with st.expander("Advanced filters", expanded=False):
     st.caption("Exclude category, theme, or leadership-quality slices here without cluttering the main filter row.")
     advanced_c1, advanced_c2, advanced_c3 = st.columns(3)
@@ -589,6 +595,7 @@ render_dataframe(
     },
     key="historical_master_research_grid",
 )
+
 if not filtered_grid.empty:
     open_theme_options = (
         filtered_grid[["theme_id", "theme"]]

@@ -6,9 +6,11 @@ from src.theme_selection import (
     SELECTED_THEME_SOURCE_KEY,
     describe_selection_source,
     prepare_replaceable_selectbox_widget_key,
+    ranked_theme_labels_for_search,
     resolve_theme_selection,
     rotate_replaceable_selectbox_widget,
     set_theme_selection_state,
+    theme_label_search_rank,
     should_apply_selection_token,
 )
 
@@ -50,6 +52,34 @@ class TestThemeSelection(unittest.TestCase):
         self.assertEqual(session_state[SELECTED_THEME_LABEL_KEY], "AI (Tech)")
         self.assertEqual(session_state[SELECTED_THEME_SOURCE_KEY], "historical_table")
 
+    def test_theme_label_search_rank_orders_expected_match_types(self):
+        labels = [
+            "Battery Materials (Lithium)",
+            "Lithium (Materials)",
+            "Alternative Fuels (Energy)",
+            "Lit (Exact)",
+        ]
+
+        ranked = sorted(labels, key=lambda label: theme_label_search_rank(label, "lit"))
+
+        self.assertEqual(ranked[0], "Lit (Exact)")
+        self.assertEqual(ranked[1], "Lithium (Materials)")
+        self.assertEqual(ranked[2], "Battery Materials (Lithium)")
+        self.assertLess(theme_label_search_rank("Battery Materials (Lithium)", "lit"), theme_label_search_rank("Alternative Fuels (Energy)", "lit"))
+
+    def test_ranked_theme_labels_for_search_filters_and_uses_alphabetical_tiebreaks(self):
+        labels = [
+            "Battery Materials (Lithium)",
+            "Lithium (Materials)",
+            "Alternative Fuels (Energy)",
+            "Lithium Miners (Materials)",
+        ]
+
+        ranked = ranked_theme_labels_for_search(labels, "lit")
+
+        self.assertEqual(ranked, ["Lithium (Materials)", "Lithium Miners (Materials)", "Battery Materials (Lithium)"])
+        self.assertNotIn("Alternative Fuels (Energy)", ranked)
+
     def test_prepare_replaceable_selectbox_widget_key_seeds_current_selection(self):
         session_state = {}
 
@@ -75,6 +105,19 @@ class TestThemeSelection(unittest.TestCase):
 
         self.assertEqual(widget_key, "historical_selected_theme__widget__0")
         self.assertEqual(session_state[widget_key], "Energy (Macro)")
+
+    def test_prepare_replaceable_selectbox_widget_key_clears_stale_filtered_value(self):
+        session_state = {"historical_selected_theme__widget__0": "AI (Tech)"}
+
+        widget_key = prepare_replaceable_selectbox_widget_key(
+            session_state,
+            "historical_selected_theme",
+            ["Energy (Macro)"],
+            None,
+        )
+
+        self.assertEqual(widget_key, "historical_selected_theme__widget__0")
+        self.assertNotIn(widget_key, session_state)
 
     def test_rotate_replaceable_selectbox_widget_advances_widget_version(self):
         session_state = {}

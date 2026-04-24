@@ -1703,7 +1703,10 @@ def _finalize_current_rankings(
     score_col: str = "composite_score",
     eligible_count_col: str = "eligible_composite_count",
 ) -> pd.DataFrame:
-    rankings = current[current[eligible_count_col] >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS].copy()
+    rankings = current.copy()
+    if "is_active" in rankings.columns:
+        rankings = rankings[rankings["is_active"] == True].copy()
+    rankings = rankings[rankings[eligible_count_col] >= CURRENT_RANKING_MIN_ELIGIBLE_CONSTITUENTS].copy()
     rankings = rankings.sort_values(
         [score_col, "positive_1m_breadth_pct", eligible_count_col, "theme"],
         ascending=[False, False, False, True],

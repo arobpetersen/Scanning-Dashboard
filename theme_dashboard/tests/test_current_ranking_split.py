@@ -4,6 +4,7 @@ import pandas as pd
 
 from src.rankings import (
     _build_current_ranking_metrics,
+    _finalize_current_rankings,
     _load_current_ranking_constituents,
     compute_current_ranking_operating_snapshot,
     compute_current_ranking_snapshot,
@@ -96,6 +97,39 @@ def test_compute_current_ranking_snapshot_merges_operating_and_validation_views(
         out = compute_current_ranking_snapshot(conn=None)
 
     assert out == {**operating, **validation}
+
+
+def test_finalize_current_rankings_excludes_inactive_theme_from_current_rank_space():
+    current = pd.DataFrame(
+        [
+            {
+                "theme_id": 1,
+                "theme": "Dormant Winner",
+                "category": "Legacy",
+                "is_active": False,
+                "standardized_composite_score": 99.0,
+                "positive_1m_breadth_pct": 100.0,
+                "eligible_standardized_count": 5,
+            },
+            {
+                "theme_id": 2,
+                "theme": "Active Leader",
+                "category": "Growth",
+                "is_active": True,
+                "standardized_composite_score": 10.0,
+                "positive_1m_breadth_pct": 60.0,
+                "eligible_standardized_count": 3,
+            },
+        ]
+    )
+
+    out = _finalize_current_rankings(
+        current,
+        score_col="standardized_composite_score",
+        eligible_count_col="eligible_standardized_count",
+    )
+
+    assert out["theme"].tolist() == ["Active Leader"]
 
 
 def test_load_current_ranking_constituents_uses_operating_atr_helper():

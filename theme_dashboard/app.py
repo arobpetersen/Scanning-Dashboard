@@ -312,7 +312,6 @@ def _render_daily_sync_running_status(container, running_status: dict[str, objec
             stage_completed = int(stage_payload.get("completed") or 0)
             if stage_key == "live_refresh" and stage_total > 0:
                 stage_fraction = min(max(stage_completed / max(stage_total, 1), 0.0), 1.0)
-                st.progress(stage_fraction, text=f"{stage_completed}/{stage_total} tickers")
                 st.caption(f"Live completion: `{stage_fraction * 100:.0f}%`")
             elif stage_key == "historical_append" and str(stage_payload.get("stage_status") or "") == "running":
                 st.caption("Historical append progress: stage-state only until row totals are finalized.")

@@ -14,6 +14,13 @@ METRIC_COLS = [
     "ticker_count",
 ]
 
+PERSISTENCE_RECENT_TRANSITIONS = 4
+PERSISTENCE_MIN_TRANSITIONS = 3
+PERSISTENCE_MIN_TOTAL_RANK_MOVE = 2.0
+PERSISTENCE_BROADENING_MIN_BREADTH_DELTA = 10.0
+PERSISTENCE_NARROW_MAX_BREADTH_DELTA = 5.0
+PERSISTENCE_NARROW_MAX_END_BREADTH = 55.0
+
 
 def _empty_result() -> dict:
     empty = pd.DataFrame()
@@ -78,6 +85,125 @@ def _top_n_membership_changes_from_history(history: pd.DataFrame, top_n: int = 2
     entered = [(end_map[theme_id], theme_id) for theme_id in sorted(end_set - start_set, key=lambda value: (end_map[value], value))]
     dropped = [(start_map[theme_id], theme_id) for theme_id in sorted(start_set - end_set, key=lambda value: (start_map[value], value))]
     return [label for label, _ in entered], [label for label, _ in dropped]
+
+
+def _empty_persistent_behavior_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "theme_id",
+            "persistent_behavior",
+            "persistent_behavior_reason",
+            "persistent_transition_count",
+            "persistent_rank_total",
+            "persistent_composite_total",
+            "persistent_breadth_total",
+        ]
+    )
+
+
+def _compute_persistent_behavior_flags(history: pd.DataFrame) -> pd.DataFrame:
+    if history.empty:
+        return _empty_persistent_behavior_frame()
+
+    working = history.copy().sort_values(["theme_id", "snapshot_time", "theme"])
+    rows: list[dict[str, object]] = []
+    for theme_id, group in working.groupby("theme_id", sort=False):
+        recent = group.tail(PERSISTENCE_RECENT_TRANSITIONS + 1).copy()
+        theme = str(recent.iloc[-1]["theme"]) if not recent.empty else str(theme_id)
+        if len(recent) < PERSISTENCE_MIN_TRANSITIONS + 1:
+            rows.append(
+                {
+                    "theme_id": theme_id,
+                    "persistent_behavior": "",
+                    "persistent_behavior_reason": "",
+                    "persistent_transition_count": max(len(recent) - 1, 0),
+                    "persistent_rank_total": 0.0,
+                    "persistent_composite_total": 0.0,
+                    "persistent_breadth_total": 0.0,
+                }
+            )
+            continue
+
+        comp_deltas = pd.to_numeric(recent["composite_score"], errors="coerce").diff().dropna()
+        breadth_deltas = pd.to_numeric(recent["positive_1m_breadth_pct"], errors="coerce").diff().dropna()
+        rank_deltas = (-pd.to_numeric(recent["rank"], errors="coerce").diff()).dropna()
+        transition_count = int(min(len(comp_deltas), len(breadth_deltas), len(rank_deltas)))
+        if transition_count < PERSISTENCE_MIN_TRANSITIONS:
+            rows.append(
+                {
+                    "theme_id": theme_id,
+                    "persistent_behavior": "",
+                    "persistent_behavior_reason": "",
+                    "persistent_transition_count": transition_count,
+                    "persistent_rank_total": float(rank_deltas.sum()) if not rank_deltas.empty else 0.0,
+                    "persistent_composite_total": float(comp_deltas.sum()) if not comp_deltas.empty else 0.0,
+                    "persistent_breadth_total": float(breadth_deltas.sum()) if not breadth_deltas.empty else 0.0,
+                }
+            )
+            continue
+
+        rank_total = float(rank_deltas.sum())
+        composite_total = float(comp_deltas.sum())
+        breadth_total = float(breadth_deltas.sum())
+        end_breadth = pd.to_numeric(recent["positive_1m_breadth_pct"], errors="coerce").iloc[-1]
+
+        gain_like = bool((comp_deltas > 0).all() and (rank_deltas >= 0).all() and rank_total >= PERSISTENCE_MIN_TOTAL_RANK_MOVE)
+        fade_like = bool((comp_deltas < 0).all() and (rank_deltas <= 0).all() and rank_total <= -PERSISTENCE_MIN_TOTAL_RANK_MOVE)
+        broadening_gain = bool(
+            gain_like
+            and (breadth_deltas > 0).all()
+            and breadth_total >= PERSISTENCE_BROADENING_MIN_BREADTH_DELTA
+        )
+        narrow_move = bool(
+            gain_like
+            and (
+                breadth_total <= PERSISTENCE_NARROW_MAX_BREADTH_DELTA
+                or (pd.notna(end_breadth) and float(end_breadth) <= PERSISTENCE_NARROW_MAX_END_BREADTH)
+            )
+        )
+
+        behavior = ""
+        reason = ""
+        end_breadth_text = f"{float(end_breadth):.1f}%" if pd.notna(end_breadth) else "n/a"
+
+        if broadening_gain:
+            behavior = "Broadening persistence"
+            reason = (
+                f"{theme} improved for {transition_count} straight sessions; rank {rank_total:+.0f}, "
+                f"composite {composite_total:+.2f}, breadth {breadth_total:+.1f} pts."
+            )
+        elif gain_like and not narrow_move:
+            behavior = "Persistent gain"
+            reason = (
+                f"{theme} improved for {transition_count} straight sessions; rank {rank_total:+.0f}, "
+                f"composite {composite_total:+.2f}."
+            )
+        elif fade_like:
+            behavior = "Persistent fade"
+            reason = (
+                f"{theme} weakened for {transition_count} straight sessions; rank {rank_total:+.0f}, "
+                f"composite {composite_total:+.2f}, breadth {breadth_total:+.1f} pts."
+            )
+        elif narrow_move:
+            behavior = "Narrow persistent move"
+            reason = (
+                f"{theme} improved for {transition_count} straight sessions, but breadth confirmation stayed limited "
+                f"({breadth_total:+.1f} pts, end breadth {end_breadth_text})."
+            )
+
+        rows.append(
+            {
+                "theme_id": theme_id,
+                "persistent_behavior": behavior,
+                "persistent_behavior_reason": reason,
+                "persistent_transition_count": transition_count,
+                "persistent_rank_total": rank_total,
+                "persistent_composite_total": composite_total,
+                "persistent_breadth_total": breadth_total,
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 
 def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
@@ -159,6 +285,11 @@ def compute_theme_momentum(conn, lookback_days: int, top_n: int = 20) -> dict:
         + 0.20 * merged["effective_delta_breadth"]
         + 0.10 * merged["rank_change"]
     )
+
+    persistent_flags = _compute_persistent_behavior_flags(history)
+    merged = merged.merge(persistent_flags, on="theme_id", how="left")
+    merged["persistent_behavior"] = merged["persistent_behavior"].fillna("")
+    merged["persistent_behavior_reason"] = merged["persistent_behavior_reason"].fillna("")
 
     merged = merged.round(2)
 

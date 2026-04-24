@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 
 SELECTED_THEME_ID_KEY = "selected_theme_id"
 SELECTED_THEME_LABEL_KEY = "explore_theme"
@@ -55,12 +57,51 @@ def set_theme_selection_state(session_state, theme_id: int, label: str, source: 
     session_state[SELECTED_THEME_SOURCE_KEY] = str(source)
 
 
+def _normalized_search_text(value: object) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _significant_label_tokens(label: str) -> list[str]:
+    return [token for token in re.findall(r"[A-Za-z0-9]+", str(label).casefold()) if len(token) >= 3]
+
+
+def _primary_label_text(label: str) -> str:
+    return re.split(r"\s*[\(\[]", str(label), maxsplit=1)[0].strip().casefold()
+
+
+def theme_label_search_rank(label: str, query: str) -> tuple[int, str]:
+    normalized_label = _normalized_search_text(label)
+    primary_label = _primary_label_text(label)
+    normalized_query = _normalized_search_text(query)
+    if not normalized_query:
+        return 0, normalized_label
+    if normalized_label == normalized_query or primary_label == normalized_query:
+        return 0, normalized_label
+    if normalized_label.startswith(normalized_query) or primary_label.startswith(normalized_query):
+        return 1, normalized_label
+    if any(token.startswith(normalized_query) for token in _significant_label_tokens(label)):
+        return 2, normalized_label
+    if normalized_query in normalized_label:
+        return 3, normalized_label
+    return 4, normalized_label
+
+
+def ranked_theme_labels_for_search(labels: list[str], query: str) -> list[str]:
+    normalized_query = _normalized_search_text(query)
+    ranked_labels = sorted(labels, key=lambda label: theme_label_search_rank(label, normalized_query))
+    if not normalized_query:
+        return ranked_labels
+    return [label for label in ranked_labels if theme_label_search_rank(label, normalized_query)[0] < 4]
+
+
 def prepare_replaceable_selectbox_widget_key(session_state, base_key: str, options: list[str], current_value: str | None) -> str:
     version_key = f"{base_key}__widget_version"
     widget_key = f"{base_key}__widget__{int(session_state.get(version_key, 0))}"
     current_label = str(current_value or "")
     if current_label in options and session_state.get(widget_key) != current_label:
         session_state[widget_key] = current_label
+    elif session_state.get(widget_key) not in {None, *options}:
+        session_state.pop(widget_key, None)
     return widget_key
 
 

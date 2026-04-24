@@ -10,7 +10,13 @@ from typing import Callable, Iterable
 import duckdb
 import pandas as pd
 
-from .config import LIVE_FETCH_REFERENCE_ON_REFRESH, LIVE_RATE_LIMIT_STOP_THRESHOLD, REFRESH_STALE_TIMEOUT_MINUTES
+from .config import (
+    LIVE_FETCH_REFERENCE_ON_REFRESH,
+    LIVE_RATE_LIMIT_STOP_THRESHOLD,
+    REFRESH_PROGRESS_CALLBACK_INTERVAL_TICKERS,
+    REFRESH_PROGRESS_DB_UPDATE_INTERVAL_TICKERS,
+    REFRESH_STALE_TIMEOUT_MINUTES,
+)
 from .failure_classification import categorize_failure_message
 from .provider_live import LiveProvider
 from .provider_mock import MockProvider
@@ -180,6 +186,27 @@ def _refresh_trace_enabled(ticker: str | None) -> bool:
     return bool(TRACE_REFRESH_TICKER) and str(ticker or "").strip().upper() == TRACE_REFRESH_TICKER
 
 
+def _progress_update_due(index: int, total: int, interval: int) -> bool:
+    cadence = max(int(interval or 1), 1)
+    return index == 1 or index >= total or index % cadence == 0
+
+
+def _load_prior_market_caps(conn, tickers: list[str]) -> pd.DataFrame:
+    if not tickers:
+        return pd.DataFrame(columns=["ticker", "market_cap"])
+    placeholders = ",".join(["?"] * len(tickers))
+    return conn.execute(
+        f"""
+        SELECT upper(trim(ticker)) AS ticker, market_cap
+        FROM ticker_snapshots
+        WHERE market_cap IS NOT NULL
+          AND upper(trim(ticker)) IN ({placeholders})
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY upper(trim(ticker)) ORDER BY run_id DESC) = 1
+        """,
+        tickers,
+    ).df()
+
+
 def run_refresh(
     conn,
     provider_name: str,
@@ -227,8 +254,19 @@ def run_refresh(
         [provider.name, _utc_now_naive(), len(clean_tickers), scope_type, scope_theme_name],
     ).fetchone()[0]
 
-    for ticker in clean_tickers:
-        conn.execute("INSERT INTO refresh_run_tickers(run_id, ticker) VALUES (?, ?)", [run_id, ticker])
+    if clean_tickers:
+        run_tickers = pd.DataFrame({"run_id": [int(run_id)] * len(clean_tickers), "ticker": clean_tickers})
+        conn.register("incoming_refresh_run_tickers", run_tickers)
+        try:
+            conn.execute(
+                """
+                INSERT INTO refresh_run_tickers(run_id, ticker)
+                SELECT run_id, ticker
+                FROM incoming_refresh_run_tickers
+                """
+            )
+        finally:
+            conn.unregister("incoming_refresh_run_tickers")
 
     success_count = 0
     failure_count = 0
@@ -278,6 +316,7 @@ def run_refresh(
                 )
             return run_id
 
+        prior_market_caps = _load_prior_market_caps(conn, clean_tickers)
         for idx, ticker in enumerate(eligible_tickers, start=1):
             if _refresh_trace_enabled(ticker):
                 logger.warning(
@@ -297,23 +336,19 @@ def run_refresh(
 
             if not df.empty:
                 payload = df.copy()
-                if "market_cap" in payload.columns and payload["market_cap"].isna().any():
-                    prior_caps = conn.execute(
-                        """
-                        SELECT ticker, market_cap
-                        FROM ticker_snapshots
-                        WHERE market_cap IS NOT NULL
-                        QUALIFY ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY run_id DESC) = 1
-                        """
-                    ).df()
-                    if not prior_caps.empty:
-                        payload = payload.merge(prior_caps, on="ticker", how="left", suffixes=("", "_prev"))
-                        if "market_cap_prev" in payload.columns:
-                            payload["market_cap"] = payload["market_cap"].where(
-                                payload["market_cap"].notna(),
-                                payload["market_cap_prev"],
-                            )
-                        payload = payload.drop(columns=["market_cap_prev"], errors="ignore")
+                if "ticker" in payload.columns:
+                    payload["ticker"] = payload["ticker"].astype(str).str.strip().str.upper()
+                for optional_col in ("perf_1d", "perf_6m"):
+                    if optional_col not in payload.columns:
+                        payload[optional_col] = None
+                if "market_cap" in payload.columns and payload["market_cap"].isna().any() and not prior_market_caps.empty:
+                    payload = payload.merge(prior_market_caps, on="ticker", how="left", suffixes=("", "_prev"))
+                    if "market_cap_prev" in payload.columns:
+                        payload["market_cap"] = payload["market_cap"].where(
+                            payload["market_cap"].notna(),
+                            payload["market_cap_prev"],
+                        )
+                    payload = payload.drop(columns=["market_cap_prev"], errors="ignore")
                 payload["run_id"] = run_id
                 conn.register("incoming_snapshots", payload)
                 conn.execute(
@@ -366,17 +401,18 @@ def run_refresh(
                 else:
                     consecutive_rate_limit_failures = 0
 
-            progress_note = f"Progress {idx}/{len(eligible_tickers)} | success={success_count} | failures={failure_count}"
-            conn.execute(
-                """
-                UPDATE refresh_runs
-                SET success_count = ?, failure_count = ?, error_message = ?
-                WHERE run_id = ?
-                """,
-                [success_count, failure_count, progress_note, run_id],
-            )
+            if _progress_update_due(idx, len(eligible_tickers), REFRESH_PROGRESS_DB_UPDATE_INTERVAL_TICKERS):
+                progress_note = f"Progress {idx}/{len(eligible_tickers)} | success={success_count} | failures={failure_count}"
+                conn.execute(
+                    """
+                    UPDATE refresh_runs
+                    SET success_count = ?, failure_count = ?, error_message = ?
+                    WHERE run_id = ?
+                    """,
+                    [success_count, failure_count, progress_note, run_id],
+                )
 
-            if progress_callback:
+            if progress_callback and _progress_update_due(idx, len(eligible_tickers), REFRESH_PROGRESS_CALLBACK_INTERVAL_TICKERS):
                 accounting = provider.get_call_accounting() if hasattr(provider, "get_call_accounting") else {"api_call_count": 0, "endpoint_counts": {}}
                 progress_callback(
                     {

@@ -1296,13 +1296,17 @@ if active_suggestions_tab == "Scanner Audit":
                     else:
                         st.info("No strong existing governed-theme match was suggested from the available context.")
 
-                    selected_existing_theme_ids = st.multiselect(
-                        "Selected existing themes",
-                        options=sorted(all_theme_ids),
-                        format_func=lambda theme_id: (
+                    theme_label_by_option_id = {
+                        int(theme_id): (
                             f"{theme_option_by_id[int(theme_id)]['name']} [{int(theme_id)}]"
                             + (" (suggested)" if int(theme_id) in set(suggested_theme_ids) else "")
-                        ),
+                        )
+                        for theme_id in all_theme_ids
+                    }
+                    selected_existing_theme_ids = st.multiselect(
+                        "Selected existing themes",
+                        options=sorted(all_theme_ids, key=lambda theme_id: theme_label_by_option_id[int(theme_id)].casefold()),
+                        format_func=lambda theme_id: theme_label_by_option_id[int(theme_id)],
                         key=selected_existing_key,
                     )
                     selected_suggested_theme_ids, custom_existing_theme_ids = split_selected_existing_theme_ids(

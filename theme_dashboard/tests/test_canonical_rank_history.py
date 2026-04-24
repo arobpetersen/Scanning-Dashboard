@@ -5,6 +5,7 @@ import duckdb
 from src.database import SCHEMA_SQL
 from src.momentum_engine import compute_theme_momentum
 from src.queries import (
+    canonical_theme_history_window,
     canonical_theme_snapshot_counts,
     canonical_theme_leadership_rank_history,
     canonical_theme_leadership_rank_history_long,
@@ -173,6 +174,77 @@ class TestCanonicalRankHistory(unittest.TestCase):
             out = compute_theme_momentum(conn, 30, top_n=5)
             self.assertFalse(out["history"].empty)
             self.assertNotIn("canonical_daily", out["history"]["provenance_class"].dropna().astype(str).tolist())
+        finally:
+            conn.close()
+
+    def test_compute_theme_momentum_adds_persistent_behavior_flags(self):
+        conn = self._build_conn()
+        try:
+            conn.execute(
+                """
+                insert into canonical_theme_daily_snapshots(
+                    snapshot_date, snapshot_time, run_id, theme_id, theme, category, is_active,
+                    snapshot_source, extract_session, is_canonical_daily, canonical_reason,
+                    ticker_count, eligible_ticker_count, eligible_1w_count, eligible_1m_count,
+                    eligible_3m_count, eligible_composite_count, eligible_standardized_count,
+                    eligible_momentum_count, eligible_breadth_pct, avg_1w, avg_1m, avg_3m,
+                    positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                    legacy_composite_score, standardized_base_strength_score, standardized_participation_ratio,
+                    standardized_participation_factor, standardized_guardrail_factor,
+                    standardized_recovery_factor, standardized_composite_score,
+                    current_momentum_raw_score, current_momentum_quality_factor,
+                    current_momentum_score, canonical_rank
+                ) values
+                ('2026-04-10', '2026-04-10 22:00:00', 1, 101, 'Alpha', 'Compute', true, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 7, 7, 7, 100, 40, 40, 7, 7, 1, 1, 1, 1, 7, 7, 1, 7, 4),
+                ('2026-04-10', '2026-04-10 22:00:00', 1, 102, 'Beta', 'Compute', true, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 6, 6, 6, 100, 40, 40, 6, 6, 1, 1, 1, 1, 6, 6, 1, 6, 3),
+                ('2026-04-10', '2026-04-10 22:00:00', 1, 103, 'Gamma', 'Compute', true, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 9, 9, 9, 100, 60, 60, 9, 9, 1, 1, 1, 1, 9, 9, 1, 9, 2),
+                ('2026-04-11', '2026-04-11 22:00:00', 2, 101, 'Alpha', 'Compute', true, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 8, 8, 8, 100, 50, 50, 8, 8, 1, 1, 1, 1, 8, 8, 1, 8, 3),
+                ('2026-04-11', '2026-04-11 22:00:00', 2, 102, 'Beta', 'Compute', true, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 7, 7, 7, 100, 42, 42, 7, 7, 1, 1, 1, 1, 7, 7, 1, 7, 2),
+                ('2026-04-11', '2026-04-11 22:00:00', 2, 103, 'Gamma', 'Compute', true, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 8, 8, 8, 100, 55, 55, 8, 8, 1, 1, 1, 1, 8, 8, 1, 8, 4),
+                ('2026-04-12', '2026-04-12 22:00:00', 3, 101, 'Alpha', 'Compute', true, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 9, 9, 9, 100, 60, 60, 9, 9, 1, 1, 1, 1, 9, 9, 1, 9, 2),
+                ('2026-04-12', '2026-04-12 22:00:00', 3, 102, 'Beta', 'Compute', true, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 8, 8, 8, 100, 43, 43, 8, 8, 1, 1, 1, 1, 8, 8, 1, 8, 1),
+                ('2026-04-12', '2026-04-12 22:00:00', 3, 103, 'Gamma', 'Compute', true, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 7, 7, 7, 100, 50, 50, 7, 7, 1, 1, 1, 1, 7, 7, 1, 7, 5),
+                ('2026-04-13', '2026-04-13 22:00:00', 4, 101, 'Alpha', 'Compute', true, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 10, 10, 10, 100, 70, 70, 10, 10, 1, 1, 1, 1, 10, 10, 1, 10, 1),
+                ('2026-04-13', '2026-04-13 22:00:00', 4, 102, 'Beta', 'Compute', true, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 9, 9, 9, 100, 44, 44, 9, 9, 1, 1, 1, 1, 9, 9, 1, 9, 1),
+                ('2026-04-13', '2026-04-13 22:00:00', 4, 103, 'Gamma', 'Compute', true, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 6, 6, 6, 100, 45, 45, 6, 6, 1, 1, 1, 1, 6, 6, 1, 6, 6)
+                """
+            )
+            out = compute_theme_momentum(conn, 7, top_n=3)
+            summary = out["window_summary"].set_index("theme")
+            self.assertEqual(summary.loc["Alpha", "persistent_behavior"], "Broadening persistence")
+            self.assertEqual(summary.loc["Beta", "persistent_behavior"], "Narrow persistent move")
+            self.assertEqual(summary.loc["Gamma", "persistent_behavior"], "Persistent fade")
+            self.assertIn("straight sessions", summary.loc["Alpha", "persistent_behavior_reason"])
+            self.assertAlmostEqual(float(summary.loc["Alpha", "persistent_breadth_total"]), 30.0, places=2)
+            self.assertAlmostEqual(float(summary.loc["Beta", "persistent_breadth_total"]), 4.0, places=2)
+            self.assertAlmostEqual(float(summary.loc["Gamma", "persistent_rank_total"]), -4.0, places=2)
+        finally:
+            conn.close()
+
+    def test_canonical_theme_history_window_carries_avg_6m_and_is_active(self):
+        conn = self._build_conn()
+        try:
+            conn.execute(
+                """
+                insert into canonical_theme_daily_snapshots(
+                    snapshot_date, snapshot_time, run_id, theme_id, theme, category, is_active,
+                    snapshot_source, extract_session, is_canonical_daily, canonical_reason,
+                    ticker_count, eligible_ticker_count, eligible_1w_count, eligible_1m_count,
+                    eligible_3m_count, eligible_composite_count, eligible_standardized_count,
+                    eligible_momentum_count, eligible_breadth_pct, avg_1w, avg_1m, avg_3m, avg_6m,
+                    positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
+                    legacy_composite_score, standardized_base_strength_score, standardized_participation_ratio,
+                    standardized_participation_factor, standardized_guardrail_factor,
+                    standardized_recovery_factor, standardized_composite_score,
+                    current_momentum_raw_score, current_momentum_quality_factor,
+                    current_momentum_score, canonical_rank
+                ) values
+                ('2026-04-10', '2026-04-10 22:00:00', 1, 101, 'Alpha', 'Compute', false, 'live', 'after_hours_official', true, 'scheduled_eod_refresh', 4, 4, 4, 4, 4, 4, 4, 4, 100, 7, 8, 9, 10, 100, 100, 100, 7, 7, 1, 1, 1, 1, 7, 7, 1, 7, 1)
+                """
+            )
+            out = canonical_theme_history_window(conn, 7)
+            self.assertEqual(float(out.iloc[0]["avg_6m"]), 10.0)
+            self.assertFalse(bool(out.iloc[0]["is_active"]))
         finally:
             conn.close()
 
