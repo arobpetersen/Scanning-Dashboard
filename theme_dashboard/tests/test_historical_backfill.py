@@ -5,6 +5,7 @@ import duckdb
 import pandas as pd
 
 from src.database import SCHEMA_SQL
+from src import historical_backfill as historical_backfill_module
 from src.historical_backfill import rebuild_recent_reconstructed_history, reconstruct_theme_history_range
 from src.fetch_data import run_targeted_current_snapshot_hydration
 from src.momentum_engine import compute_theme_momentum
@@ -1022,6 +1023,81 @@ class TestHistoricalBackfill(unittest.TestCase):
         self.assertGreaterEqual(int(run_row[2]), 1)
         self.assertGreaterEqual(int(run_row[3]), 1)
         self.assertEqual(written_tickers, [("GOOD",)])
+        conn.close()
+
+    def test_daily_historical_append_scope_currently_includes_inactive_theme_only_tickers(self):
+        conn = self._conn()
+        conn.execute("insert into themes(id, name, category, is_active) values (1, 'Biotech', 'Health', true)")
+        conn.execute("insert into themes(id, name, category, is_active) values (2, 'Dormant', 'Legacy', false)")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (1, 'GOOD')")
+        conn.execute("insert into theme_membership(theme_id, ticker) values (2, 'DORM')")
+
+        result = reconstruct_theme_history_range(
+            conn,
+            provider_name="mock",
+            start_date="2026-02-10",
+            end_date="2026-02-10",
+            provenance_source_label="daily_historical_append",
+            run_kind="daily_historical_append",
+            replace_existing=True,
+        )
+        run_row = conn.execute(
+            """
+            select ticker_count, theme_count
+            from historical_reconstruction_runs
+            where run_id = ?
+            """,
+            [int(result["run_id"])],
+        ).fetchone()
+        written_tickers = conn.execute(
+            """
+            select distinct ticker
+            from ticker_daily_history
+            where run_id = ?
+            order by ticker
+            """,
+            [int(result["run_id"])],
+        ).fetchall()
+
+        self.assertEqual(str(result["status"]), "success")
+        self.assertEqual(int(run_row[0]), 2)
+        self.assertEqual(int(run_row[1]), 2)
+        self.assertEqual(written_tickers, [("DORM",), ("GOOD",)])
+        conn.close()
+
+    def test_historical_append_throttles_ticker_progress_updates(self):
+        conn = self._conn()
+        for theme_id, ticker in enumerate(["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"], start=1):
+            conn.execute(
+                "insert into themes(id, name, category, is_active) values (?, ?, 'Test', true)",
+                [theme_id, f"Theme {theme_id}"],
+            )
+            conn.execute("insert into theme_membership(theme_id, ticker) values (?, ?)", [theme_id, ticker])
+
+        with patch("src.historical_backfill.HISTORICAL_APPEND_PROGRESS_DB_UPDATE_INTERVAL_TICKERS", 5), patch(
+            "src.historical_backfill._update_reconstruction_run_progress",
+            wraps=historical_backfill_module._update_reconstruction_run_progress,
+        ) as progress_updates:
+            result = reconstruct_theme_history_range(
+                conn,
+                provider_name="mock",
+                start_date="2026-02-10",
+                end_date="2026-02-10",
+                provenance_source_label="daily_historical_append",
+                run_kind="daily_historical_append",
+                replace_existing=True,
+            )
+
+        ticker_progress_calls = [
+            call
+            for call in progress_updates.call_args_list
+            if "ticker_history_rows_written" in call.kwargs
+            and "ticker_count" not in call.kwargs
+            and "snapshot_rows_written" not in call.kwargs
+        ]
+
+        self.assertEqual(str(result["status"]), "success")
+        self.assertEqual(len(ticker_progress_calls), 3)
         conn.close()
 
     def test_targeted_recent_rebuild_replaces_only_reconstructed_rows_in_scope(self):

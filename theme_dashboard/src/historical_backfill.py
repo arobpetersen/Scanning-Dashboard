@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 
+from .config import HISTORICAL_APPEND_PROGRESS_DB_UPDATE_INTERVAL_TICKERS
 from .fetch_data import get_provider
 from .db_introspection import table_exists, table_has_column
 from .rankings import _compute_theme_metrics
@@ -11,6 +12,14 @@ from .ticker_history import persist_ticker_daily_history
 
 HISTORICAL_LOOKBACK_BUFFER_DAYS = 220
 SUPPRESSION_REBUILD_LOOKBACK_DAYS = 45
+
+
+def _progress_update_due(index: int, total: int, interval: int) -> bool:
+    if total <= 0:
+        return False
+    if index <= 1 or index >= total:
+        return True
+    return int(interval) > 0 and index % int(interval) == 0
 
 
 def _suppressed_ticker_filter_sql(conn, ticker_expr: str) -> str:
@@ -175,6 +184,101 @@ def _update_reconstruction_run_progress(conn, run_id: int, **fields) -> None:
     )
 
 
+def _persist_reconstructed_theme_metrics(
+    conn,
+    metrics: pd.DataFrame,
+    *,
+    provenance_source_label: str,
+    replace_existing: bool,
+) -> tuple[int, int]:
+    if metrics.empty:
+        return 0, 0
+
+    insert_columns = [
+        "run_id",
+        "snapshot_date",
+        "snapshot_time",
+        "theme_id",
+        "ticker_count",
+        "avg_1w",
+        "avg_1m",
+        "avg_3m",
+        "avg_6m",
+        "positive_1w_breadth_pct",
+        "positive_1m_breadth_pct",
+        "positive_3m_breadth_pct",
+        "composite_score",
+        "provenance_class",
+        "provenance_source_label",
+        "market_data_source",
+        "membership_basis",
+    ]
+    incoming = metrics[insert_columns].copy()
+    incoming["theme_id"] = incoming["theme_id"].astype(int)
+    snapshot_date = incoming["snapshot_date"].iloc[0]
+    theme_ids = incoming["theme_id"].dropna().astype(int).unique().tolist()
+    if not theme_ids:
+        return 0, 0
+
+    placeholders = ", ".join(["?"] * len(theme_ids))
+    existing_count = int(
+        conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM reconstructed_theme_snapshots
+            WHERE snapshot_date = ?
+              AND provenance_source_label = ?
+              AND theme_id IN ({placeholders})
+            """,
+            [snapshot_date, provenance_source_label, *theme_ids],
+        ).fetchone()[0]
+        or 0
+    )
+
+    conn.register("incoming_reconstructed_theme_metrics", incoming)
+    quoted_columns = ", ".join(insert_columns)
+    selected_columns = ", ".join(f"i.{column}" for column in insert_columns)
+    try:
+        if replace_existing:
+            conn.execute(
+                f"""
+                DELETE FROM reconstructed_theme_snapshots
+                WHERE snapshot_date = ?
+                  AND provenance_source_label = ?
+                  AND theme_id IN ({placeholders})
+                """,
+                [snapshot_date, provenance_source_label, *theme_ids],
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO reconstructed_theme_snapshots({quoted_columns})
+                SELECT {selected_columns}
+                FROM incoming_reconstructed_theme_metrics i
+                RETURNING theme_id
+                """
+            ).fetchall()
+            return len(inserted), 0
+
+        inserted = conn.execute(
+            f"""
+            INSERT INTO reconstructed_theme_snapshots({quoted_columns})
+            SELECT {selected_columns}
+            FROM incoming_reconstructed_theme_metrics i
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM reconstructed_theme_snapshots existing
+                WHERE existing.snapshot_date = i.snapshot_date
+                  AND existing.theme_id = i.theme_id
+                  AND existing.provenance_source_label = i.provenance_source_label
+            )
+            RETURNING theme_id
+            """
+        ).fetchall()
+        return len(inserted), existing_count
+    finally:
+        conn.unregister("incoming_reconstructed_theme_metrics")
+
+
 def reconstruct_theme_history_range(
     conn,
     *,
@@ -239,7 +343,8 @@ def reconstruct_theme_history_range(
     )
 
     try:
-        for ticker in scoped_tickers:
+        total_tickers = len(scoped_tickers)
+        for ticker_index, ticker in enumerate(scoped_tickers, start=1):
             try:
                 history = provider.fetch_ticker_history_range(ticker, fetch_start, requested_end)
                 if history.empty:
@@ -260,13 +365,18 @@ def reconstruct_theme_history_range(
                 ticker_history_frames.append(history)
             except Exception:
                 failed_tickers.append(ticker)
-            _update_reconstruction_run_progress(
-                conn,
-                run_id,
-                ticker_history_rows_written=ticker_history_rows_written,
-                ticker_history_rows_skipped=ticker_history_rows_skipped,
-                failed_tickers=",".join(failed_tickers) if failed_tickers else None,
-            )
+            if _progress_update_due(
+                ticker_index,
+                total_tickers,
+                HISTORICAL_APPEND_PROGRESS_DB_UPDATE_INTERVAL_TICKERS,
+            ):
+                _update_reconstruction_run_progress(
+                    conn,
+                    run_id,
+                    ticker_history_rows_written=ticker_history_rows_written,
+                    ticker_history_rows_skipped=ticker_history_rows_skipped,
+                    failed_tickers=",".join(failed_tickers) if failed_tickers else None,
+                )
 
         history_df = pd.concat(ticker_history_frames, ignore_index=True) if ticker_history_frames else pd.DataFrame()
         perf_df = _compute_daily_perf(history_df, requested_start, requested_end)
@@ -329,59 +439,14 @@ def reconstruct_theme_history_range(
             metrics["market_data_source"] = provider.name
             metrics["membership_basis"] = "current_governed_membership"
 
-            for row in metrics.itertuples(index=False):
-                exists = conn.execute(
-                    """
-                    SELECT 1
-                    FROM reconstructed_theme_snapshots
-                    WHERE snapshot_date = ? AND theme_id = ? AND provenance_source_label = ?
-                    LIMIT 1
-                    """,
-                    [row.snapshot_date, int(row.theme_id), provenance_source_label],
-                ).fetchone()
-                if exists and not replace_existing:
-                    rows_skipped += 1
-                    continue
-                if exists and replace_existing:
-                    conn.execute(
-                        """
-                        DELETE FROM reconstructed_theme_snapshots
-                        WHERE snapshot_date = ? AND theme_id = ? AND provenance_source_label = ?
-                        """,
-                        [row.snapshot_date, int(row.theme_id), provenance_source_label],
-                    )
-
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO reconstructed_theme_snapshots(
-                        run_id, snapshot_date, snapshot_time, theme_id, ticker_count,
-                        avg_1w, avg_1m, avg_3m, avg_6m,
-                        positive_1w_breadth_pct, positive_1m_breadth_pct, positive_3m_breadth_pct,
-                        composite_score, provenance_class, provenance_source_label, market_data_source, membership_basis
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        int(row.run_id),
-                        row.snapshot_date,
-                        row.snapshot_time,
-                        int(row.theme_id),
-                        int(row.ticker_count),
-                        row.avg_1w,
-                        row.avg_1m,
-                        row.avg_3m,
-                        row.avg_6m,
-                        row.positive_1w_breadth_pct,
-                        row.positive_1m_breadth_pct,
-                        row.positive_3m_breadth_pct,
-                        row.composite_score,
-                        row.provenance_class,
-                        row.provenance_source_label,
-                        row.market_data_source,
-                        row.membership_basis,
-                    ],
-                )
-                rows_written += 1
+            written, skipped = _persist_reconstructed_theme_metrics(
+                conn,
+                metrics,
+                provenance_source_label=provenance_source_label,
+                replace_existing=replace_existing,
+            )
+            rows_written += int(written)
+            rows_skipped += int(skipped)
             _update_reconstruction_run_progress(
                 conn,
                 run_id,
