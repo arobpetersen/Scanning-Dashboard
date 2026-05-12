@@ -8,6 +8,7 @@ import streamlit as st
 
 from .database import DB_PATH, DatabaseLockedError, database_path_str, get_conn, get_fresh_read_conn
 from .inflection_engine import compute_theme_inflections
+from .leaderboard_utils import build_top_governed_ticker_leaders
 from .momentum_engine import compute_theme_momentum
 from .queries import theme_health_overview
 from .rankings import (
@@ -285,6 +286,7 @@ def clear_current_market_view_caches() -> None:
     _load_current_ranking_snapshot_cached.clear()
     _load_current_ranking_operating_snapshot_cached.clear()
     _load_current_ranking_validation_snapshot_cached.clear()
+    _load_ticker_leadership_cached.clear()
     _load_theme_rankings_cached.clear()
     _load_theme_momentum_cached.clear()
     _load_theme_inflections_cached.clear()
@@ -299,6 +301,16 @@ def _load_theme_rankings_cached(_db_token: tuple[str, int]):
 
 def load_theme_rankings_cached(db_token: tuple[str, int]):
     return _timed_cached_load("theme_rankings", _load_theme_rankings_cached, db_token)
+
+
+@st.cache_data(show_spinner=False)
+def _load_ticker_leadership_cached(_db_token: tuple[str, int], window: str, sort_by: str, top_k: int):
+    with get_conn() as conn:
+        return build_top_governed_ticker_leaders(conn, window=str(window), sort_by=str(sort_by), top_k=int(top_k))
+
+
+def load_ticker_leadership_cached(db_token: tuple[str, int], window: str, sort_by: str, top_k: int = 25):
+    return _timed_cached_load("ticker_leadership", _load_ticker_leadership_cached, db_token, str(window), str(sort_by), int(top_k))
 
 
 @st.cache_data(show_spinner=False)

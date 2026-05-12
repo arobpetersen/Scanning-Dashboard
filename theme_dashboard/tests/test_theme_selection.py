@@ -4,8 +4,11 @@ from src.theme_selection import (
     SELECTED_THEME_ID_KEY,
     SELECTED_THEME_LABEL_KEY,
     SELECTED_THEME_SOURCE_KEY,
+    build_theme_option_maps,
+    build_theme_picker_options,
     describe_selection_source,
     prepare_replaceable_selectbox_widget_key,
+    ranked_theme_picker_options,
     ranked_theme_labels_for_search,
     resolve_theme_selection,
     rotate_replaceable_selectbox_widget,
@@ -80,6 +83,56 @@ class TestThemeSelection(unittest.TestCase):
         self.assertEqual(ranked, ["Lithium (Materials)", "Lithium Miners (Materials)", "Battery Materials (Lithium)"])
         self.assertNotIn("Alternative Fuels (Energy)", ranked)
 
+    def test_build_theme_picker_options_sorts_by_name_category_id_and_disambiguates(self):
+        themes = [
+            {"id": 7, "name": "AI", "category": "Software"},
+            {"id": 3, "name": "AI", "category": "Hardware"},
+            {"id": 2, "name": "Energy", "category": "Macro"},
+            {"id": 9, "name": "AI", "category": "Hardware"},
+        ]
+
+        options = build_theme_picker_options(themes)
+
+        self.assertEqual(
+            [(option.theme_id, option.label) for option in options],
+            [
+                (3, "AI (Hardware) [#3]"),
+                (9, "AI (Hardware) [#9]"),
+                (7, "AI (Software)"),
+                (2, "Energy (Macro)"),
+            ],
+        )
+
+    def test_build_theme_option_maps_preserves_label_identity(self):
+        themes = [
+            {"id": 2, "name": "Energy", "category": "Macro"},
+            {"id": 1, "name": "AI", "category": "Software"},
+        ]
+
+        options, label_by_id, id_by_label = build_theme_option_maps(themes)
+
+        self.assertEqual(list(options.keys()), ["AI (Software)", "Energy (Macro)"])
+        self.assertEqual(label_by_id[1], "AI (Software)")
+        self.assertEqual(id_by_label["Energy (Macro)"], 2)
+
+    def test_ranked_theme_picker_options_orders_exact_starts_contains_then_alpha(self):
+        options = build_theme_picker_options(
+            [
+                {"id": 4, "name": "Battery Materials", "category": "Lithium"},
+                {"id": 3, "name": "Lithium", "category": "Materials"},
+                {"id": 2, "name": "Lithium Miners", "category": "Materials"},
+                {"id": 1, "name": "Alternative Fuels", "category": "Energy"},
+            ]
+        )
+
+        ranked = ranked_theme_picker_options(options, "lithium")
+
+        self.assertEqual(
+            [option.label for option in ranked],
+            ["Lithium (Materials)", "Lithium Miners (Materials)", "Battery Materials (Lithium)"],
+        )
+        self.assertNotIn("Alternative Fuels (Energy)", [option.label for option in ranked])
+
     def test_prepare_replaceable_selectbox_widget_key_seeds_current_selection(self):
         session_state = {}
 
@@ -105,6 +158,20 @@ class TestThemeSelection(unittest.TestCase):
 
         self.assertEqual(widget_key, "historical_selected_theme__widget__0")
         self.assertEqual(session_state[widget_key], "Energy (Macro)")
+
+    def test_prepare_replaceable_selectbox_widget_key_can_preserve_valid_user_widget_value(self):
+        session_state = {"historical_selected_theme__widget__0": "AI (Tech)"}
+
+        widget_key = prepare_replaceable_selectbox_widget_key(
+            session_state,
+            "historical_selected_theme",
+            ["AI (Tech)", "Energy (Macro)"],
+            "Energy (Macro)",
+            preserve_valid_widget_value=True,
+        )
+
+        self.assertEqual(widget_key, "historical_selected_theme__widget__0")
+        self.assertEqual(session_state[widget_key], "AI (Tech)")
 
     def test_prepare_replaceable_selectbox_widget_key_clears_stale_filtered_value(self):
         session_state = {"historical_selected_theme__widget__0": "AI (Tech)"}

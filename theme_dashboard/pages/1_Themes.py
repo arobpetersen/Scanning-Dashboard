@@ -12,9 +12,13 @@ from src.leaderboard_utils import (
     build_category_leaderboard,
     build_category_theme_breakdown,
     build_current_leadership_table,
+    build_market_theme_snapshot_table,
+    build_theme_anomaly_snapshot_table,
     build_current_performance_table,
     build_current_rank_persistence_table,
     build_current_rank_movers_table,
+    build_theme_ticker_standout_table,
+    build_top_theme_baseline_snapshot,
     build_window_leaderboard,
     current_leadership_quality_label,
     disambiguate_theme_labels,
@@ -24,10 +28,12 @@ from src.metric_formatting import display_or_dash, format_price, format_theme_ti
 from src.queries import (
     baseline_status,
     canonical_daily_window_status,
+    canonical_theme_history_window,
     canonical_theme_leadership_rank_history,
     canonical_theme_leadership_rank_history_long,
     theme_snapshot_history,
     theme_ticker_metrics,
+    theme_ticker_metrics_for_theme_ids,
     ticker_history_last_n_snapshots,
     ticker_history_last_n_trading_days,
     ticker_lookup_memberships,
@@ -46,6 +52,7 @@ from src.rankings import (
     visible_ticker_suppressed,
 )
 from src.theme_sync_status import ranked_canonical_sync_status
+from src.ticker_lookup_ui import render_compact_ticker_lookup
 from src.streamlit_utils import (
     clear_current_market_view_caches,
     db_cache_token,
@@ -67,9 +74,11 @@ from src.theme_selection import (
     SELECTED_THEME_ID_KEY,
     SELECTED_THEME_LABEL_KEY,
     SELECTED_THEME_SOURCE_KEY,
+    build_theme_option_maps,
+    build_theme_picker_options,
     describe_selection_source,
-    prepare_replaceable_selectbox_widget_key,
     ranked_theme_labels_for_search,
+    render_searchable_theme_picker,
     set_theme_selection_state,
     should_apply_selection_token,
 )
@@ -90,7 +99,9 @@ from src.theme_service import (
 )
 
 st.set_page_config(page_title="Themes", layout="wide")
-st.title("Themes")
+header_left, header_right = st.columns([4.4, 1.35], vertical_alignment="top")
+with header_left:
+    st.title("Themes")
 reset_perf_timings("themes")
 
 TICKER_COMPOSITE_CHART_TARGET_DAILY_POINTS = 20
@@ -115,6 +126,9 @@ if themes.empty:
     st.info("No themes found.")
     st.stop()
 
+with header_right:
+    render_compact_ticker_lookup(st, get_conn, key="themes_header_ticker_lookup")
+
 def _handled_selection_key(source: str) -> str:
     return f"{source}_handled_selection_token"
 
@@ -138,20 +152,7 @@ def _ranked_canonical_sync_status(latest_live_trading_value, ranked_canonical_va
 
 
 def _theme_option_maps(themes_df: pd.DataFrame) -> tuple[dict[str, int], dict[int, str], dict[str, int]]:
-    base_label_by_id: dict[int, str] = {}
-    base_counts: dict[str, int] = {}
-    for _, row in themes_df.iterrows():
-        theme_id = int(row["id"])
-        base_label = f"{row['name']} ({row['category']})"
-        base_label_by_id[theme_id] = base_label
-        base_counts[base_label] = base_counts.get(base_label, 0) + 1
-
-    label_by_id: dict[int, str] = {}
-    for theme_id, base_label in base_label_by_id.items():
-        label_by_id[theme_id] = f"{base_label} [#{theme_id}]" if base_counts.get(base_label, 0) > 1 else base_label
-
-    options = {label: theme_id for theme_id, label in label_by_id.items()}
-    return options, label_by_id, dict(options)
+    return build_theme_option_maps(themes_df)
 
 
 def _display_theme_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -395,6 +396,56 @@ def _format_rank_with_change(rank_value, prior_rank_value) -> str:
         return f"{rank_int}"
     rank_change = int(float(prior_rank_value) - float(rank_value))
     return f"{rank_int} ({rank_change:+d})"
+
+
+def _format_prior_rank_context(prior_rank, current_rank) -> str:
+    if prior_rank is None or current_rank is None or pd.isna(prior_rank) or pd.isna(current_rank):
+        return "-"
+    prior_rank_int = int(float(prior_rank))
+    current_rank_int = int(float(current_rank))
+    return f"{prior_rank_int} ({prior_rank_int - current_rank_int:+d})"
+
+
+def _prior_rank_from_canonical_history(history_df: pd.DataFrame, theme_id: int, *, require_prior_to_latest: bool) -> object | None:
+    if history_df.empty or "theme_id" not in history_df.columns or "rank" not in history_df.columns:
+        return None
+    history = history_df.copy()
+    history["snapshot_date"] = pd.to_datetime(history.get("snapshot_date"), errors="coerce")
+    history["rank"] = pd.to_numeric(history["rank"], errors="coerce")
+    theme_rows = history[(history["theme_id"] == int(theme_id)) & history["snapshot_date"].notna() & history["rank"].notna()].copy()
+    if theme_rows.empty:
+        return None
+    theme_rows = theme_rows.sort_values(["snapshot_date", "snapshot_time"] if "snapshot_time" in theme_rows.columns else ["snapshot_date"])
+    if require_prior_to_latest and theme_rows["snapshot_date"].dt.date.nunique() < 2:
+        return None
+    return theme_rows.iloc[0]["rank"]
+
+
+def _selected_theme_rank_history_context(conn, theme_id: int, current_rank) -> str:
+    if current_rank is None or pd.isna(current_rank):
+        return "1D - | 1W - | 1M -"
+
+    prior_1d_history = canonical_theme_leadership_rank_history_long(conn, [int(theme_id)], lookback_points=2)
+    prior_1d_rank = _prior_rank_from_canonical_history(prior_1d_history, theme_id, require_prior_to_latest=True)
+
+    prior_1w_rank = _prior_rank_from_canonical_history(
+        canonical_theme_history_window(conn, 7),
+        theme_id,
+        require_prior_to_latest=True,
+    )
+    prior_1m_rank = _prior_rank_from_canonical_history(
+        canonical_theme_history_window(conn, 30),
+        theme_id,
+        require_prior_to_latest=True,
+    )
+
+    return " | ".join(
+        [
+            f"1D {_format_prior_rank_context(prior_1d_rank, current_rank)}",
+            f"1W {_format_prior_rank_context(prior_1w_rank, current_rank)}",
+            f"1M {_format_prior_rank_context(prior_1m_rank, current_rank)}",
+        ]
+    )
 
 
 def _apply_prior_current_model_scores(display_df: pd.DataFrame) -> pd.DataFrame:
@@ -1091,6 +1142,65 @@ def _render_category_theme_drill(title: str, breakdown_df) -> None:
         st.caption("These are the underlying eligible themes for the selected category/window, sorted by the same theme-level metrics used to build the category summary.")
 
 
+def _render_theme_anomaly_snapshot(
+    baseline_df: pd.DataFrame,
+    anomaly_df: pd.DataFrame,
+    ticker_standout_df: pd.DataFrame,
+) -> None:
+    st.subheader("Theme Anomaly Snapshot")
+    st.caption(
+        "Display-only baseline and divergence view for current top themes. "
+        "Flags are deterministic comparisons against the current top-12 baseline and current member ticker moves."
+    )
+    if not baseline_df.empty:
+        baseline_cols = st.columns(len(baseline_df), gap="small")
+        for idx, (_, row) in enumerate(baseline_df.iterrows()):
+            with baseline_cols[idx]:
+                st.metric(str(row.get("metric") or "-"), str(row.get("value") or "-"))
+    st.caption(f"{len(anomaly_df)} theme anomalies | {len(ticker_standout_df)} ticker standouts")
+
+    if anomaly_df.empty and ticker_standout_df.empty:
+        st.info("No major top-theme baseline divergences flagged.")
+        return
+
+    if not anomaly_df.empty:
+        st.markdown("**Theme standouts vs top-12 baseline**")
+        render_dataframe(
+            "theme_anomaly_snapshot",
+            anomaly_df[["theme", "standout", "evidence", "basis"]],
+            width="stretch",
+            hide_index=True,
+            column_config=_current_table_column_config(
+                ["theme", "standout", "evidence", "basis"],
+                text_columns={"theme", "standout", "evidence", "basis"},
+            ) | {
+                "evidence": st.column_config.TextColumn("evidence", width="medium"),
+                "basis": st.column_config.TextColumn("basis", width="medium"),
+            },
+        )
+
+    if not ticker_standout_df.empty:
+        st.markdown("**Ticker standouts vs theme**")
+        ticker_display = ticker_standout_df.copy()
+        ticker_display = _apply_plain_value_formatting(
+            ticker_display,
+            percent_cols={"ticker_1d", "theme_avg_1d", "diff_vs_theme"},
+            percent_decimals=1,
+        )
+        render_dataframe(
+            "theme_ticker_standouts",
+            ticker_display[["ticker", "theme", "standout", "ticker_1d", "theme_avg_1d", "diff_vs_theme", "basis"]],
+            width="stretch",
+            hide_index=True,
+            column_config=_current_table_column_config(
+                ["ticker", "theme", "standout", "ticker_1d", "theme_avg_1d", "diff_vs_theme", "basis"],
+                text_columns={"ticker", "theme", "standout", "ticker_1d", "theme_avg_1d", "diff_vs_theme", "basis"},
+            ) | {
+                "basis": st.column_config.TextColumn("basis", width="large"),
+            },
+        )
+
+
 def _render_current_leadership(leadership_df, label_by_id: dict[int, str], *, show_daily_deltas: bool = False, prior_lookup: pd.DataFrame | None = None) -> None:
     st.subheader("Current Market Leadership")
     st.caption(
@@ -1703,10 +1813,52 @@ with explore_tab:
     current_1w_df = build_current_performance_table(current_theme_metrics, "avg_1w", top_k=10)
     current_1m_df = build_current_performance_table(current_theme_metrics, "avg_1m", top_k=10)
     current_delta_lookup, current_delta_latest_date, current_delta_prior_date = _resolve_prior_daily_endpoint(momentum_1m.get("history", pd.DataFrame()))
+    market_snapshot_df = pd.DataFrame()
+    top_theme_baseline_df = pd.DataFrame()
+    theme_anomaly_df = pd.DataFrame()
+    ticker_standout_df = pd.DataFrame()
+    if not current_rankings.empty and "theme_id" in current_rankings.columns:
+        ranking_theme_ids = current_rankings["theme_id"].dropna().astype(int).tolist()
+        current_top_theme_ids = current_rankings.head(12)["theme_id"].dropna().astype(int).tolist()
+        with get_conn() as conn:
+            prior_rank_history = canonical_theme_leadership_rank_history_long(
+                conn,
+                ranking_theme_ids,
+                lookback_points=2,
+            )
+            member_metrics = theme_ticker_metrics_for_theme_ids(conn, current_top_theme_ids)
+        if not member_metrics.empty:
+            member_metrics = member_metrics.copy()
+            member_metrics["snapshot_present"] = member_metrics.get("price").notna() if "price" in member_metrics.columns else False
+            member_metrics["visible_suppressed"] = member_metrics.apply(
+                lambda row: visible_ticker_suppressed(row.get("status", "active"), bool(row.get("manual_suppressed", False))),
+                axis=1,
+            )
+            member_metrics["snapshot_eligible"] = member_metrics.apply(
+                lambda row: current_ticker_is_eligible(
+                    row.get("price"),
+                    row.get("avg_volume"),
+                    "refresh_suppressed" if bool(row.get("visible_suppressed")) else row.get("status", "active"),
+                    snapshot_present=bool(row.get("snapshot_present")),
+                ),
+                axis=1,
+            )
+            member_metrics = member_metrics[member_metrics["snapshot_eligible"] == True].copy()
+        market_snapshot_df = build_market_theme_snapshot_table(
+            leadership_df,
+            member_metrics,
+            prior_rank_history,
+            top_k=12,
+        )
+        top_theme_baseline_df = build_top_theme_baseline_snapshot(market_snapshot_df)
+        theme_anomaly_df = build_theme_anomaly_snapshot_table(market_snapshot_df)
+        ticker_standout_df = build_theme_ticker_standout_table(market_snapshot_df, member_metrics)
 
     if leadership_df.empty:
         st.info("No active theme leadership data is available yet.")
     else:
+        _render_theme_anomaly_snapshot(top_theme_baseline_df, theme_anomaly_df, ticker_standout_df)
+        st.divider()
         show_leadership_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_leadership")
         if show_leadership_deltas:
             if current_delta_prior_date is not None:
@@ -1860,6 +2012,7 @@ with explore_tab:
     labels = ranked_theme_labels_for_search(list(options.keys()), "")
     default_theme_index = labels.index(selected_theme_label) if selected_theme_label in labels else None
     selection = labels[default_theme_index] if default_theme_index is not None else None
+    theme_picker_options = build_theme_picker_options(themes)
     picker_col, source_col = st.columns([3.5, 1.5])
     with picker_col:
         st.caption("Current theme")
@@ -1867,20 +2020,16 @@ with explore_tab:
             st.markdown(f"### {selection}")
         else:
             st.markdown("### Search and select a theme to view detail.")
-        st.markdown("")
-        theme_search_widget_key = prepare_replaceable_selectbox_widget_key(
+        selected_search = render_searchable_theme_picker(
+            st,
             st.session_state,
-            "theme_detail_view_search",
-            labels,
-            selection,
-        )
-        selected_search = st.selectbox(
-            "Theme detail view",
-            labels,
-            index=None,
-            placeholder="Type to search and select a different theme",
-            key=theme_search_widget_key,
-            label_visibility="collapsed",
+            label="Theme detail view",
+            options=theme_picker_options,
+            base_key="theme_detail_view_search",
+            current_label=selection,
+            search_label="Search themes",
+            search_placeholder="Type to filter themes",
+            select_placeholder="Choose theme",
         )
         if selected_search and str(selected_search) != str(selection or ""):
             selection = str(selected_search)
@@ -1965,24 +2114,21 @@ with explore_tab:
                 unsafe_allow_html=True,
             )
 
-        current_rank = "-"
+        current_rank = None
         if not current_rankings.empty and "theme_id" in current_rankings.columns:
             current_rank_lookup = current_rankings.reset_index(drop=True).copy()
             current_rank_lookup["current_rank"] = current_rank_lookup.index + 1
             current_rank_row = current_rank_lookup[current_rank_lookup["theme_id"] == theme_id]
             if not current_rank_row.empty:
                 current_rank = int(current_rank_row.iloc[0]["current_rank"])
-        window_rank_change = "—"
-        movement_summary = momentum_1w.get("window_summary", pd.DataFrame())
-        if not movement_summary.empty and "theme_id" in movement_summary.columns:
-            movement_row = movement_summary[movement_summary["theme_id"] == theme_id]
-            if not movement_row.empty and pd.notna(movement_row.iloc[0].get("rank_change")):
-                window_rank_change = f"{float(movement_row.iloc[0]['rank_change']):+.0f}"
+        rank_history_context = "1D - | 1W - | 1M -"
+        with get_conn() as conn:
+            rank_history_context = _selected_theme_rank_history_context(conn, theme_id, current_rank)
 
         summary_left, summary_mid, summary_right = st.columns([1.95, 4.1, 1.95], gap="small")
         with summary_mid:
             with st.container(border=True):
-                s1, s2, s3, s4 = st.columns(4, gap="small")
+                s1, s2, s3, s4 = st.columns([1, 1, 0.8, 2.2], gap="small")
                 with s1:
                     _render_summary_metric("Composite", _metric_value(current_row.get("composite_score")))
                 with s2:
@@ -1990,7 +2136,7 @@ with explore_tab:
                 with s3:
                     _render_summary_metric("Rank", current_rank)
                 with s4:
-                    _render_summary_metric("1W hist rank Δ", window_rank_change)
+                    _render_summary_metric("Rank History", rank_history_context)
 
                 st.markdown("<div style='height:0.25rem;'></div>", unsafe_allow_html=True)
                 s5, s6, s7, s8 = st.columns(4, gap="small")

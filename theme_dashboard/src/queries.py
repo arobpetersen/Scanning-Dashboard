@@ -2579,6 +2579,9 @@ def ticker_lookup_summary(conn, ticker: str) -> pd.DataFrame:
             ps.preferred_snapshot_source,
             ps.preferred_price,
             ps.preferred_avg_volume,
+            ps.preferred_perf_1w,
+            ps.preferred_perf_1m,
+            ps.preferred_perf_3m,
             CAST(ps.preferred_snapshot_time IS NOT NULL AS BOOLEAN) AS has_current_preferred_snapshot,
             CAST(
                 ps.preferred_snapshot_time IS NOT NULL

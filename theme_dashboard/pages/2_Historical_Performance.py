@@ -13,6 +13,7 @@ from src.queries import (
     theme_ticker_metrics_for_theme_ids,
 )
 from src.rankings import ticker_standardized_composite_score
+from src.ticker_lookup_ui import render_compact_ticker_lookup
 from src.streamlit_utils import (
     db_cache_token,
     load_current_ranking_operating_snapshot_cached,
@@ -22,7 +23,7 @@ from src.streamlit_utils import (
     reset_perf_timings,
     stop_for_database_error,
 )
-from src.theme_selection import set_theme_selection_state
+from src.theme_selection import build_theme_picker_options, render_searchable_theme_picker, set_theme_selection_state
 from src.theme_service import list_themes, seed_if_needed
 
 
@@ -117,26 +118,13 @@ def _open_theme_in_themes(theme_id, fallback_theme_name: str | None, label_by_id
 
 def _theme_option_maps(themes: pd.DataFrame) -> tuple[dict[int, str], dict[str, list[int]]]:
     ids_by_name: dict[str, list[int]] = {}
-    base_label_by_id: dict[int, str] = {}
-    base_counts: dict[str, int] = {}
-    for _, row in themes.iterrows():
-        theme_id = int(row["id"])
-        name = str(row["name"])
-        category = str(row["category"])
+    picker_options = build_theme_picker_options(themes)
+    for option in picker_options:
+        theme_id = int(option.theme_id)
+        name = str(option.name)
         ids_by_name.setdefault(name, []).append(theme_id)
-        base_label = f"{name} ({category})"
-        base_label_by_id[theme_id] = base_label
-        base_counts[base_label] = base_counts.get(base_label, 0) + 1
 
-    label_by_id: dict[int, str] = {}
-    for _, row in themes.iterrows():
-        theme_id = int(row["id"])
-        base_label = base_label_by_id[theme_id]
-        if base_counts.get(base_label, 0) > 1:
-            label_by_id[theme_id] = f"{base_label} [{theme_id}]"
-        else:
-            label_by_id[theme_id] = base_label
-
+    label_by_id = {option.theme_id: option.label for option in picker_options}
     return label_by_id, ids_by_name
 
 
@@ -370,12 +358,14 @@ def _attach_grid_top_tickers(grid: pd.DataFrame, *, top_k: int = 4) -> pd.DataFr
 
 
 st.set_page_config(page_title="Historical Performance", layout="wide")
-st.title("Historical Performance Research Grid")
-st.caption("Research workflow: audit current, historical, and ATR-companion theme behavior in one dense grid.")
-st.caption(
-    "Themes remains the curated operating page. Use this page as the primary historical comparison workbench; "
-    "lineage and audit helpers remain separate from the main rank-interpretation surface."
-)
+header_left, header_right = st.columns([4.4, 1.35], vertical_alignment="top")
+with header_left:
+    st.title("Historical Performance Research Grid")
+    st.caption("Research workflow: audit current, historical, and ATR-companion theme behavior in one dense grid.")
+    st.caption(
+        "Themes remains the curated operating page. Use this page as the primary historical comparison workbench; "
+        "lineage and audit helpers remain separate from the main rank-interpretation surface."
+    )
 reset_perf_timings("historical_performance")
 
 try:
@@ -387,6 +377,9 @@ except Exception as exc:
     stop_for_database_error(exc)
 db_token = db_cache_token()
 theme_label_by_id, theme_ids_by_name = _theme_option_maps(themes)
+
+with header_right:
+    render_compact_ticker_lookup(st, get_conn, key="historical_header_ticker_lookup")
 
 render_feedback_message(st.session_state, "historical_refresh_feedback")
 
@@ -597,29 +590,39 @@ render_dataframe(
 )
 
 if not filtered_grid.empty:
-    open_theme_options = (
+    open_theme_rows = (
         filtered_grid[["theme_id", "theme"]]
         .dropna(subset=["theme_id"])
         .drop_duplicates(subset=["theme_id"])
         .copy()
     )
-    open_theme_options["theme_label"] = open_theme_options.apply(
+    open_theme_rows["theme_label"] = open_theme_rows.apply(
         lambda row: _display_theme_name_from_row(row, theme_label_by_id, theme_ids_by_name),
         axis=1,
     )
-    open_theme_options = open_theme_options.sort_values("theme_label", kind="stable").reset_index(drop=True)
-    selected_theme_label = st.selectbox(
-        "Open theme in Themes detail",
-        options=open_theme_options["theme_label"].tolist(),
-        index=0,
-        key="historical_open_theme_label",
+    open_theme_ids = {int(value) for value in open_theme_rows["theme_id"].dropna().astype(int).tolist()}
+    open_theme_options = [
+        option for option in build_theme_picker_options(themes) if int(option.theme_id) in open_theme_ids
+    ]
+    open_theme_label_by_id = {int(option.theme_id): option.label for option in open_theme_options}
+    open_theme_id_by_label = {option.label: int(option.theme_id) for option in open_theme_options}
+    selected_theme_label = render_searchable_theme_picker(
+        st,
+        st.session_state,
+        label="Open theme in Themes detail",
+        options=open_theme_options,
+        base_key="historical_open_theme_label",
+        search_label="Search themes to open",
+        search_placeholder="Type to filter visible grid themes",
+        select_placeholder="Choose theme",
     )
-    if st.button(f"Open `{selected_theme_label}` in Themes detail", key="open_historical_grid_theme"):
-        selected_theme_row = open_theme_options.loc[open_theme_options["theme_label"] == selected_theme_label].iloc[0]
+    if selected_theme_label and st.button(f"Open `{selected_theme_label}` in Themes detail", key="open_historical_grid_theme"):
+        selected_theme_id = open_theme_id_by_label[str(selected_theme_label)]
+        selected_theme_row = open_theme_rows.loc[open_theme_rows["theme_id"].astype(int) == int(selected_theme_id)].iloc[0]
         _open_theme_in_themes(
             selected_theme_row.get("theme_id"),
             selected_theme_row.get("theme"),
-            theme_label_by_id,
+            open_theme_label_by_id,
             theme_ids_by_name,
             "historical_grid",
         )
