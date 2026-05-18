@@ -348,6 +348,8 @@ Current ticker detail source semantics:
 
 Selected-theme ticker detail scoring:
 - ticker-level `composite` now follows the same baseline-strength philosophy as the standardized theme composite, but without theme participation logic:
+- for the Themes selected-theme ticker table and bottom ticker-composite history chart, `perf_1w`, `perf_1m`, and `perf_3m` are clipped to `[-CURRENT_RANKING_RETURN_CAP_PCT, +CURRENT_RANKING_RETURN_CAP_PCT]` before ticker `composite` and `momentum` are calculated
+- raw `perf_1w`, `perf_1m`, and `perf_3m` remain visible in the ticker table; rows with any score input beyond the cap show `Score capped`
 
 ```text
 ticker_base_strength =

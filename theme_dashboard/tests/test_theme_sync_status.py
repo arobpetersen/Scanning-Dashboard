@@ -18,7 +18,7 @@ class ThemesSyncStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             label,
-            "Live current through 2026-04-21; canonical finalized through 2026-04-20",
+            "Latest refresh captured Apr 21 13:42; canonical finalized through 2026-04-20",
         )
 
     def test_after_hours_status_reports_latest_trading_day_sync(self):
@@ -29,7 +29,7 @@ class ThemesSyncStatusTests(unittest.TestCase):
             latest_finalizable_value="2026-04-21",
             as_of_et=as_of_et,
         )
-        self.assertEqual(label, "In sync with latest trading day")
+        self.assertEqual(label, "Market data current through 2026-04-21; canonical finalized through 2026-04-21")
 
     def test_intraday_does_not_report_in_sync_when_finalizable_and_live_inputs_differ(self):
         as_of_et = datetime(2026, 4, 21, 13, 42, tzinfo=EASTERN_TZ)

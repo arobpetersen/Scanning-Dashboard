@@ -14,6 +14,15 @@ def short_date_label(value) -> str:
     return stamp.strftime("%Y-%m-%d")
 
 
+def short_capture_label(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)) or pd.isna(value):
+        return "-"
+    stamp = pd.to_datetime(value, errors="coerce")
+    if pd.isna(stamp):
+        return str(value)
+    return stamp.strftime("%b %d %H:%M")
+
+
 def effective_latest_finalizable_trading_day(latest_live_trading_value, as_of_et=None):
     live_ts = pd.to_datetime(latest_live_trading_value, errors="coerce")
     if pd.isna(live_ts):
@@ -52,29 +61,32 @@ def ranked_canonical_sync_status(
     if pd.isna(live_day) and pd.isna(ranked_ts):
         return "Status unavailable"
     if pd.isna(live_day):
-        return "Latest live trading date unavailable"
+        return "Latest market-data trading date unavailable"
     if pd.isna(ranked_ts):
         return "Ranked canonical unavailable"
     if pd.isna(finalizable_ts):
         day_gap = int((live_day - ranked_ts.normalize()).days)
         if day_gap == 0:
-            return "In sync with latest trading day"
+            return "Market data and ranked canonical share latest trading day"
         if day_gap > 0:
             suffix = "day" if day_gap == 1 else "days"
-            return f"Live trading day ahead of ranked canonical by {day_gap} {suffix}"
+            return f"Market-data trading day ahead of ranked canonical by {day_gap} {suffix}"
         day_gap = abs(day_gap)
         suffix = "day" if day_gap == 1 else "days"
-        return f"Ranked canonical ahead of live trading day by {day_gap} {suffix}"
+        return f"Ranked canonical ahead of market-data trading day by {day_gap} {suffix}"
 
     ranked_day = ranked_ts.normalize()
     finalizable_day = finalizable_ts
     if ranked_day == finalizable_day:
         if live_day > finalizable_day:
             return (
-                f"Live current through {short_date_label(live_day)}; "
+                f"Latest refresh captured {short_capture_label(live_current_value)}; "
                 f"canonical finalized through {short_date_label(finalizable_day)}"
             )
-        return "In sync with latest trading day"
+        return (
+            f"Market data current through {short_date_label(finalizable_day)}; "
+            f"canonical finalized through {short_date_label(finalizable_day)}"
+        )
 
     day_gap = int((finalizable_day - ranked_day).days)
     if day_gap > 0:

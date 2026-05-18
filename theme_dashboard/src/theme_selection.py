@@ -24,6 +24,7 @@ SELECTION_SOURCE_LABELS = {
     "historical_table": "Historical table",
     "historical_detail": "Historical detail",
     "health_theme": "Health theme",
+    "market_scout": "Market Scout",
 }
 
 

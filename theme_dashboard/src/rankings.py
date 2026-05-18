@@ -259,7 +259,14 @@ def ticker_standardized_composite_score(
     perf_1w: int | float,
     perf_1m: int | float,
     perf_3m: int | float,
+    *,
+    cap_return_inputs: bool = False,
+    return_cap_pct: float = CURRENT_RANKING_RETURN_CAP_PCT,
 ) -> float:
+    if cap_return_inputs:
+        perf_1w = _cap_ticker_score_return_input(perf_1w, return_cap_pct)
+        perf_1m = _cap_ticker_score_return_input(perf_1m, return_cap_pct)
+        perf_3m = _cap_ticker_score_return_input(perf_3m, return_cap_pct)
     base_strength_score = standardized_base_strength_score(perf_1w, perf_1m, perf_3m)
     if pd.isna(base_strength_score):
         return float("nan")
@@ -272,9 +279,16 @@ def ticker_current_momentum_score(
     perf_1w: int | float,
     perf_1m: int | float,
     perf_3m: int | float,
+    *,
+    cap_return_inputs: bool = False,
+    return_cap_pct: float = CURRENT_RANKING_RETURN_CAP_PCT,
 ) -> float:
     if pd.isna(perf_1w) or pd.isna(perf_1m):
         return float("nan")
+    if cap_return_inputs:
+        perf_1w = _cap_ticker_score_return_input(perf_1w, return_cap_pct)
+        perf_1m = _cap_ticker_score_return_input(perf_1m, return_cap_pct)
+        perf_3m = _cap_ticker_score_return_input(perf_3m, return_cap_pct)
     standardized_composite_score = ticker_standardized_composite_score(perf_1w, perf_1m, perf_3m)
     momentum_raw_score = (
         CURRENT_MOMENTUM_WEIGHTS["perf_1w"] * float(perf_1w)
@@ -282,6 +296,26 @@ def ticker_current_momentum_score(
     )
     quality_factor = current_momentum_quality_factor(standardized_composite_score)
     return float(momentum_raw_score * quality_factor)
+
+
+def _cap_ticker_score_return_input(value: int | float, return_cap_pct: float = CURRENT_RANKING_RETURN_CAP_PCT) -> float:
+    if pd.isna(value):
+        return float("nan")
+    return float(np.clip(float(value), -float(return_cap_pct), float(return_cap_pct)))
+
+
+def ticker_score_return_inputs_exceed_cap(
+    perf_1w: int | float,
+    perf_1m: int | float,
+    perf_3m: int | float,
+    *,
+    return_cap_pct: float = CURRENT_RANKING_RETURN_CAP_PCT,
+) -> bool:
+    cap = abs(float(return_cap_pct))
+    for value in (perf_1w, perf_1m, perf_3m):
+        if pd.notna(value) and abs(float(value)) > cap:
+            return True
+    return False
 
 
 def _compute_theme_metrics(raw: pd.DataFrame) -> pd.DataFrame:

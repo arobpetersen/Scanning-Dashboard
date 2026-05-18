@@ -10,6 +10,23 @@ from src.eod_refresh import materialize_latest_canonical_day, refresh_run_stage_
 
 
 class TestLatestDailySync(unittest.TestCase):
+    def setUp(self):
+        self.ensure_qqq_patcher = patch(
+            "src.eod_refresh.ensure_qqq_market_context_history",
+            return_value={
+                "status": "already_current",
+                "ticker": "QQQ",
+                "target_date": "2026-04-15",
+                "latest_qqq_history_date_after": "2026-04-15",
+                "advanced": False,
+                "message": "QQQ context current through 2026-04-15.",
+            },
+        )
+        self.mock_ensure_qqq = self.ensure_qqq_patcher.start()
+
+    def tearDown(self):
+        self.ensure_qqq_patcher.stop()
+
     @patch("src.eod_refresh.refresh_run_stage_summary", return_value={
         "tickers_requested": 12,
         "tickers_updated": 10,
@@ -200,6 +217,240 @@ class TestLatestDailySync(unittest.TestCase):
         self.assertEqual(str(mock_run_append.call_args.kwargs.get("target_date")), "2026-04-20")
         mock_materialize.assert_called_once()
         mock_run_refresh.assert_called_once()
+
+    @patch("src.eod_refresh.refresh_run_stage_summary", return_value={
+        "tickers_requested": 12,
+        "tickers_updated": 12,
+        "tickers_failed": 0,
+        "tickers_suppressed": 0,
+        "tickers_skipped": 0,
+        "flagged_tickers": 0,
+        "api_call_count": 12,
+        "failed_tickers": [],
+    })
+    @patch("src.eod_refresh.latest_historical_append_date", side_effect=["2026-05-14", "2026-05-15", "2026-05-15"])
+    @patch("src.eod_refresh.latest_canonical_snapshot_date", side_effect=["2026-05-14", "2026-05-15"])
+    @patch("src.eod_refresh.latest_expected_trading_date", side_effect=["2026-05-14", "2026-05-15"])
+    @patch("src.eod_refresh.materialize_latest_canonical_day", return_value={
+        "status": "history_repaired",
+        "latest_expected_trading_date": "2026-05-15",
+        "latest_canonical_snapshot_date_before": "2026-05-14",
+        "latest_canonical_snapshot_date_after": "2026-05-15",
+        "advanced": True,
+        "row_count": 10,
+        "inserted_count": 10,
+        "ranked_row_count": 10,
+    })
+    @patch("src.eod_refresh.run_scheduled_historical_append", return_value={
+        "status": "success",
+        "snapshot_rows_written": 5,
+        "ticker_history_rows_written": 10,
+        "available_snapshot_dates": ["2026-05-15"],
+    })
+    @patch("src.eod_refresh.has_finalized_historical_append_for_date", return_value=False)
+    @patch("src.eod_refresh.has_historical_append_for_date", return_value=False)
+    @patch("src.eod_refresh.run_refresh", return_value=404)
+    @patch("src.eod_refresh.active_ticker_universe", return_value=["AAA", "BBB"])
+    @patch("src.eod_refresh.run_scheduled_eod_refresh")
+    @patch("src.eod_refresh.has_eod_run_for_date")
+    @patch("src.eod_refresh.is_trading_day", return_value=False)
+    @patch("src.eod_refresh.current_et", return_value=datetime(2026, 5, 17, 12, 0, tzinfo=ZoneInfo("America/New_York")))
+    def test_run_latest_daily_sync_weekend_targets_latest_completed_trading_day(
+        self,
+        _mock_current_et,
+        _mock_is_trading_day,
+        mock_has_eod,
+        mock_run_eod,
+        _mock_active_ticker_universe,
+        mock_run_refresh,
+        mock_has_append,
+        mock_has_finalized_append,
+        mock_run_append,
+        mock_materialize,
+        _mock_latest_expected,
+        _mock_latest_canonical,
+        _mock_latest_historical,
+        _mock_refresh_summary,
+    ):
+        progress_events: list[dict[str, object]] = []
+        self.mock_ensure_qqq.return_value = {
+            "status": "updated",
+            "ticker": "QQQ",
+            "target_date": "2026-05-15",
+            "latest_qqq_history_date_before": None,
+            "latest_qqq_history_date_after": "2026-05-15",
+            "rows_written": 80,
+            "advanced": True,
+            "message": "QQQ context updated through 2026-05-15.",
+        }
+
+        result = run_latest_daily_sync(MagicMock(), provider_name="live", progress_callback=progress_events.append)
+
+        self.assertEqual(result["status"], "success")
+        self.assertFalse(bool(result["trading_day"]))
+        self.assertEqual(str(result["finalization_target_date"]), "2026-05-15")
+        self.assertEqual(result["stages"]["live_refresh"]["status"], "refreshed")
+        self.assertEqual(result["stages"]["live_refresh"]["scope_type"], "daily_sync_live")
+        self.assertEqual(str(result["stages"]["historical_append"]["target_date"]), "2026-05-15")
+        self.assertEqual(result["stages"]["historical_append"]["status"], "success")
+        self.assertEqual(result["stages"]["market_context"]["status"], "updated")
+        self.assertEqual(result["stages"]["market_context"]["message"], "QQQ context updated through 2026-05-15.")
+        self.assertEqual(result["stages"]["canonical_materialization"]["status"], "history_repaired")
+        self.assertNotIn(
+            "skipped_non_trading_day",
+            {str((stage or {}).get("status") or "") for stage in result["stages"].values()},
+        )
+        self.assertNotIn(
+            "skipped_non_trading_day",
+            {str(event.get("stage_status") or "") for event in progress_events},
+        )
+        mock_has_eod.assert_not_called()
+        mock_run_eod.assert_not_called()
+        mock_run_refresh.assert_called_once()
+        mock_has_finalized_append.assert_called_once()
+        mock_has_append.assert_called_once()
+        self.assertEqual(str(mock_run_append.call_args.kwargs.get("target_date")), "2026-05-15")
+        mock_materialize.assert_called_once()
+        self.mock_ensure_qqq.assert_called_once()
+        self.assertEqual(str(self.mock_ensure_qqq.call_args.kwargs.get("target_date")), "2026-05-15")
+
+    @patch("src.eod_refresh.refresh_run_stage_summary", return_value={
+        "tickers_requested": 0,
+        "tickers_updated": 0,
+        "tickers_failed": 0,
+        "tickers_suppressed": 0,
+        "tickers_skipped": 0,
+        "flagged_tickers": 0,
+        "api_call_count": 0,
+        "failed_tickers": [],
+    })
+    @patch("src.eod_refresh.latest_historical_append_date", side_effect=["2026-05-15", "2026-05-15", "2026-05-15"])
+    @patch("src.eod_refresh.latest_canonical_snapshot_date", side_effect=["2026-05-15", "2026-05-15"])
+    @patch("src.eod_refresh.latest_expected_trading_date", side_effect=["2026-05-15", "2026-05-15"])
+    @patch("src.eod_refresh.materialize_latest_canonical_day", return_value={
+        "status": "already_current",
+        "latest_expected_trading_date": "2026-05-15",
+        "latest_canonical_snapshot_date_before": "2026-05-15",
+        "latest_canonical_snapshot_date_after": "2026-05-15",
+        "advanced": False,
+        "row_count": 10,
+        "inserted_count": 0,
+        "ranked_row_count": 10,
+    })
+    @patch("src.eod_refresh.has_finalized_historical_append_for_date", return_value=True)
+    @patch("src.eod_refresh.run_scheduled_historical_append")
+    @patch("src.eod_refresh.run_refresh")
+    @patch("src.eod_refresh.has_eod_run_for_date")
+    @patch("src.eod_refresh.is_trading_day", return_value=False)
+    @patch("src.eod_refresh.current_et", return_value=datetime(2026, 5, 17, 12, 0, tzinfo=ZoneInfo("America/New_York")))
+    def test_run_latest_daily_sync_weekend_noops_when_target_already_current(
+        self,
+        _mock_current_et,
+        _mock_is_trading_day,
+        mock_has_eod,
+        mock_run_refresh,
+        mock_run_append,
+        mock_has_finalized_append,
+        mock_materialize,
+        _mock_latest_expected,
+        _mock_latest_canonical,
+        _mock_latest_historical,
+        _mock_refresh_summary,
+    ):
+        self.mock_ensure_qqq.return_value = {
+            "status": "already_current",
+            "ticker": "QQQ",
+            "target_date": "2026-05-15",
+            "latest_qqq_history_date_before": "2026-05-15",
+            "latest_qqq_history_date_after": "2026-05-15",
+            "advanced": False,
+            "message": "QQQ context current through 2026-05-15.",
+        }
+        result = run_latest_daily_sync(MagicMock(), provider_name="live")
+
+        self.assertEqual(result["status"], "no_change")
+        self.assertEqual(str(result["finalization_target_date"]), "2026-05-15")
+        self.assertEqual(result["stages"]["live_refresh"]["status"], "already_current")
+        self.assertEqual(result["stages"]["market_context"]["status"], "already_current")
+        self.assertEqual(result["stages"]["historical_append"]["status"], "already_current")
+        self.assertEqual(result["stages"]["canonical_materialization"]["status"], "already_current")
+        mock_has_eod.assert_not_called()
+        mock_run_refresh.assert_not_called()
+        mock_run_append.assert_not_called()
+        mock_has_finalized_append.assert_called_once()
+        mock_materialize.assert_called_once()
+        self.mock_ensure_qqq.assert_called_once()
+
+    @patch("src.eod_refresh.refresh_run_stage_summary", return_value={
+        "tickers_requested": 0,
+        "tickers_updated": 0,
+        "tickers_failed": 0,
+        "tickers_suppressed": 0,
+        "tickers_skipped": 0,
+        "flagged_tickers": 0,
+        "api_call_count": 0,
+        "failed_tickers": [],
+    })
+    @patch("src.eod_refresh.latest_historical_append_date", side_effect=["2026-05-14", "2026-05-14", "2026-05-14"])
+    @patch("src.eod_refresh.latest_canonical_snapshot_date", side_effect=["2026-05-14", "2026-05-14"])
+    @patch("src.eod_refresh.latest_expected_trading_date", side_effect=["2026-05-14", "2026-05-14"])
+    @patch("src.eod_refresh.materialize_latest_canonical_day", return_value={
+        "status": "already_current",
+        "latest_expected_trading_date": "2026-05-14",
+        "latest_canonical_snapshot_date_before": "2026-05-14",
+        "latest_canonical_snapshot_date_after": "2026-05-14",
+        "advanced": False,
+        "row_count": 10,
+        "inserted_count": 0,
+        "ranked_row_count": 10,
+    })
+    @patch("src.eod_refresh.run_scheduled_historical_append", return_value={
+        "status": "success",
+        "snapshot_rows_written": 0,
+        "ticker_history_rows_written": 0,
+        "failed_tickers": ["AAA", "BBB"],
+        "available_snapshot_dates": [],
+    })
+    @patch("src.eod_refresh.has_finalized_historical_append_for_date", return_value=False)
+    @patch("src.eod_refresh.has_historical_append_for_date", return_value=False)
+    @patch("src.eod_refresh.run_refresh", return_value=None)
+    @patch("src.eod_refresh.active_ticker_universe", return_value=[])
+    @patch("src.eod_refresh.is_trading_day", return_value=False)
+    @patch("src.eod_refresh.current_et", return_value=datetime(2026, 5, 17, 12, 0, tzinfo=ZoneInfo("America/New_York")))
+    def test_run_latest_daily_sync_reports_provider_unavailable_for_weekend_target(
+        self,
+        _mock_current_et,
+        _mock_is_trading_day,
+        _mock_active_ticker_universe,
+        _mock_run_refresh,
+        _mock_has_append,
+        _mock_has_finalized_append,
+        _mock_run_append,
+        _mock_materialize,
+        _mock_latest_expected,
+        _mock_latest_canonical,
+        _mock_latest_historical,
+        _mock_refresh_summary,
+    ):
+        self.mock_ensure_qqq.return_value = {
+            "status": "provider_data_unavailable",
+            "ticker": "QQQ",
+            "target_date": "2026-05-15",
+            "latest_qqq_history_date_after": "2026-05-14",
+            "advanced": False,
+            "message": "QQQ context unavailable: provider data unavailable for 2026-05-15.",
+        }
+        result = run_latest_daily_sync(MagicMock(), provider_name="live")
+
+        append_stage = result["stages"]["historical_append"]
+        self.assertEqual(str(result["finalization_target_date"]), "2026-05-15")
+        self.assertEqual(append_stage["status"], "provider_data_unavailable")
+        self.assertEqual(append_stage["message"], "Provider data unavailable for target date 2026-05-15.")
+        self.assertEqual(
+            result["stages"]["market_context"]["message"],
+            "QQQ context unavailable: provider data unavailable for 2026-05-15.",
+        )
+        self.assertNotEqual(append_stage["status"], "skipped_non_trading_day")
 
     @patch("src.eod_refresh.refresh_run_stage_summary", return_value={
         "tickers_requested": 12,

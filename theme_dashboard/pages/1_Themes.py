@@ -24,6 +24,7 @@ from src.leaderboard_utils import (
     disambiguate_theme_labels,
     format_top_ticker_leaders,
 )
+from src.market_context import latest_qqq_history_date, latest_qqq_market_context, qqq_market_context_unavailable_message
 from src.metric_formatting import display_or_dash, format_price, format_theme_ticker_table, human_readable_number, short_timestamp
 from src.queries import (
     baseline_status,
@@ -45,6 +46,7 @@ from src.rankings import (
     current_ticker_coverage_status,
     current_ticker_is_eligible,
     ticker_current_momentum_score,
+    ticker_score_return_inputs_exceed_cap,
     ticker_standardized_composite_score,
     standardized_participation_factor,
     standardized_recovery_factor,
@@ -107,6 +109,40 @@ reset_perf_timings("themes")
 TICKER_COMPOSITE_CHART_TARGET_DAILY_POINTS = 20
 TICKER_COMPOSITE_CHART_TRADING_DAY_LOOKBACK = 140
 TICKER_COMPOSITE_CHART_RAW_SNAPSHOT_LIMIT = 160
+
+
+def _format_pct_metric(value: object) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    return f"{float(value):.2f}%"
+
+
+def _format_ratio_metric(value: object) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    return f"{float(value):.2f}x"
+
+
+def _render_qqq_market_tape_strip(context: dict[str, object] | None, unavailable_message: str | None = None) -> None:
+    st.caption("QQQ-only market tape context from stored daily history.")
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    if not context:
+        c1.metric("QQQ % Change", "-")
+        c2.metric("Move Label", "Unavailable")
+        c3.metric("Character Tag", "-")
+        c4.metric("Gap %", "-")
+        c5.metric("Close Position", "-")
+        c6.metric("Range x ATR(14)", "-")
+        st.caption(unavailable_message or qqq_market_context_unavailable_message())
+        return
+    c1.metric("QQQ % Change", _format_pct_metric(context.get("qqq_pct_change")))
+    c2.metric("Move Label", str(context.get("move_label") or "-"))
+    c3.metric("Character Tag", str(context.get("character_tag") or "-"))
+    c4.metric("Gap %", _format_pct_metric(context.get("gap_pct")))
+    c5.metric("Close Position", _format_pct_metric(context.get("close_position_pct")))
+    c6.metric("Range x ATR(14)", _format_ratio_metric(context.get("range_x_atr_14")))
+    if context.get("trading_date"):
+        st.caption(f"QQQ context date `{context.get('trading_date')}`")
 CURRENT_LEADERSHIP_TREND_POINTS = 10
 CURRENT_RANK_MOVER_LOOKBACK_POINTS = 5
 CURRENT_RANK_PERSISTENCE_LOOKBACK_POINTS = 6
@@ -519,11 +555,27 @@ def _apply_ticker_model_scores(ticker_df: pd.DataFrame) -> pd.DataFrame:
     out["perf_1m"] = pd.to_numeric(out.get("perf_1m"), errors="coerce")
     out["perf_3m"] = pd.to_numeric(out.get("perf_3m"), errors="coerce")
     out["ticker_composite_score"] = out.apply(
-        lambda row: ticker_standardized_composite_score(row.get("perf_1w"), row.get("perf_1m"), row.get("perf_3m")),
+        lambda row: ticker_standardized_composite_score(
+            row.get("perf_1w"),
+            row.get("perf_1m"),
+            row.get("perf_3m"),
+            cap_return_inputs=True,
+        ),
         axis=1,
     )
     out["ticker_momentum_score"] = out.apply(
-        lambda row: ticker_current_momentum_score(row.get("perf_1w"), row.get("perf_1m"), row.get("perf_3m")),
+        lambda row: ticker_current_momentum_score(
+            row.get("perf_1w"),
+            row.get("perf_1m"),
+            row.get("perf_3m"),
+            cap_return_inputs=True,
+        ),
+        axis=1,
+    )
+    out["score_note"] = out.apply(
+        lambda row: "Score capped"
+        if ticker_score_return_inputs_exceed_cap(row.get("perf_1w"), row.get("perf_1m"), row.get("perf_3m"))
+        else "",
         axis=1,
     )
     out["has_current_usable_snapshot"] = out.apply(
@@ -1769,15 +1821,14 @@ with explore_tab:
     latest_expected_trading_date = canonical_window_row.get("latest_expected_trading_date") if canonical_window_row is not None else None
     latest_raw_canonical_date = canonical_window_row.get("latest_raw_canonical_date") if canonical_window_row is not None else None
     latest_ranked_canonical_date = canonical_window_row.get("latest_ranked_canonical_date") if canonical_window_row is not None else None
-    current_live_trading_date = _short_date_label(current_live_reference)
     sync_status_label = ranked_canonical_sync_status(
         current_live_reference,
         latest_ranked_canonical_date,
         latest_finalizable_value=latest_expected_trading_date,
     )
     freshness_c1, freshness_c2, freshness_c3, freshness_c4 = st.columns([1.1, 1.0, 1.35, 1.15])
-    freshness_c1.metric("Current live snapshot", current_snapshot_label or "-")
-    freshness_c2.metric("Latest ranked canonical date", _short_date_label(latest_ranked_canonical_date))
+    freshness_c1.metric("Latest refresh captured", current_snapshot_label or "-")
+    freshness_c2.metric("Market data through", _short_date_label(latest_expected_trading_date))
     freshness_c3.metric("Sync status", sync_status_label)
     with freshness_c4:
         if st.button("Reload latest DB state", key="themes_force_refresh"):
@@ -1792,9 +1843,17 @@ with explore_tab:
             )
             st.rerun()
         st.caption("Light reload only. Use Apps for daily sync/finalization.")
+    with get_conn() as conn:
+        qqq_market_context = latest_qqq_market_context(conn)
+        latest_qqq_date = latest_qqq_history_date(conn)
+    qqq_unavailable_message = qqq_market_context_unavailable_message(
+        latest_qqq_history_date_value=latest_qqq_date,
+        target_date=latest_ranked_canonical_date,
+    )
+    _render_qqq_market_tape_strip(qqq_market_context, qqq_unavailable_message)
     with st.expander("Snapshot details", expanded=False):
         detail_c1, detail_c2, detail_c3 = st.columns(3)
-        detail_c1.metric("Latest live trading date", current_live_trading_date)
+        detail_c1.metric("Latest ranked canonical date", _short_date_label(latest_ranked_canonical_date))
         detail_c2.metric("Latest raw canonical date", _short_date_label(latest_raw_canonical_date))
         detail_c3.metric("Latest ranked canonical window end", short_timestamp(latest_ranked_window_end) or "-")
         if canonical_window_row is not None and bool(canonical_window_row.get("raw_vs_ranked_date_differs")):
@@ -2227,6 +2286,7 @@ with explore_tab:
                 "perf_6m",
                 "ticker_composite_score",
                 "ticker_momentum_score",
+                "score_note",
                 "market_cap",
                 "avg_volume",
                 "dollar_volume",
@@ -2247,6 +2307,7 @@ with explore_tab:
             "suppressed": "suppressed",
             "ticker_composite_score": "composite",
             "ticker_momentum_score": "momentum",
+            "score_note": "score note",
             "last_updated": "market_data_time",
             "snapshot_time": "snapshot_time",
             "latest_refresh_time": "last_refresh_time",

@@ -24,6 +24,7 @@ def _stage_status_label(status: object) -> str:
     mapping = {
         "queued": "Queued",
         "running": "Running",
+        "updated": "Updated",
         "refreshed": "Refreshed",
         "success": "Success",
         "partial": "Partial",
@@ -37,6 +38,8 @@ def _stage_status_label(status: object) -> str:
         "repaired_unranked_existing": "Repaired latest day",
         "repaired_intraday_same_day": "Rebuilt same-day final",
         "deferred_until_eod": "Deferred until EOD",
+        "provider_data_unavailable": "Provider data unavailable",
+        "no_valid_target_trading_day": "No valid target trading day",
         "no_change": "No change",
         "no_ticker_history": "No ticker history",
         "missing": "Missing",
@@ -50,15 +53,17 @@ def _yes_no(value: object) -> str:
 
 DAILY_SYNC_STAGE_LABELS = {
     "live_refresh": "Live refresh",
+    "market_context": "Market context",
     "historical_append": "Historical append",
     "canonical_materialization": "Canonical",
 }
 
-DAILY_SYNC_STAGE_ORDER = ["live_refresh", "historical_append", "canonical_materialization"]
+DAILY_SYNC_STAGE_ORDER = ["live_refresh", "market_context", "historical_append", "canonical_materialization"]
 DAILY_SYNC_TERMINAL_SUCCESS_STATUSES = {
     "already_current",
     "success",
     "partial",
+    "updated",
     "refreshed",
     "history_repaired",
     "materialized",
@@ -66,6 +71,8 @@ DAILY_SYNC_TERMINAL_SUCCESS_STATUSES = {
     "repaired_unranked_existing",
     "repaired_intraday_same_day",
     "deferred_until_eod",
+    "provider_data_unavailable",
+    "no_valid_target_trading_day",
     "skipped_non_trading_day",
     "not_run",
     "no_change",
@@ -93,7 +100,7 @@ def _initial_running_stage_state() -> dict[str, object]:
         "stage_label": "Daily sync",
         "stage_status": "running",
         "summary": "Run daily sync/finalize now: started.",
-        "detail": "Stages run in order: live refresh, historical append, then canonical materialization.",
+        "detail": "Stages run in order: live refresh, market context, historical append, then canonical materialization.",
         "updated_at_label": _status_timestamp_label(),
         "active_stage": None,
         "stages": stages,
@@ -139,10 +146,14 @@ def _sync_status_summary(sync_result: dict[str, object]) -> tuple[str, str, str]
     finalization_eligible = bool(sync_result.get("finalization_eligible"))
     finalization_deferred = any(status == "deferred_until_eod" for status in stage_statuses)
     has_failures = any(status == "failed" for status in stage_statuses)
-    has_changes = any(status in {"refreshed", "success", "partial", "history_repaired", "materialized", "materialized_from_run", "repaired_unranked_existing", "repaired_intraday_same_day"} for status in stage_statuses)
+    provider_unavailable = any(status == "provider_data_unavailable" for status in stage_statuses)
+    has_changes = any(status in {"refreshed", "success", "partial", "updated", "history_repaired", "materialized", "materialized_from_run", "repaired_unranked_existing", "repaired_intraday_same_day"} for status in stage_statuses)
     has_live_refresh = str(((stages.get("live_refresh") or {}).get("status") or "")) == "refreshed"
 
-    if has_failures and not canonical_current and not has_changes:
+    if provider_unavailable:
+        state = "Provider data unavailable for target date"
+        level = "warning"
+    elif has_failures and not canonical_current and not has_changes:
         state = "Failed"
         level = "error"
     elif finalization_deferred and has_failures:
@@ -161,7 +172,7 @@ def _sync_status_summary(sync_result: dict[str, object]) -> tuple[str, str, str]
         state = "Already current"
         level = "info"
     elif canonical_current:
-        state = "Current through latest trading day"
+        state = "Market data and canonical current"
         level = "success"
     elif has_changes:
         state = "Partial sync"
@@ -171,20 +182,24 @@ def _sync_status_summary(sync_result: dict[str, object]) -> tuple[str, str, str]
         level = "error"
 
     detail = (
-        f"Expected `{latest_expected or '-'}` | "
+        f"Market data `{latest_expected or '-'}` | "
         f"Historical `{sync_result.get('latest_historical_snapshot_date_after') or '-'}` | "
-        f"Canonical `{latest_canonical or '-'}`"
+        f"Canonical finalized `{latest_canonical or '-'}`"
     )
     if finalization_deferred:
         detail = f"{detail} | Finalization `deferred until EOD window`"
     elif not finalization_eligible and sync_result.get("finalization_target_date"):
         detail = f"{detail} | Finalized target `{sync_result.get('finalization_target_date')}`"
+    market_context_message = str(((stages.get("market_context") or {}).get("message") or "")).strip()
+    if market_context_message:
+        detail = f"{detail} | {market_context_message}"
     return state, level, detail
 
 
 def _render_daily_sync_status(container, sync_result: dict[str, object]) -> None:
     stages = sync_result.get("stages", {}) or {}
     live_stage = stages.get("live_refresh", {}) or {}
+    market_context_stage = stages.get("market_context", {}) or {}
     append_stage = stages.get("historical_append", {}) or {}
     canonical_stage = stages.get("canonical_materialization", {}) or {}
     live_summary = live_stage.get("refresh_run_summary", {}) or {}
@@ -202,7 +217,7 @@ def _render_daily_sync_status(container, sync_result: dict[str, object]) -> None
         container.error(summary_line)
     container.caption(detail)
 
-    live_col, append_col, canonical_col = container.columns(3)
+    live_col, market_context_col, append_col, canonical_col = container.columns(4)
     with live_col:
         st.markdown("**Live refresh**")
         st.caption(_stage_status_label(live_stage.get("status")))
@@ -214,6 +229,16 @@ def _render_daily_sync_status(container, sync_result: dict[str, object]) -> None
         st.write(f"Suppressed: `{int(live_summary.get('tickers_suppressed') or 0)}`")
         if live_stage.get("run_id"):
             st.caption(f"Run #{int(live_stage['run_id'])} | API calls `{int(live_summary.get('api_call_count') or 0)}`")
+
+    with market_context_col:
+        st.markdown("**Market context**")
+        st.caption(_stage_status_label(market_context_stage.get("status")))
+        if market_context_stage.get("target_date"):
+            st.caption(f"Target date `{market_context_stage.get('target_date')}`")
+        st.write(f"QQQ latest day: `{market_context_stage.get('latest_qqq_history_date_after') or '-'}`")
+        st.write(f"Rows written: `{int(market_context_stage.get('rows_written') or 0)}`")
+        if market_context_stage.get("message"):
+            st.caption(str(market_context_stage.get("message")))
 
     with append_col:
         st.markdown("**Historical append**")
@@ -228,6 +253,8 @@ def _render_daily_sync_status(container, sync_result: dict[str, object]) -> None
             st.write("Same-day rebuild: `Yes`")
         if append_stage.get("reused_existing_same_day_state"):
             st.write("Reused existing same-day state: `Yes`")
+        if append_stage.get("message"):
+            st.caption(str(append_stage.get("message")))
         st.caption(f"Latest historical day `{append_stage.get('latest_historical_snapshot_date_after') or '-'}`")
 
     with canonical_col:
@@ -293,7 +320,7 @@ def _render_daily_sync_running_status(container, running_status: dict[str, objec
     workflow_c2.metric("Active stage", active_stage_label)
     workflow_c3.metric("Run alive", "Yes")
 
-    stage_cols = container.columns(3)
+    stage_cols = container.columns(len(DAILY_SYNC_STAGE_ORDER))
     for idx, stage_key in enumerate(DAILY_SYNC_STAGE_ORDER):
         stage_payload = stages.get(stage_key) or {}
         with stage_cols[idx]:

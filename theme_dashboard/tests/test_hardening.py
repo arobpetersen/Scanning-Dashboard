@@ -134,6 +134,7 @@ from src.rankings import (
     compute_current_ranking_snapshot,
     compute_theme_rankings,
     ticker_current_momentum_score,
+    ticker_score_return_inputs_exceed_cap,
     ticker_standardized_composite_score,
     standardized_participation_factor,
     standardized_recovery_factor,
@@ -1379,6 +1380,21 @@ class TestStandardizedCompositeScore(unittest.TestCase):
         stronger = float(ticker_current_momentum_score(16.0, 14.0, -8.0))
         weaker = float(ticker_current_momentum_score(16.0, 6.0, -28.0))
         self.assertGreater(stronger, weaker)
+
+    def test_ticker_scores_can_use_current_ranking_return_cap_for_display(self):
+        capped_composite = float(
+            ticker_standardized_composite_score(120.0, 90.0, 80.0, cap_return_inputs=True)
+        )
+        capped_momentum = float(
+            ticker_current_momentum_score(120.0, 90.0, 80.0, cap_return_inputs=True)
+        )
+
+        self.assertAlmostEqual(capped_composite, 50.0, places=6)
+        self.assertAlmostEqual(capped_momentum, 50.0, places=6)
+        self.assertLess(capped_composite, float(ticker_standardized_composite_score(120.0, 90.0, 80.0)))
+        self.assertLess(capped_momentum, float(ticker_current_momentum_score(120.0, 90.0, 80.0)))
+        self.assertTrue(ticker_score_return_inputs_exceed_cap(120.0, 90.0, 80.0))
+        self.assertFalse(ticker_score_return_inputs_exceed_cap(12.0, 9.0, 8.0))
 
     def test_current_ticker_is_eligible_matches_current_snapshot_rules(self):
         self.assertTrue(current_ticker_is_eligible(12.0, 2_000_000.0, "active", snapshot_present=True))
@@ -4406,8 +4422,8 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn("turn on `Include suppressed tickers` to inspect them", content)
         self.assertIn("No preferred-source theme history rows are available yet for this selected theme.", content)
         self.assertIn('render_feedback_message(st.session_state, "themes_refresh_feedback")', content)
-        self.assertIn('freshness_c1.metric("Current live snapshot"', content)
-        self.assertIn('freshness_c2.metric("Latest ranked canonical date"', content)
+        self.assertIn('freshness_c1.metric("Latest refresh captured"', content)
+        self.assertIn('freshness_c2.metric("Market data through"', content)
         self.assertIn('show_leadership_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_leadership")', content)
         self.assertIn('show_current_1w_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_current_1w")', content)
         self.assertIn('show_current_1m_deltas = st.toggle("Show daily deltas", value=False, key="themes_show_daily_deltas_current_1m")', content)
@@ -4481,8 +4497,12 @@ class TestManualTickerSuppression(unittest.TestCase):
         self.assertIn('chart_df[["date", "ticker", "composite"]]', content)
         self.assertIn('"yearmonthdate(date):O"', content)
         self.assertIn('st.altair_chart(chart, width="stretch")', content)
+        self.assertIn("cap_return_inputs=True", content)
+        self.assertIn('out["score_note"] = out.apply(', content)
+        self.assertIn('"Score capped"', content)
         self.assertIn('"ticker_composite_score": "composite"', content)
         self.assertIn('"ticker_momentum_score": "momentum"', content)
+        self.assertIn('"score_note": "score note"', content)
         self.assertIn("Bottom chart shows ticker-level composite history for the current top 5 visible governed tickers in this theme", content)
         self.assertIn("theme_ticker_metrics(conn, theme_id, include_suppressed=True)", content)
         self.assertIn('include_suppressed_tickers = st.checkbox(', content)

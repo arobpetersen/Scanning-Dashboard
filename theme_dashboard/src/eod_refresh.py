@@ -6,6 +6,7 @@ from typing import Callable
 
 from .fetch_data import run_refresh
 from .historical_backfill import run_daily_historical_append
+from .market_context import ensure_qqq_market_context_history
 from .rankings import backfill_canonical_theme_daily_snapshots_for_recent_trading_days, persist_canonical_theme_daily_snapshot_for_run
 from .theme_service import active_ticker_universe
 from .trading_day_status import (
@@ -31,6 +32,21 @@ def _finished_at_is_finalized_for_date(finished_at: datetime | None, target_date
     if finished_et is None:
         return False
     return bool(finished_et.date() == target_date and reached_eod_window(finished_et))
+
+
+def _date_at_least(value, target) -> bool:
+    if value is None or target is None:
+        return False
+    try:
+        value_date = value.date() if isinstance(value, datetime) else value
+        target_date = target.date() if isinstance(target, datetime) else target
+        if isinstance(value_date, str):
+            value_date = date.fromisoformat(value_date[:10])
+        if isinstance(target_date, str):
+            target_date = date.fromisoformat(target_date[:10])
+        return bool(value_date >= target_date)
+    except Exception:
+        return False
 
 
 def has_eod_run_for_date(conn, as_of_et: datetime) -> bool:
@@ -449,27 +465,14 @@ def run_latest_daily_sync(
             return
         progress_callback({"stage": stage, **fields})
 
-    if not trading_day:
-        emit_progress(
-            "live_refresh",
-            stage_label="Live refresh",
-            stage_status="skipped_non_trading_day",
-            summary="Live refresh skipped because today is not a trading day.",
-            detail=f"Target date `{target_date}`.",
-        )
-        stages["live_refresh"] = {
-            "status": "skipped_non_trading_day",
-            "run_id": None,
-            "target_date": target_date,
-            "finalization_eligible": can_finalize_today,
-            "scope_type": None,
-        }
-    elif can_finalize_today and has_eod_run_for_date(conn, now_et):
+    live_current_for_target = bool(_date_at_least(latest_expected_before, finalization_target_date))
+
+    if can_finalize_today and has_eod_run_for_date(conn, now_et):
         emit_progress(
             "live_refresh",
             stage_label="Live refresh",
             stage_status="already_current",
-            summary="Live refresh already finalized for today.",
+            summary="Live refresh already finalized for target date.",
             detail=f"Target date `{target_date}`.",
         )
         stages["live_refresh"] = {
@@ -478,6 +481,22 @@ def run_latest_daily_sync(
             "target_date": target_date,
             "finalization_eligible": can_finalize_today,
             "scope_type": "scheduled_eod",
+            "refresh_run_summary": refresh_run_stage_summary(conn, None),
+        }
+    elif not can_finalize_today and live_current_for_target:
+        emit_progress(
+            "live_refresh",
+            stage_label="Live refresh",
+            stage_status="already_current",
+            summary="Live refresh already current for target date.",
+            detail=f"Target date `{finalization_target_date}`.",
+        )
+        stages["live_refresh"] = {
+            "status": "already_current",
+            "run_id": None,
+            "target_date": finalization_target_date,
+            "finalization_eligible": can_finalize_today,
+            "scope_type": "daily_sync_live",
             "refresh_run_summary": refresh_run_stage_summary(conn, None),
         }
     else:
@@ -565,33 +584,52 @@ def run_latest_daily_sync(
                 detail=str(exc),
             )
 
-    if not trading_day:
+    try:
         emit_progress(
-            "historical_append",
-            stage_label="Historical append",
-            stage_status="skipped_non_trading_day",
-            summary="Historical append skipped because today is not a trading day.",
-            detail=f"Target date `{target_date}`.",
+            "market_context",
+            stage_label="Market context",
+            stage_status="running",
+            summary="Ensuring QQQ context history for target date.",
+            detail=f"Target date `{finalization_target_date}`.",
         )
-        stages["historical_append"] = {
-            "status": "skipped_non_trading_day",
-            "target_date": target_date,
-            "latest_historical_snapshot_date_before": latest_historical_before,
-            "latest_historical_snapshot_date_after": latest_historical_before,
+        market_context_result = ensure_qqq_market_context_history(
+            conn,
+            target_date=finalization_target_date,
+        )
+        stages["market_context"] = market_context_result
+        emit_progress(
+            "market_context",
+            stage_label="Market context",
+            stage_status=market_context_result.get("status"),
+            summary=str(market_context_result.get("message") or "QQQ context stage finished."),
+            detail=f"Target date `{finalization_target_date}`.",
+        )
+    except Exception as exc:
+        stages["market_context"] = {
+            "status": "failed",
+            "target_date": finalization_target_date,
             "advanced": False,
-            "finalization_eligible": can_finalize_today,
-            "same_day_repair_performed": False,
+            "message": str(exc),
+            "error": str(exc),
         }
-    elif finalization_target_date is None:
+        emit_progress(
+            "market_context",
+            stage_label="Market context",
+            stage_status="failed",
+            summary="QQQ context failed.",
+            detail=str(exc),
+        )
+
+    if finalization_target_date is None:
         emit_progress(
             "historical_append",
             stage_label="Historical append",
-            stage_status="deferred_until_eod",
-            summary="Historical append deferred until the EOD window.",
+            stage_status="no_valid_target_trading_day",
+            summary="Historical append skipped because no valid target trading day exists.",
             detail=f"Target date `{target_date}`.",
         )
         stages["historical_append"] = {
-            "status": "deferred_until_eod",
+            "status": "no_valid_target_trading_day",
             "target_date": target_date,
             "latest_historical_snapshot_date_before": latest_historical_before,
             "latest_historical_snapshot_date_after": latest_historical_before,
@@ -604,7 +642,7 @@ def run_latest_daily_sync(
             "historical_append",
             stage_label="Historical append",
             stage_status="already_current",
-            summary="Historical append already finalized for today.",
+            summary="Historical append already finalized for target date.",
             detail=f"Target date `{finalization_target_date}`.",
         )
         stages["historical_append"] = {
@@ -638,6 +676,7 @@ def run_latest_daily_sync(
             raw_failed_tickers = list((append_result or {}).get("failed_tickers") or [])
             ticker_history_rows_written = int((append_result or {}).get("ticker_history_rows_written") or 0)
             snapshot_rows_written = int((append_result or {}).get("snapshot_rows_written") or 0)
+            available_snapshot_dates = list((append_result or {}).get("available_snapshot_dates") or [])
             historical_current_for_target_day = bool(str(latest_historical_after or "") == str(finalization_target_date))
             reused_existing_same_day_state = bool(
                 same_day_intraday_append_exists
@@ -649,6 +688,14 @@ def run_latest_daily_sync(
             reported_failed_tickers = [] if reused_existing_same_day_state else raw_failed_tickers
             if same_day_intraday_append_exists and append_status in {"success", "partial"}:
                 append_status = "repaired_intraday_same_day"
+            elif (
+                not historical_current_for_target_day
+                and ticker_history_rows_written <= 0
+                and snapshot_rows_written <= 0
+                and raw_failed_tickers
+                and str(finalization_target_date) not in {str(value) for value in available_snapshot_dates}
+            ):
+                append_status = "provider_data_unavailable"
             stages["historical_append"] = {
                 "status": append_status,
                 "target_date": finalization_target_date,
@@ -658,13 +705,18 @@ def run_latest_daily_sync(
                 "snapshot_rows_skipped": int((append_result or {}).get("snapshot_rows_skipped") or 0),
                 "failed_tickers": reported_failed_tickers,
                 "raw_failed_tickers": raw_failed_tickers,
-                "available_snapshot_dates": list((append_result or {}).get("available_snapshot_dates") or []),
+                "available_snapshot_dates": available_snapshot_dates,
                 "latest_historical_snapshot_date_before": latest_historical_before,
                 "latest_historical_snapshot_date_after": latest_historical_after,
                 "finalization_eligible": can_finalize_today,
                 "same_day_repair_performed": same_day_intraday_append_exists,
                 "reused_existing_same_day_state": reused_existing_same_day_state,
                 "historical_current_for_target_day": historical_current_for_target_day,
+                "message": (
+                    f"Provider data unavailable for target date {finalization_target_date}."
+                    if append_status == "provider_data_unavailable"
+                    else None
+                ),
                 "advanced": bool(
                     str(latest_historical_after or "") == str(finalization_target_date)
                     and str(latest_historical_before or "") != str(latest_historical_after or "")
@@ -676,6 +728,9 @@ def run_latest_daily_sync(
                 stage_status=append_status,
                 summary="Historical append stage finished.",
                 detail=(
+                    f"Provider data unavailable for target date `{finalization_target_date}`."
+                    if append_status == "provider_data_unavailable"
+                    else
                     f"Ticker rows `{int((append_result or {}).get('ticker_history_rows_written') or 0)}` | "
                     f"Theme rows `{int((append_result or {}).get('snapshot_rows_written') or 0)}`."
                 ),
@@ -699,35 +754,16 @@ def run_latest_daily_sync(
                 detail=str(exc),
             )
 
-    if not trading_day:
+    if finalization_target_date is None:
         emit_progress(
             "canonical_materialization",
             stage_label="Canonical materialization",
-            stage_status="skipped_non_trading_day",
-            summary="Canonical materialization skipped because today is not a trading day.",
+            stage_status="no_valid_target_trading_day",
+            summary="Canonical materialization skipped because no valid target trading day exists.",
             detail=f"Target date `{target_date}`.",
         )
         stages["canonical_materialization"] = {
-            "status": "skipped_non_trading_day",
-            "latest_expected_trading_date": latest_expected_before,
-            "latest_canonical_snapshot_date_before": latest_canonical_before,
-            "latest_canonical_snapshot_date_after": latest_canonical_before,
-            "advanced": False,
-            "row_count": 0,
-            "inserted_count": 0,
-            "finalization_eligible": can_finalize_today,
-            "same_day_repair_performed": False,
-        }
-    elif finalization_target_date is None:
-        emit_progress(
-            "canonical_materialization",
-            stage_label="Canonical materialization",
-            stage_status="deferred_until_eod",
-            summary="Canonical materialization deferred until the EOD window.",
-            detail=f"Target date `{target_date}`.",
-        )
-        stages["canonical_materialization"] = {
-            "status": "deferred_until_eod",
+            "status": "no_valid_target_trading_day",
             "latest_expected_trading_date": latest_expected_before,
             "latest_canonical_snapshot_date_before": latest_canonical_before,
             "latest_canonical_snapshot_date_after": latest_canonical_before,
@@ -788,7 +824,9 @@ def run_latest_daily_sync(
     stage_statuses = [str(stage.get("status") or "") for stage in stages.values()]
     if any(status == "failed" for status in stage_statuses):
         overall_status = "partial"
-    elif any(status in {"refreshed", "success", "partial", "history_repaired", "materialized", "repaired_intraday_same_day"} for status in stage_statuses):
+    elif any(status == "provider_data_unavailable" for status in stage_statuses):
+        overall_status = "partial"
+    elif any(status in {"refreshed", "success", "partial", "updated", "history_repaired", "materialized", "repaired_intraday_same_day"} for status in stage_statuses):
         overall_status = "success"
     else:
         overall_status = "no_change"
